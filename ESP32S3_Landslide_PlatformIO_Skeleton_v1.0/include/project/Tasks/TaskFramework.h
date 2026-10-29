@@ -17,6 +17,7 @@ enum class TaskId : std::uint8_t {
     Risk,
     Logger,
     Diagnostics,
+    Watchdog,
     Count
 };
 

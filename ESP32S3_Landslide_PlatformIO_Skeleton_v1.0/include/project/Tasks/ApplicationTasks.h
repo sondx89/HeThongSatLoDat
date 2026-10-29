@@ -5,6 +5,7 @@
 #include "AI/IInferenceEngine.h"
 #include "AI/SchemaRegistry.h"
 #include "BSP/BoardSupportPackage.h"
+#include "Diagnostics/WatchdogSupervisor.h"
 #include "Managers/RiskManager.h"
 #include "Managers/SensorManager.h"
 #include "Models/DataContract.h"
@@ -27,10 +28,12 @@ public:
 class ITaskLogWriter {
 public:
     virtual ~ITaskLogWriter() = default;
-    // Each call is bounded; the sink owns any bounded retry buffer and must
-    // return false/count a failure rather than claim an unsuccessful write.
-    virtual bool writeEvent(const project::models::EventRecord& event) noexcept = 0;
-    virtual bool writeRecord(const project::queues::LogRecord& record) noexcept = 0;
+    // Calls are bounded. Return Progress when the write succeeds or failure is
+    // explicitly recorded/handled; return Failure for an unhandled fault.
+    virtual TaskStepResult writeEvent(
+        const project::models::EventRecord& event) noexcept = 0;
+    virtual TaskStepResult writeRecord(
+        const project::queues::LogRecord& record) noexcept = 0;
     // Must perform only bounded work (for example policy-driven flush/recovery);
     // return Progress only when the service made meaningful progress.
     virtual TaskStepResult service() noexcept = 0;
@@ -174,6 +177,20 @@ private:
     ITaskHealthPublisher& publisher_;
     project::queues::QueueRegistry& queues_;
     std::uint64_t snapshotSequence_{0};
+};
+
+class TaskWatchdogSupervisor final : public TaskBase {
+public:
+    TaskWatchdogSupervisor(
+        const TaskRuntimeConfig& config,
+        project::diagnostics::WatchdogSupervisor& supervisor,
+        std::uint64_t bootId) noexcept;
+
+private:
+    TaskStepResult runOne() noexcept override;
+
+    project::diagnostics::WatchdogSupervisor& supervisor_;
+    const std::uint64_t bootId_;
 };
 
 }  // namespace project::tasks

@@ -191,6 +191,15 @@ BspStatus BoardSupportPackage::watchdogFeed() noexcept {
     return BspStatus::NotConfigured;
 }
 
+BspStatus BoardSupportPackage::restart() noexcept {
+#if defined(PROJECT_BSP_ESP32S3_TARGET)
+    esp_restart();
+    return BspStatus::HardwareError;
+#else
+    return BspStatus::UnsupportedPlatform;
+#endif
+}
+
 BspStatus BoardSupportPackage::readPowerStatus(PowerStatus& status) const noexcept {
     status = {};
     // TODO(TBD): implement only if the confirmed board has a reviewed power monitor.

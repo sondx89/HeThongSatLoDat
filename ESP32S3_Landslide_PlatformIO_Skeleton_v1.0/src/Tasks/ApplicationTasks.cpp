@@ -248,8 +248,7 @@ TaskStepResult TaskLogger::runOne() noexcept {
             queues_.receiveEvent(event, 0);
         if (received == project::queues::QueueRegistryStatus::Ok) {
             preferEvent_ = false;
-            return writer_.writeEvent(event) ? TaskStepResult::Progress
-                                             : TaskStepResult::Failure;
+            return writer_.writeEvent(event);
         }
         if (received != project::queues::QueueRegistryStatus::QueueEmpty) {
             return TaskStepResult::Failure;
@@ -261,8 +260,7 @@ TaskStepResult TaskLogger::runOne() noexcept {
         queues_.receiveLog(record, 0);
     if (logReceived == project::queues::QueueRegistryStatus::Ok) {
         preferEvent_ = true;
-        return writer_.writeRecord(record) ? TaskStepResult::Progress
-                                            : TaskStepResult::Failure;
+        return writer_.writeRecord(record);
     }
     if (logReceived != project::queues::QueueRegistryStatus::QueueEmpty) {
         return TaskStepResult::Failure;
@@ -274,8 +272,7 @@ TaskStepResult TaskLogger::runOne() noexcept {
             queues_.receiveEvent(event, 0);
         if (eventReceived == project::queues::QueueRegistryStatus::Ok) {
             preferEvent_ = false;
-            return writer_.writeEvent(event) ? TaskStepResult::Progress
-                                             : TaskStepResult::Failure;
+            return writer_.writeEvent(event);
         }
         if (eventReceived != project::queues::QueueRegistryStatus::QueueEmpty) {
             return TaskStepResult::Failure;
@@ -372,6 +369,33 @@ TaskStepResult TaskDiagnostics::runOne() noexcept {
     }
     ++snapshotSequence_;
     return TaskStepResult::Progress;
+}
+
+TaskWatchdogSupervisor::TaskWatchdogSupervisor(
+    const TaskRuntimeConfig& config,
+    project::diagnostics::WatchdogSupervisor& supervisor,
+    std::uint64_t bootId) noexcept
+    : TaskBase(TaskId::Watchdog, "TaskWatchdog", TaskSchedule::Periodic,
+               config),
+      supervisor_(supervisor), bootId_(bootId) {}
+
+TaskStepResult TaskWatchdogSupervisor::runOne() noexcept {
+    if (!supervisor_.isInitialized()) {
+        const project::diagnostics::WatchdogStatus status =
+            supervisor_.begin(bootId_);
+        if (status == project::diagnostics::WatchdogStatus::Ready) {
+            return TaskStepResult::Progress;
+        }
+        if (status == project::diagnostics::WatchdogStatus::TasksNotRegistered) {
+            return TaskStepResult::Idle;
+        }
+        return TaskStepResult::Failure;
+    }
+
+    return supervisor_.checkTaskProgress() ==
+                   project::diagnostics::WatchdogStatus::Healthy
+               ? TaskStepResult::Progress
+               : TaskStepResult::Failure;
 }
 
 }  // namespace project::tasks

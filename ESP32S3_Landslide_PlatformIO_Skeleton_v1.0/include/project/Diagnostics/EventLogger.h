@@ -10,6 +10,6 @@ using EventRecord = project::models::EventRecord;
 
 class EventLogger {
 public:
-    bool enqueue(const EventRecord& event);
+    bool enqueue(const EventRecord& event) noexcept;
 };
 }  // namespace project::diagnostics

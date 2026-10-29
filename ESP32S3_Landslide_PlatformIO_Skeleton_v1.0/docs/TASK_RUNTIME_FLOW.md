@@ -25,17 +25,20 @@ sequenceDiagram
     participant QE as Q_EVENT
     participant QL as Q_LOG
     participant TD as TaskDiagnostics
+    participant TW as TaskWatchdog
     participant HP as Health source/publisher
+    participant W as WatchdogSupervisor
 
     App->>TF: startAll() after QueueRegistry initialization
     TF->>TF: validate all task configurations
-    TF->>TF: create six tasks at entry gates
+    TF->>TF: create all configured tasks at entry gates
     TF-->>TS: release after all creates succeed
     TF-->>TP: release
     TF-->>TI: release
     TF-->>TR: release
     TF-->>TL: release
     TF-->>TD: release
+    TF-->>TW: release
 
     loop configured sensor cycle
         TS->>TS: poll sensors and read snapshot
@@ -78,6 +81,18 @@ sequenceDiagram
         TD->>TD: collect six queue depth/high-water/drop statistics
         TD->>HP: collect system metrics and publish HealthSnapshot
     end
+    loop configured watchdog check interval
+        TW->>W: begin(bootId) after five required tasks register
+        W->>W: inspect heartbeat age / exited state
+        alt all required tasks progressing
+            W-->>TW: Healthy
+        else timeout or task exit
+            W->>W: latch fault; invoke system fault sink
+            W->>QE: enqueue EVT-SYS-0005 TASK_HEARTBEAT_MISSED
+            W->>QE: enqueue EVT-SYS-0004 WATCHDOG_TIMEOUT
+            W->>W: BSP restart (ESP32-S3 esp_restart)
+        end
+    end
 ```
 
 `Q_RISK` is published for the output/telemetry consumer, which is outside the six
@@ -99,8 +114,19 @@ this framework and must remain conditional on the approved supervisor policy.
 | `TaskRisk` | Bounded `queueWaitTicks` (or idle wait) | `Q_MODEL` receive, `Q_RISK` send | Required, TBD |
 | `TaskLogger` | `idleWaitTicks`; queue wait must be zero | Polls `Q_EVENT` and `Q_LOG`, event queue first/alternating | Required, TBD |
 | `TaskDiagnostics` | `cycleTicks` | Reads queue/heartbeat snapshots; publishes health | Required, TBD |
+| `TaskWatchdog` | `cycleTicks` | Checks progress for Sensor, Feature, Inference, Risk, Logger | Required, TBD |
 
 `heartbeatTimeoutTicks` is required for every task. The proposal's 1 Hz sensor
 aggregate cadence and 1–10 second diagnostics cadence are not compiled defaults;
 convert only approved, measured periods to FreeRTOS ticks during application
 composition.
+
+On timeout, the supervisor latches the affected task bit and invokes the
+application fault sink, then enqueues the catalogued heartbeat-missed and
+watchdog-timeout events before requesting BSP restart. Event enqueue is
+nonblocking and may fail if Q_EVENT is full; fault/reset still proceed, and the
+failure is exposed through `failureFlags()`. A queued event is not guaranteed to
+reach persistent storage before an immediate reset. Hardware watchdog
+initialization/feed remains a BSP TODO pending framework/timeout approval; this
+application supervisor directly calls `esp_restart()` on the confirmed ESP32-S3
+target when it detects a monitored task timeout.

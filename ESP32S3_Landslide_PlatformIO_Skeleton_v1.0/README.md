@@ -81,8 +81,9 @@ additional variants and final queue depths remain TODOs from the system document
 
 `project/Tasks/TaskFramework.h` and `ApplicationTasks.h` define the startup/heartbeat
 framework and `TaskSensor`, `TaskFeature`, `TaskInference`, `TaskRisk`, `TaskLogger`,
-and `TaskDiagnostics`. Each task's priority, stack size (in FreeRTOS stack words),
-cycle/queue wait and heartbeat timeout must be supplied from target measurements.
+`TaskDiagnostics`, and `TaskWatchdogSupervisor`. Each task's priority, stack size (in
+FreeRTOS stack words), cycle/queue wait and heartbeat timeout must be supplied from
+target measurements.
 Unset values intentionally prevent task creation; do not copy illustrative values from
 the documents as production settings.
 
@@ -95,14 +96,22 @@ the total must be measured and reviewed against the board RAM budget. Tasks are
 single-owner for their managers, inference engine, feature pipeline and storage sink.
 TaskDiagnostics samples actual progress heartbeats, stack high-water marks and queue
 depth/high-water/drop counts. Heartbeat does not advance on an idle timeout.
+The watchdog task independently checks the five required pipeline/logger task
+heartbeats. It latches the task fault, attempts to enqueue `EVT-SYS-0005` and
+`EVT-SYS-0004`, then requests an ESP32-S3 restart. Event enqueue is nonblocking;
+if Q_EVENT is full the reset still proceeds and the event may not be persisted.
+The logger sink may report `Progress` when a storage failure was explicitly
+recorded and handled, so a recognized storage fault alone does not force a reset.
+The BSP hardware watchdog init/feed API remains TBD; this is not a substitute for
+a configured hardware watchdog that can recover if the supervisor itself stalls.
 
 Risk context acquisition, event catalog/deduplication, log persistence/encoding and
 system health metric collection are injected interfaces because the existing subsystem
 contracts do not fully specify those operations. Their required integration points and
 the task sequence are shown in
 [TASK_RUNTIME_FLOW.md](./docs/TASK_RUNTIME_FLOW.md). The framework does not feed a
-watchdog; only the separately reviewed supervisor may do so based on health/deadline
-policy.
+hardware watchdog; the supervisor's BSP restart path is used for detected heartbeat
+timeouts. Hardware watchdog initialization/feed remains an explicit BSP TODO.
 
 ## Build
 1. Open this folder in VS Code.

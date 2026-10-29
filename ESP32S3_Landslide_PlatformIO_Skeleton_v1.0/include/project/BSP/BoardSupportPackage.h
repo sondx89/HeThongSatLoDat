@@ -31,6 +31,7 @@ public:
     BspStatus boardIdentity(const BoardInfo*& info) const noexcept;
     BspStatus watchdogInit() noexcept;
     BspStatus watchdogFeed() noexcept;
+    BspStatus restart() noexcept;
     BspStatus readPowerStatus(PowerStatus& status) const noexcept;
 
 private:
