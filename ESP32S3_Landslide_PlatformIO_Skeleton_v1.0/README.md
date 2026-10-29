@@ -63,6 +63,19 @@ no defaults for those TBD policy values. Only channels represented by the curren
 HX710B physical value remain unavailable until their definitions are approved.
 See [docs/DATA_QUALITY_SERVICE.md](docs/DATA_QUALITY_SERVICE.md).
 
+## Feature pipeline
+
+`project/Services/FeaturePipeline.h` implements a fixed-capacity sliding-window
+pipeline based on FSS v1.1. FSS remains DRAFT with null indexes, no eligible
+features, and no released Edge Impulse input contract, so default configuration
+fails closed and cannot produce valid inference input. The reviewed integration
+must supply schema version/ID/hash, approved contiguous feature indexes, model
+metadata, flat layout, and window/stride settings. The pipeline supports only
+the FSS acceleration magnitude and candidate tilt formulae when their units and
+verification gates are configured. Raw sensor channels unavailable in
+`ProcessedFrame` are rejected, and HX710B remains excluded until its transducer
+and feature are approved. See [docs/FEATURE_PIPELINE.md](docs/FEATURE_PIPELINE.md).
+
 ## Board Support Package
 
 The BSP is under `include/project/BSP/` and `src/BSP/`. `BoardPins.h` is the single

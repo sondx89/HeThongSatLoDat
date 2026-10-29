@@ -52,7 +52,8 @@ using ITaskHealthSource = project::diagnostics::ITaskHealthSource;
 enum class FeatureRejectReason : std::uint8_t {
     SensorQuality,
     Calibration,
-    ProcessedQuality
+    ProcessedQuality,
+    FeatureSchema
 };
 
 class ITaskEventReporter {
@@ -102,6 +103,7 @@ private:
     project::services::FeaturePipeline& pipeline_;
     ITaskEventReporter& events_;
     project::queues::QueueRegistry& queues_;
+    bool featureConfigurationFailureReported_{false};
 };
 
 class TaskInference final : public TaskBase {

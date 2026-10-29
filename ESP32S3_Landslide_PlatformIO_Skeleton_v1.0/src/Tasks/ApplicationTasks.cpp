@@ -34,6 +34,16 @@ bool modelOutputIsFinite(const project::models::ModelOutput& output) noexcept {
     return !output.predictionValid || std::isfinite(output.predictionValue);
 }
 
+bool isFeatureConfigurationFailure(
+    project::services::FeaturePipelineStatus status) noexcept {
+    return status == project::services::FeaturePipelineStatus::NotConfigured ||
+           status == project::services::FeaturePipelineStatus::SchemaNotApproved ||
+           status ==
+               project::services::FeaturePipelineStatus::InvalidConfiguration ||
+           status == project::services::FeaturePipelineStatus::UnsupportedFeature ||
+           status == project::services::FeaturePipelineStatus::OutputTooLarge;
+}
+
 }  // namespace
 
 TaskSensor::TaskSensor(const TaskRuntimeConfig& config,
@@ -79,6 +89,7 @@ TaskFeature::TaskFeature(
       events_(events), queues_(queues) {}
 
 bool TaskFeature::onStart() noexcept {
+    featureConfigurationFailureReported_ = false;
     if (!calibration_.loadCalibration()) {
         return false;
     }
@@ -117,7 +128,17 @@ TaskStepResult TaskFeature::runOne() noexcept {
                    : TaskStepResult::Failure;
     }
     if (!pipeline_.push(processed)) {
-        return TaskStepResult::Failure;
+        const bool configurationFailure =
+            isFeatureConfigurationFailure(pipeline_.status());
+        if (configurationFailure && featureConfigurationFailureReported_) {
+            return TaskStepResult::Progress;
+        }
+        featureConfigurationFailureReported_ =
+            featureConfigurationFailureReported_ || configurationFailure;
+        return events_.reportFeatureRejection(
+                   FeatureRejectReason::FeatureSchema, sensorFrame, &processed)
+                   ? TaskStepResult::Progress
+                   : TaskStepResult::Failure;
     }
     if (!pipeline_.windowReady()) {
         return TaskStepResult::Progress;
@@ -125,7 +146,17 @@ TaskStepResult TaskFeature::runOne() noexcept {
 
     project::models::FeatureVector features{};
     if (!pipeline_.build(features)) {
-        return TaskStepResult::Failure;
+        const bool configurationFailure =
+            isFeatureConfigurationFailure(pipeline_.status());
+        if (configurationFailure && featureConfigurationFailureReported_) {
+            return TaskStepResult::Progress;
+        }
+        featureConfigurationFailureReported_ =
+            featureConfigurationFailureReported_ || configurationFailure;
+        return events_.reportFeatureRejection(
+                   FeatureRejectReason::FeatureSchema, sensorFrame, &processed)
+                   ? TaskStepResult::Progress
+                   : TaskStepResult::Failure;
     }
     (void)queues_.sendFeature(features, 0);
     return TaskStepResult::Progress;
