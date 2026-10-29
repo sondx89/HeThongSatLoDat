@@ -35,6 +35,18 @@ Only `AI/EdgeImpulseAdapter` may include generated Edge Impulse headers once tho
 Do not convert invalid/stale/missing data into zero or NORMAL. Risk state and health state are
 independent. A regression output is not a landslide probability unless separately validated.
 
+## Data contracts
+
+The fixed-storage C++17 contracts are under `include/project/Models/`; include
+`project/Models/DataContract.h` for the public contract set. Records are trivially copyable
+for bounded FreeRTOS queue transfer and keep monotonic milliseconds, validity, quality,
+raw/calibrated values, and health/risk state separate.
+
+The document set in `../Document/` remains authoritative. Model dimensions, feature ordering,
+calibration units, risk-state reconciliation, event string limits, and serializer wire formats
+are not frozen. The serialization functions therefore return `NotImplemented` until those
+items are approved; do not persist a C++ struct memory dump.
+
 ## Build
 1. Open this folder in VS Code.
 2. Install PlatformIO IDE extension.

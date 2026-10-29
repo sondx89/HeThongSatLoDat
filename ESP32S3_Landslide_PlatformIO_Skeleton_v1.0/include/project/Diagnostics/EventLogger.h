@@ -1,14 +1,12 @@
 #pragma once
+
 #include <cstdint>
 
-namespace project::diagnostics {
-enum class EventSeverity : std::uint8_t { Debug, Info, Warning, Error, Critical };
+#include "Models/EventRecord.h"
 
-struct EventRecord {
-    EventSeverity severity{EventSeverity::Info};
-    std::uint32_t eventCode{0};
-    std::uint64_t timestampMicros{0};
-};
+namespace project::diagnostics {
+using EventSeverity = project::models::EventSeverity;
+using EventRecord = project::models::EventRecord;
 
 class EventLogger {
 public:
