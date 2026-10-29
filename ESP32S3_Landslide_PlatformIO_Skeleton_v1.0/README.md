@@ -86,6 +86,15 @@ model metadata and layout; defaults fail closed. Empty mapped fields, malformed
 rows and timestamp discontinuities are rejected without imputation. See
 [docs/REPLAY_ENGINE.md](docs/REPLAY_ENGINE.md).
 
+## Mock inference runtime
+
+`project/AI/MockModelRuntime.h` implements the inference interface so the task
+and queue path can run before an Edge Impulse export exists. It validates
+basic `FeatureVector` integrity but deliberately emits `ModelError` with no
+prediction for valid inputs: target/output semantics are still DRAFT, so it
+does not fabricate a neutral value or risk score. See
+[docs/MOCK_MODEL_RUNTIME.md](docs/MOCK_MODEL_RUNTIME.md).
+
 ## Board Support Package
 
 The BSP is under `include/project/BSP/` and `src/BSP/`. `BoardPins.h` is the single
