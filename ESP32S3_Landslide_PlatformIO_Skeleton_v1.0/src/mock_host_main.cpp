@@ -16,9 +16,16 @@ int main() {
     project::drivers::MockSoilSensor soil(profile);
     project::drivers::MockRainSensor rain(profile);
     project::drivers::MockHx710bSensor hx710b(profile);
+    project::managers::SensorManagerConfig config{};
+    config.samplePeriodMicros = samplePeriodMicros;
+    for (auto& policy : config.readPolicies) {
+        policy.beginTimeoutMicros = 100000U;
+        policy.timeoutMicros = 100000U;
+        policy.maxRetries = 1U;
+    }
+    project::managers::PlatformSensorManagerClock clock;
     project::managers::SensorManager sensors(
-        imu, soil, rain, hx710b,
-        project::managers::SensorManagerConfig{0U, samplePeriodMicros});
+        imu, soil, rain, hx710b, config, clock);
 
     if (!sensors.beginAll()) {
         std::fprintf(stderr, "mock sensor initialization failed\n");
@@ -38,14 +45,13 @@ int main() {
             std::fprintf(stderr, "mock snapshot failed at sample %u\n", index);
             return 3;
         }
-        const bool rainExpectedValid = ((index + 1U) % 4U) != 0U;
         if (frame.sequence != static_cast<std::uint64_t>(index) + 1U ||
             frame.timestampMs !=
                 static_cast<std::uint64_t>(index) * 1000U ||
             frame.imuStatus.valid != true ||
             frame.soilStatus.valid != true ||
             frame.hx710bStatus.valid != true ||
-            frame.rainStatus.valid != rainExpectedValid) {
+            frame.rainStatus.valid != true) {
             std::fprintf(stderr, "mock frame validation failed at sample %u\n",
                          index);
             return 4;
@@ -70,6 +76,15 @@ int main() {
             frame.soilStatus.valid ? 1U : 0U,
             frame.rainStatus.valid ? 1U : 0U,
             frame.hx710bStatus.valid ? 1U : 0U);
+    }
+
+    const auto rainDiagnostics =
+        sensors.diagnostics(project::managers::SensorSlot::Rain);
+    if (rainDiagnostics.readAttempts != sampleCount + 3U ||
+        rainDiagnostics.retries != 3U ||
+        rainDiagnostics.readFailures != 3U) {
+        std::fprintf(stderr, "rain retry diagnostics mismatch\n");
+        return 6;
     }
 
     return 0;

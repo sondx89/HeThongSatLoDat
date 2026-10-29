@@ -203,6 +203,15 @@ timeouts. Hardware watchdog initialization/feed remains an explicit BSP TODO.
 
 ## Mock sensor environment
 
+`SensorManager` reads sensors sequentially in the required IMU → soil → rain →
+HX710B order. Each slot has explicit initialization/read timeout, retry count
+and optional backoff configuration; unconfigured timeout budgets prevent startup.
+Timeouts are detected on return, so each concrete driver's blocking operation
+must also have its own finite hardware timeout. A per-sensor failure does not
+stop the remaining reads; `readSnapshot()` emits a frame with that channel's
+status invalid and exposes saturating attempts/retry/timeout diagnostics.
+See [docs/SENSOR_MANAGER.md](docs/SENSOR_MANAGER.md).
+
 `project/Drivers/MockSensors.h` provides deterministic, fixed-storage mock
 drivers for MPU9250 raw axes, soil raw count, rain raw count, and HX710B raw
 count. `MockEnvironmentProfile::demo()` is a development fixture only: those

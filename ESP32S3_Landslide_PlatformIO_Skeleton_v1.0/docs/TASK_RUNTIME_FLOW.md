@@ -43,7 +43,9 @@ sequenceDiagram
     TF-->>TW: release
 
     loop configured sensor cycle
-        TS->>TS: poll sensors and read snapshot
+        TS->>TS: poll sensor schedule
+        TS->>TS: read IMU → soil → rain → HX710B
+        Note over TS: Per-sensor timeout/retry policy; failed channels stay invalid
         TS->>QS: bounded send SensorFrame
         Note over TS,QS: acquisition progress heartbeat; queue drops counted
     end

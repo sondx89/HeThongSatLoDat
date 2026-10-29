@@ -9,15 +9,27 @@
 namespace {
 
 constexpr std::uint32_t kMockSamplePeriodMicros = 1000000U;
+project::managers::SensorManagerConfig makeMockSensorManagerConfig() {
+    project::managers::SensorManagerConfig config{};
+    config.samplePeriodMicros = kMockSamplePeriodMicros;
+    for (auto& policy : config.readPolicies) {
+        policy.beginTimeoutMicros = 100000U;
+        policy.timeoutMicros = 100000U;
+        policy.maxRetries = 1U;
+    }
+    return config;
+}
+
 const project::drivers::MockEnvironmentProfile kMockProfile =
     project::drivers::MockEnvironmentProfile::demo();
 project::drivers::MockImuSensor gImu(kMockProfile);
 project::drivers::MockSoilSensor gSoil(kMockProfile);
 project::drivers::MockRainSensor gRain(kMockProfile);
 project::drivers::MockHx710bSensor gHx710b(kMockProfile);
+project::managers::PlatformSensorManagerClock gSensorClock;
 project::managers::SensorManager gSensors(
     gImu, gSoil, gRain, gHx710b,
-    project::managers::SensorManagerConfig{0U, kMockSamplePeriodMicros});
+    makeMockSensorManagerConfig(), gSensorClock);
 bool gSensorManagerReady = false;
 
 void printSample(const project::models::SensorFrame& frame) {
