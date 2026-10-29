@@ -35,6 +35,8 @@ ESP32S3_Landslide_PlatformIO_Skeleton_v1.0/
   include/project/Models/SensorFrame.h
   include/project/Models/Serialization.h
   include/project/Models/SensorStatus.h
+  include/project/Queues/LogRecord.h
+  include/project/Queues/QueueRegistry.h
   include/project/ProjectConfig.h
   include/project/Services/CalibrationService.h
   include/project/Services/DataQualityService.h
@@ -73,6 +75,7 @@ ESP32S3_Landslide_PlatformIO_Skeleton_v1.0/
   src/Models/RiskAssessment.cpp
   src/Models/SensorFrame.cpp
   src/Models/SensorStatus.cpp
+  src/Queues/QueueRegistry.cpp
   src/Services/CalibrationService.cpp
   src/Services/DataQualityService.cpp
   src/Services/FeaturePipeline.cpp

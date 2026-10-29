@@ -56,12 +56,32 @@ unconfirmed variant or revision. Values marked TBD stay unset, and BSP hardware 
 return an explicit status until the board schematic/BOM and electrical review supply them.
 Drivers must not hard-code GPIO assignments.
 
+## FreeRTOS queues
+
+`project/Queues/QueueRegistry.h` provides a thread-safe singleton that owns the six
+FreeRTOS queue handles. Producers and consumers use typed send/receive methods and never
+own or delete queue handles. Queue payloads are copied by value and must remain trivially
+copyable.
+
+Queue depths are intentionally zero/unconfigured in `QueueDepths`; call `initialize()` with
+measured, reviewed values before creating application tasks. Queue creation uses FreeRTOS
+dynamic allocation and reports allocation failure without exposing a partial registry.
+Choose finite wait times; indefinite waits are rejected. Send failures increment per-queue
+drop counters, while `getStats()` provides current depth, capacity, payload size and drops.
+Drop/coalescing policy, including preservation of critical events and risk transitions,
+remains the responsibility of the owning producer/consumer until those policies are approved.
+
+The queue payload mapping is: `Q_SENSOR` / `SensorFrame`, `Q_FEATURE` / `FeatureVector`,
+`Q_MODEL` / `ModelOutput`, `Q_RISK` / `RiskAssessment`, `Q_EVENT` / `EventRecord`, and
+`Q_LOG` / tagged `LogRecord`. The log catalog currently defines only the Event variant;
+additional variants and final queue depths remain TODOs from the system documents.
+
 ## Build
 1. Open this folder in VS Code.
 2. Install PlatformIO IDE extension.
 3. Confirm the physical board ID, then update `platformio.ini` if needed.
 4. Run PlatformIO: **Build**.
 
-This skeleton intentionally contains declarations and placeholder translation units only.
-Most methods have no implementation and must not be called yet. A successful compile only
-checks the project/toolchain setup, not hardware operation or architecture acceptance.
+This skeleton still contains declarations and placeholder translation units in other
+subsystems. A successful compile only checks the project/toolchain setup, not hardware
+operation or architecture acceptance.
