@@ -77,6 +77,37 @@ The queue payload mapping is: `Q_SENSOR` / `SensorFrame`, `Q_FEATURE` / `Feature
 `Q_LOG` / tagged `LogRecord`. The log catalog currently defines only the Event variant;
 additional variants and final queue depths remain TODOs from the system documents.
 
+## Event logger
+
+`project/Diagnostics/EventLogger.h` implements a multi-producer `Q_EVENT`
+facade. `enqueueWithStatus()` assigns a per-boot numeric occurrence ID and
+sequence number (separate from the stable `eventCatalogId` such as
+`EVT-SYS-0004`), then copies the fixed-size event into the queue without
+blocking. Queue-full and uninitialized-queue failures are returned explicitly;
+QueueRegistry tracks drops. Counters stop rather than wrap. Producers supply
+`timestampMs` from the monotonic clock at event occurrence; EventLogger preserves
+it and never substitutes wall-clock time. Numeric IDs/sequences can have gaps
+when queue submission fails; each accepted event snapshots the queue's current
+drop count.
+
+The single Q_EVENT consumer formats the complete EventRecord v1 CSV row into
+caller-owned bounded storage. `writeOutputs()` sends the same row to the CSV
+sink and to a Serial sink, attempts both destinations, and reports partial
+failures. The CSV header is available from `writeCsvHeader()`. Fields are
+serialized individually, text is CSV-escaped, numeric values use float32
+round-trip precision, and invalid/non-finite values are rejected rather than
+written as NaN/Inf. No struct memory is persisted.
+
+The application-provided `IEventOutput` implementation must keep output
+ownership compliant: CSV writes belong to TaskLogger/T-LOG, while
+`writeSerialCsv()` must route through the single TaskDiagnostics/T-DIAG UART
+owner instead of writing `Serial` concurrently from another task. The serial
+sink and concrete CSV storage remain injected because UART setup and storage
+hardware are not finalized in the documents. The task's `ITaskLogWriter`
+implementation should call `writeOutputs()` after receiving an event from
+Q_EVENT and propagate any non-`Ok` status as an explicit handled/unhandled
+write result.
+
 ## FreeRTOS task framework
 
 `project/Tasks/TaskFramework.h` and `ApplicationTasks.h` define the startup/heartbeat

@@ -24,6 +24,7 @@ sequenceDiagram
     participant TL as TaskLogger
     participant QE as Q_EVENT
     participant QL as Q_LOG
+    participant EO as Event output sinks
     participant TD as TaskDiagnostics
     participant TW as TaskWatchdog
     participant HP as Health source/publisher
@@ -75,6 +76,10 @@ sequenceDiagram
             TL->>QL: poll tagged LogRecord
         end
         TL->>TL: write/flush using single-writer sink
+        opt event received
+            TL->>EO: format fixed-buffer CSV; persist with T-LOG
+            TL->>TD: forward CSV diagnostic line to UART owner
+        end
     end
     loop configured diagnostics interval
         TD->>TD: snapshot progress heartbeat and stack high-water
@@ -103,6 +108,13 @@ advances only after meaningful task work; queue timeout/idle does not count as
 progress. A stale or exited
 essential task degrades the emitted health snapshot. Watchdog feeding is outside
 this framework and must remain conditional on the approved supervisor policy.
+
+EventLogger producers copy records to `Q_EVENT`; only TaskLogger consumes them.
+The CSV serializer writes field-by-field into caller-owned bounded storage, and its
+same escaped row is offered to the CSV sink and the T-DIAG-owned Serial route.
+Neither producer tasks nor TaskLogger may write directly to the UART. Concrete
+storage and UART adapters remain integration points until the board/storage
+contracts are finalized.
 
 ## Scheduling configuration by task
 
