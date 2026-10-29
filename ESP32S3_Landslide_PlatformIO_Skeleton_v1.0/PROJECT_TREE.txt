@@ -4,7 +4,11 @@ ESP32S3_Landslide_PlatformIO_Skeleton_v1.0/
   include/project/AI/EdgeImpulseAdapter.h
   include/project/AI/IInferenceEngine.h
   include/project/AI/SchemaRegistry.h
+  include/project/BSP/BoardConfig.h
+  include/project/BSP/BoardInfo.h
+  include/project/BSP/BoardPins.h
   include/project/BSP/BoardSupportPackage.h
+  include/project/BSP/BoardVersion.h
   include/project/Diagnostics/EventLogger.h
   include/project/Diagnostics/HealthMonitor.h
   include/project/Diagnostics/SerialDiagnostics.h
@@ -42,7 +46,11 @@ ESP32S3_Landslide_PlatformIO_Skeleton_v1.0/
   src/AI/EdgeImpulseAdapter.cpp
   src/AI/IInferenceEngine.cpp
   src/AI/SchemaRegistry.cpp
+  src/BSP/BoardConfig.cpp
+  src/BSP/BoardInfo.cpp
+  src/BSP/BoardPins.cpp
   src/BSP/BoardSupportPackage.cpp
+  src/BSP/BoardVersion.cpp
   src/Diagnostics/EventLogger.cpp
   src/Diagnostics/HealthMonitor.cpp
   src/Diagnostics/SerialDiagnostics.cpp

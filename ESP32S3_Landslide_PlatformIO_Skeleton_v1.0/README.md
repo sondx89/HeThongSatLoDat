@@ -47,6 +47,15 @@ calibration units, risk-state reconciliation, event string limits, and serialize
 are not frozen. The serialization functions therefore return `NotImplemented` until those
 items are approved; do not persist a C++ struct memory dump.
 
+## Board Support Package
+
+The BSP is under `include/project/BSP/` and `src/BSP/`. `BoardPins.h` is the single
+GPIO mapping table; `BoardConfig.h` holds compile-time bus, ADC, electrical and capability
+configuration; `BoardInfo.h` and `BoardVersion.h` describe the board without inventing an
+unconfirmed variant or revision. Values marked TBD stay unset, and BSP hardware operations
+return an explicit status until the board schematic/BOM and electrical review supply them.
+Drivers must not hard-code GPIO assignments.
+
 ## Build
 1. Open this folder in VS Code.
 2. Install PlatformIO IDE extension.

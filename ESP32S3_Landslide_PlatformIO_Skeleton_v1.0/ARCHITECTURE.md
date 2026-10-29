@@ -21,6 +21,8 @@
 8. Cross-task data is immutable or transferred via queues/snapshots. Queue depths, timeouts, task priorities and stack sizes remain TBD.
 9. A failed/invalid/stale sensor read or inference result is not a valid zero and must not imply NORMAL.
 10. RiskState and HealthState remain separate.
+11. All GPIO assignments live in `BSP/BoardPins.h`; drivers must obtain pin configuration through BSP contracts and must not define pin numbers.
+12. Unverified board identity, pins, bus/ADC settings, electrical levels and watchdog timing remain unconfigured and cause an explicit BSP status, never a guessed hardware setting.
 
 ## Important
 This package is a compile-oriented skeleton, not a finished firmware. Some public method declarations are intentionally undefined; do not call them until implementation is added. No sensor driver, task creation, queue, file system, model inference, calibration, or risk algorithm is implemented.
