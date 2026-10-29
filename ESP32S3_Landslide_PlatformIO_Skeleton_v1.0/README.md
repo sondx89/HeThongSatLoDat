@@ -104,6 +104,13 @@ dimension, schema and output mapping must be populated from verified metadata;
 classification values are not interpreted as risk scores. See
 [docs/EDGE_IMPULSE_ADAPTER.md](docs/EDGE_IMPULSE_ADAPTER.md).
 
+## Unit tests
+
+The Unity native test suite covers SensorManager, DataQualityService,
+FeaturePipeline, RiskManager, and ReplayEngine without physical hardware. Run
+`pio test -e native-unit-tests` from the project directory. See
+[docs/UNITY_UNIT_TESTS.md](docs/UNITY_UNIT_TESTS.md).
+
 ## Risk manager
 
 `project/Managers/RiskManager.h` fuses a configured model score, an explicitly
