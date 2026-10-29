@@ -51,6 +51,18 @@ calibration units, risk-state reconciliation, event string limits, and serialize
 are not frozen. The serialization functions therefore return `NotImplemented` until those
 items are approved; do not persist a C++ struct memory dump.
 
+## Data quality service
+
+`project/Services/DataQualityService.h` classifies each known sensor channel as
+`VALID`, `STALE`, `MISSING`, `OUT_OF_RANGE`, or `NON_FINITE`, and can produce a
+`ProcessedFrame` without converting rejected values to zero. The integration
+must explicitly configure approved per-sensor freshness limits, any verified
+channel ranges, and at least one model-required channel. There are deliberately
+no defaults for those TBD policy values. Only channels represented by the current
+`ProcessedFrame` may be marked required. Tilt roll/pitch, rainfall rate, and the
+HX710B physical value remain unavailable until their definitions are approved.
+See [docs/DATA_QUALITY_SERVICE.md](docs/DATA_QUALITY_SERVICE.md).
+
 ## Board Support Package
 
 The BSP is under `include/project/BSP/` and `src/BSP/`. `BoardPins.h` is the single

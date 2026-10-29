@@ -30,7 +30,8 @@ enum class SensorChannel : std::uint8_t {
     RainWetnessRelativePct,
     RainRateMmH,
     Hx710bRaw,
-    Hx710bCalibratedValue
+    Hx710bCalibratedValue,
+    Count
 };
 
 struct ImuRawSample {

@@ -1,7 +1,11 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 
+#include "Models/DataContractTypes.h"
+#include "Models/SensorFrame.h"
 #include "Models/SensorStatus.h"
 
 namespace project::models {
@@ -21,9 +25,13 @@ struct ProcessedFrame {
     float tiltPitchDeg{0.0F};  // TODO(TBD): formula/frame and eligibility.
     float accelMagnitude{0.0F}; // TODO(TBD): unit/formula and eligibility.
     float soilMoisturePct{0.0F};
+    float rainWetnessRelativePct{0.0F};
     float rainRateMmH{0.0F};
     float hx710bCalibratedValue{0.0F};  // Unit/measurand remain TBD.
 
+    std::array<DataQualityState,
+               static_cast<std::size_t>(SensorChannel::Count)>
+        channelQuality{};
     std::uint32_t validMask{0};       // TODO(TBD): freeze bit-to-field mapping.
     std::uint32_t qualityFlags{0};
     std::uint32_t sensorStatusBits{0};

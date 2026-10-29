@@ -92,6 +92,14 @@ enum class TimeStatus : std::uint8_t {
     Synced
 };
 
+enum class DataQualityState : std::uint8_t {
+    MISSING,
+    VALID,
+    STALE,
+    OUT_OF_RANGE,
+    NON_FINITE
+};
+
 enum class ApiStatus : std::uint8_t {
     Ok,
     InvalidArgument,

@@ -94,7 +94,8 @@ TaskStepResult TaskFeature::runOne() noexcept {
         return queueTimeoutResult(received);
     }
 
-    if (!quality_.validate(sensorFrame)) {
+    project::models::ProcessedFrame qualityFrame{};
+    if (!quality_.process(sensorFrame, qualityFrame)) {
         return events_.reportFeatureRejection(
                    FeatureRejectReason::SensorQuality, sensorFrame, nullptr)
                    ? TaskStepResult::Progress
@@ -108,6 +109,7 @@ TaskStepResult TaskFeature::runOne() noexcept {
                    ? TaskStepResult::Progress
                    : TaskStepResult::Failure;
     }
+    processed.channelQuality = qualityFrame.channelQuality;
     if (!quality_.validate(processed)) {
         return events_.reportFeatureRejection(
                    FeatureRejectReason::ProcessedQuality, sensorFrame, &processed)
