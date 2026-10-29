@@ -111,6 +111,15 @@ FeaturePipeline, RiskManager, and ReplayEngine without physical hardware. Run
 `pio test -e native-unit-tests` from the project directory. See
 [docs/UNITY_UNIT_TESTS.md](docs/UNITY_UNIT_TESTS.md).
 
+## Integration tests
+
+The Unity native integration suite exercises Sensor → Feature → Model → Risk
+→ CSV Logger with fake sensors/storage, a deterministic test-only model, and
+the fail-closed `MockModelRuntime` case. Run
+`pio test -e native-integration-tests`; fixture thresholds and mappings are
+not production approvals. See
+[docs/INTEGRATION_TESTS.md](docs/INTEGRATION_TESTS.md).
+
 ## Risk manager
 
 `project/Managers/RiskManager.h` fuses a configured model score, an explicitly
