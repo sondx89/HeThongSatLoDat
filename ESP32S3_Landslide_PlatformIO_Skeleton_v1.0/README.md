@@ -2,8 +2,8 @@
 
 **Status:** Skeleton / DRAFT. MPU9250, soil-moisture, rain, and raw HX710B
 acquisition drivers plus a synthetic sensor environment exist, but hardware
-configuration and validation remain open; storage, risk, and inference logic
-is incomplete.
+configuration and validation remain open; storage and inference logic are
+incomplete, and risk policy thresholds/integration still require approval.
 
 ## Fixed baseline
 - MCU family: ESP32-S3
@@ -94,6 +94,16 @@ basic `FeatureVector` integrity but deliberately emits `ModelError` with no
 prediction for valid inputs: target/output semantics are still DRAFT, so it
 does not fabricate a neutral value or risk score. See
 [docs/MOCK_MODEL_RUNTIME.md](docs/MOCK_MODEL_RUNTIME.md).
+
+## Risk manager
+
+`project/Managers/RiskManager.h` fuses a configured model score, an explicitly
+validated tilt deviation, and data quality into `RiskAssessment`. Its default
+configuration fails closed to `UNKNOWN`; thresholds and hysteresis must come
+from an approved, hash-verified risk configuration. The requested `SAFE` and
+`HIGH_RISK_TEST` names are value-compatible aliases for the existing
+`Normal` and `DangerTest` contract states. See
+[docs/RISK_MANAGER.md](docs/RISK_MANAGER.md).
 
 ## Board Support Package
 

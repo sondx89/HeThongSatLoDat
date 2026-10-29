@@ -7,10 +7,12 @@ namespace project::models {
 enum class RiskState : std::uint8_t {
     Startup,
     Normal,
+    Safe = Normal,
     Watch,      // Candidate names conflict across Data Dictionary/ICD/LLD.
     Monitor,    // TODO(TBD): resolve before policy or serialization is frozen.
     Warning,
     DangerTest,
+    HighRiskTest = DangerTest,
     Alarm,
     Critical,
     Unknown
