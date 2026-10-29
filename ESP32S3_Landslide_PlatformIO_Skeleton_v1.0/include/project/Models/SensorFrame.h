@@ -23,6 +23,7 @@ enum class SensorChannel : std::uint8_t {
     GyroXDps,
     GyroYDps,
     GyroZDps,
+    TiltAngleDeg,
     SoilMoistureRaw,
     SoilMoisturePct,
     RainRaw,
@@ -62,6 +63,8 @@ struct SensorFrame {
     // whether a channel contains a usable measurement.
     ImuRawSample imu{};
     ImuPhysicalSample imuPhysical{};
+    float tiltAngleDeg{0.0F};  // TODO(TBD): confirm feature definition/reference.
+    bool tiltAngleValid{false};
     std::int32_t soilMoistureRaw{0};
     float soilMoisturePct{0.0F};     // Valid only after approved calibration.
     std::int32_t rainRaw{0};

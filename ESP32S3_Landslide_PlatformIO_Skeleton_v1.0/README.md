@@ -1,6 +1,8 @@
 # ESP32-S3 Landslide Monitoring — PlatformIO Skeleton
 
-**Status:** Skeleton only / DRAFT. No sensor, storage, risk, or inference logic is implemented.
+**Status:** Skeleton / DRAFT. The MPU9250 acquisition driver and synthetic sensor
+environment exist, but other production sensor, storage, risk, and inference
+logic remains unimplemented.
 
 ## Fixed baseline
 - MCU family: ESP32-S3
@@ -14,6 +16,7 @@
 - Exact ESP32-S3 board/variant and PlatformIO board ID
 - SDA/SCL GPIOs, I²C address and bus frequency
 - MPU9250 module identity, register setup, axis/mounting transform, ranges, ODR, filter and calibration
+- Tilt feature axes, reference pose, formula and filtering method
 - Soil moisture and YL-83 output interface/calibration
 - HX710B transducer/measurand and calibration
 - SD/storage hardware and interface
@@ -55,6 +58,24 @@ configuration; `BoardInfo.h` and `BoardVersion.h` describe the board without inv
 unconfirmed variant or revision. Values marked TBD stay unset, and BSP hardware operations
 return an explicit status until the board schematic/BOM and electrical review supply them.
 Drivers must not hard-code GPIO assignments.
+
+## MPU9250 driver
+
+`project/Drivers/MPU9250Driver.h` and `src/Drivers/MPU9250Driver.cpp` provide
+an I2C `ISensor` implementation using an injected Arduino `TwoWire` bus. The
+driver validates required configuration rather than selecting the unresolved
+address, register/range setup, scale factors, or calibration reference. Initialize
+the bus through the BSP before passing it to the driver; the application must
+populate all settings from hardware review and board configuration.
+
+The driver reads raw accelerometer/gyroscope counts, calibrates offsets from a
+stationary reference capture, and emits physical acceleration (g) and angular
+rate (degrees/s). The requested scalar tilt field is present in `SensorFrame`,
+but remains invalid and the driver reports `TiltCalculationPending`: the
+authoritative documents specify roll/pitch features while their axes, formula,
+reference pose and filter remain TBD. Do not consume the placeholder as a
+measurement. See [docs/MPU9250_DRIVER.md](docs/MPU9250_DRIVER.md) for the class
+diagram, configuration contract and remaining integration work.
 
 ## FreeRTOS queues
 

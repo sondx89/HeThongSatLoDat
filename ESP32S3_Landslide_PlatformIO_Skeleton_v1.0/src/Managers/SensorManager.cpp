@@ -83,6 +83,8 @@ bool SensorManager::readSnapshot(
     if (imuStatus.valid) {
         output.imu = imuFrame.imu;
         output.imuPhysical = imuFrame.imuPhysical;
+        output.tiltAngleDeg = imuFrame.tiltAngleDeg;
+        output.tiltAngleValid = imuFrame.tiltAngleValid;
     }
     if (soilStatus.valid) {
         output.soilMoistureRaw = soilFrame.soilMoistureRaw;
