@@ -95,6 +95,15 @@ prediction for valid inputs: target/output semantics are still DRAFT, so it
 does not fabricate a neutral value or risk score. See
 [docs/MOCK_MODEL_RUNTIME.md](docs/MOCK_MODEL_RUNTIME.md).
 
+## Edge Impulse adapter
+
+`project/AI/EdgeImpulseAdapter.h` implements `IModelRuntime` and calls the
+generated Arduino `run_classifier()` API when an approved Edge Impulse export
+header is configured. Without that export, initialization fails closed. Input
+dimension, schema and output mapping must be populated from verified metadata;
+classification values are not interpreted as risk scores. See
+[docs/EDGE_IMPULSE_ADAPTER.md](docs/EDGE_IMPULSE_ADAPTER.md).
+
 ## Risk manager
 
 `project/Managers/RiskManager.h` fuses a configured model score, an explicitly
