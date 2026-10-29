@@ -5,6 +5,7 @@
 #include <Wire.h>
 #include <esp_system.h>
 #include <esp_timer.h>
+#include <esp_heap_caps.h>
 #if defined(__has_include)
 #if __has_include(<sdkconfig.h>)
 #include <sdkconfig.h>
@@ -195,6 +196,27 @@ BspStatus BoardSupportPackage::restart() noexcept {
 #if defined(PROJECT_BSP_ESP32S3_TARGET)
     esp_restart();
     return BspStatus::HardwareError;
+#else
+    return BspStatus::UnsupportedPlatform;
+#endif
+}
+
+BspStatus BoardSupportPackage::readMemoryMetrics(
+    MemoryMetrics& metrics) const noexcept {
+    metrics = {};
+#if defined(PROJECT_BSP_ESP32S3_TARGET)
+    constexpr std::uint32_t capabilities =
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    metrics.freeHeapBytes = static_cast<std::uint32_t>(
+        heap_caps_get_free_size(capabilities));
+    metrics.minimumFreeHeapBytes = static_cast<std::uint32_t>(
+        heap_caps_get_minimum_free_size(capabilities));
+    metrics.largestFreeBlockBytes = static_cast<std::uint32_t>(
+        heap_caps_get_largest_free_block(capabilities));
+    metrics.internalHeapBytes = static_cast<std::uint32_t>(
+        heap_caps_get_total_size(capabilities));
+    metrics.valid = true;
+    return BspStatus::Ok;
 #else
     return BspStatus::UnsupportedPlatform;
 #endif

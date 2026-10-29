@@ -5,6 +5,7 @@
 #include "AI/IInferenceEngine.h"
 #include "AI/SchemaRegistry.h"
 #include "BSP/BoardSupportPackage.h"
+#include "Diagnostics/HealthMonitor.h"
 #include "Diagnostics/WatchdogSupervisor.h"
 #include "Managers/RiskManager.h"
 #include "Managers/SensorManager.h"
@@ -46,14 +47,7 @@ public:
     virtual bool publish(const project::models::HealthSnapshot& snapshot) noexcept = 0;
 };
 
-class ITaskHealthSource {
-public:
-    virtual ~ITaskHealthSource() = default;
-    // Populate platform/system counters only; leave task and queue metric arrays
-    // and their counts empty for TaskDiagnostics to fill. Work must be bounded.
-    virtual bool collectSystemMetrics(
-        project::models::HealthSnapshot& snapshot) noexcept = 0;
-};
+using ITaskHealthSource = project::diagnostics::ITaskHealthSource;
 
 enum class FeatureRejectReason : std::uint8_t {
     SensorQuality,

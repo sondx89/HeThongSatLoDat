@@ -20,6 +20,14 @@ struct PowerStatus {
     bool valid{false};
 };
 
+struct MemoryMetrics {
+    std::uint32_t freeHeapBytes{0};
+    std::uint32_t minimumFreeHeapBytes{0};
+    std::uint32_t largestFreeBlockBytes{0};
+    std::uint32_t internalHeapBytes{0};
+    bool valid{false};
+};
+
 class BoardSupportPackage {
 public:
     BspStatus initEarly() noexcept;
@@ -32,6 +40,7 @@ public:
     BspStatus watchdogInit() noexcept;
     BspStatus watchdogFeed() noexcept;
     BspStatus restart() noexcept;
+    BspStatus readMemoryMetrics(MemoryMetrics& metrics) const noexcept;
     BspStatus readPowerStatus(PowerStatus& status) const noexcept;
 
 private:

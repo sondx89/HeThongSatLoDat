@@ -74,6 +74,8 @@ struct HealthSnapshot {
     std::uint64_t logWriteFailureCount{0};
     std::uint64_t queueOverflowCount{0};
     std::uint64_t taskRestartCount{0};
+    std::uint64_t watchdogCount{0};  // Per-boot distinct task heartbeat faults.
+    bool watchdogCountValid{false};
     std::uint64_t riskTransitionCount{0};
     std::uint64_t alarmDurationMs{0};
     std::uint64_t storageBytesFree{0};

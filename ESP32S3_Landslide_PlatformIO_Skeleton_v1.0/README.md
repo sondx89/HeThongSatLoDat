@@ -144,6 +144,29 @@ the task sequence are shown in
 hardware watchdog; the supervisor's BSP restart path is used for detected heartbeat
 timeouts. Hardware watchdog initialization/feed remains an explicit BSP TODO.
 
+## Health monitoring
+
+`project/Diagnostics/HealthMonitor.h` creates bounded `HealthSnapshot` data.
+On the confirmed ESP32-S3 target, BSP samples internal 8-bit-capable heap
+free/minimum/largest-block/total bytes; HealthMonitor adds monotonic uptime and
+the platform reset-reason category. Task stack high-water values retain the
+FreeRTOS unit of words, and queue metrics include current depth, capacity,
+high-water mark, drops and payload size. No low-memory or stack safety threshold
+is invented here.
+
+Use the same `HealthMonitor` instance as the `WatchdogSupervisor` fault sink to
+record `watchdogCount` and latch faulted task bits. The count is per-boot and
+increments once for each distinct task heartbeat fault; `watchdogCountValid`
+marks it as available. `captureSnapshot(sequenceNo, output)` returns an explicit
+status and leaves no success-shaped partial snapshot when a required platform
+or queue metric cannot be read. The monitor also implements
+`ITaskHealthSource::collectSystemMetrics()` for `TaskDiagnostics`, which adds
+task/queue arrays using the existing diagnostics flow. Heap figures are
+ESP-IDF aggregate internal-heap statistics; external RAM-specific measurements
+remain separate/TBD. The watchdog count is an in-RAM per-boot metric, not a
+persistent count of watchdog-triggered resets; persistence and reset-count
+semantics require an approved storage/reset policy.
+
 ## Build
 1. Open this folder in VS Code.
 2. Install PlatformIO IDE extension.

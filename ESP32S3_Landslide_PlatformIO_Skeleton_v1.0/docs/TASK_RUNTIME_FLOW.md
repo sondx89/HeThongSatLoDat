@@ -27,6 +27,7 @@ sequenceDiagram
     participant EO as Event output sinks
     participant TD as TaskDiagnostics
     participant TW as TaskWatchdog
+    participant HM as HealthMonitor
     participant HP as Health source/publisher
     participant W as WatchdogSupervisor
 
@@ -84,7 +85,9 @@ sequenceDiagram
     loop configured diagnostics interval
         TD->>TD: snapshot progress heartbeat and stack high-water
         TD->>TD: collect six queue depth/high-water/drop statistics
-        TD->>HP: collect system metrics and publish HealthSnapshot
+        TD->>HM: collect ESP32-S3 free/minimum heap and reset/uptime
+        HM-->>TD: HealthSnapshot system metrics + watchdog count
+        TD->>HP: publish complete HealthSnapshot
     end
     loop configured watchdog check interval
         TW->>W: begin(bootId) after five required tasks register
@@ -115,6 +118,11 @@ same escaped row is offered to the CSV sink and the T-DIAG-owned Serial route.
 Neither producer tasks nor TaskLogger may write directly to the UART. Concrete
 storage and UART adapters remain integration points until the board/storage
 contracts are finalized.
+
+HealthMonitor implements `ITaskHealthSource` and `IWatchdogFaultSink`. Reuse the
+same instance for TaskDiagnostics' system-metric source and WatchdogSupervisor's
+fault sink so each distinct watchdog task fault contributes to
+`watchdogCount`. Stack watermark values are FreeRTOS stack words (not bytes).
 
 ## Scheduling configuration by task
 
