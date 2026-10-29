@@ -76,6 +76,16 @@ verification gates are configured. Raw sensor channels unavailable in
 `ProcessedFrame` are rejected, and HX710B remains excluded until its transducer
 and feature are approved. See [docs/FEATURE_PIPELINE.md](docs/FEATURE_PIPELINE.md).
 
+## Dataset replay
+
+`project/Replay/ReplayEngine.h` streams six-column CSV logs through a bounded
+reader and emits `FeatureVector` windows using manifest-supplied, approved
+column-to-index mappings. Since the current log omits FSS/schema and capture
+provenance metadata, replay requires externally verified dataset/schema hashes,
+model metadata and layout; defaults fail closed. Empty mapped fields, malformed
+rows and timestamp discontinuities are rejected without imputation. See
+[docs/REPLAY_ENGINE.md](docs/REPLAY_ENGINE.md).
+
 ## Board Support Package
 
 The BSP is under `include/project/BSP/` and `src/BSP/`. `BoardPins.h` is the single
