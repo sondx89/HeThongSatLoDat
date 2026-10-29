@@ -12,6 +12,8 @@ struct TaskStackMetric {
     std::uint16_t taskId{0};  // TODO(TBD): assign from the released task registry.
     std::uint32_t highWaterWords{0};
     std::uint32_t heartbeatAgeMs{0};
+    // TODO(TBD): include this in the released HealthSnapshot schema/version.
+    std::uint64_t failureCount{0};
     std::uint64_t deadlineMissCount{0};
     std::uint32_t restartCount{0};
     bool valid{false};

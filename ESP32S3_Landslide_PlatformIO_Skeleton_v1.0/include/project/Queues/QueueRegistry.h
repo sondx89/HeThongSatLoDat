@@ -51,6 +51,7 @@ struct QueueDepths {
 struct QueueStats {
     std::uint32_t capacity{0};
     std::uint32_t depth{0};
+    std::uint32_t highWaterMark{0};
     std::uint32_t droppedCount{0};
     std::uint32_t itemSizeBytes{0};
 };
@@ -107,6 +108,7 @@ private:
     struct QueueSlot {
         QueueHandle_t handle{nullptr};
         UBaseType_t capacity{0};
+        std::atomic<std::uint32_t> highWaterMark{0};
         std::atomic<std::uint32_t> droppedCount{0};
     };
 

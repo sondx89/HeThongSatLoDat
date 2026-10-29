@@ -92,6 +92,12 @@ QueueRegistryStatus QueueRegistry::initialize(const QueueDepths& depths) noexcep
     risk_.droppedCount.store(0, std::memory_order_relaxed);
     event_.droppedCount.store(0, std::memory_order_relaxed);
     log_.droppedCount.store(0, std::memory_order_relaxed);
+    sensor_.highWaterMark.store(0, std::memory_order_relaxed);
+    feature_.highWaterMark.store(0, std::memory_order_relaxed);
+    model_.highWaterMark.store(0, std::memory_order_relaxed);
+    risk_.highWaterMark.store(0, std::memory_order_relaxed);
+    event_.highWaterMark.store(0, std::memory_order_relaxed);
+    log_.highWaterMark.store(0, std::memory_order_relaxed);
     state_.store(State::Ready, std::memory_order_release);
     return QueueRegistryStatus::Ok;
 }
@@ -137,6 +143,14 @@ QueueRegistryStatus QueueRegistry::send(QueueSlot<T>& slot, const T& item,
         return QueueRegistryStatus::InvalidArgument;
     }
     if (xQueueSend(slot.handle, &item, waitTicks) == pdPASS) {
+        const std::uint32_t depth = static_cast<std::uint32_t>(
+            uxQueueMessagesWaiting(slot.handle));
+        std::uint32_t previous = slot.highWaterMark.load(std::memory_order_relaxed);
+        while (depth > previous &&
+               !slot.highWaterMark.compare_exchange_weak(
+                   previous, depth, std::memory_order_relaxed,
+                   std::memory_order_relaxed)) {
+        }
         return QueueRegistryStatus::Ok;
     }
 
@@ -234,6 +248,8 @@ QueueRegistryStatus QueueRegistry::getStats(QueueId id,
         stats.capacity = sensor_.capacity;
         stats.depth = static_cast<std::uint32_t>(
             uxQueueMessagesWaiting(sensor_.handle));
+        stats.highWaterMark =
+            sensor_.highWaterMark.load(std::memory_order_relaxed);
         stats.droppedCount = sensor_.droppedCount.load(std::memory_order_relaxed);
         stats.itemSizeBytes = static_cast<std::uint32_t>(
             sizeof(project::models::SensorFrame));
@@ -242,6 +258,8 @@ QueueRegistryStatus QueueRegistry::getStats(QueueId id,
         stats.capacity = feature_.capacity;
         stats.depth = static_cast<std::uint32_t>(
             uxQueueMessagesWaiting(feature_.handle));
+        stats.highWaterMark =
+            feature_.highWaterMark.load(std::memory_order_relaxed);
         stats.droppedCount = feature_.droppedCount.load(std::memory_order_relaxed);
         stats.itemSizeBytes = static_cast<std::uint32_t>(
             sizeof(project::models::FeatureVector));
@@ -250,6 +268,7 @@ QueueRegistryStatus QueueRegistry::getStats(QueueId id,
         stats.capacity = model_.capacity;
         stats.depth = static_cast<std::uint32_t>(
             uxQueueMessagesWaiting(model_.handle));
+        stats.highWaterMark = model_.highWaterMark.load(std::memory_order_relaxed);
         stats.droppedCount = model_.droppedCount.load(std::memory_order_relaxed);
         stats.itemSizeBytes = static_cast<std::uint32_t>(
             sizeof(project::models::ModelOutput));
@@ -258,6 +277,7 @@ QueueRegistryStatus QueueRegistry::getStats(QueueId id,
         stats.capacity = risk_.capacity;
         stats.depth = static_cast<std::uint32_t>(
             uxQueueMessagesWaiting(risk_.handle));
+        stats.highWaterMark = risk_.highWaterMark.load(std::memory_order_relaxed);
         stats.droppedCount = risk_.droppedCount.load(std::memory_order_relaxed);
         stats.itemSizeBytes = static_cast<std::uint32_t>(
             sizeof(project::models::RiskAssessment));
@@ -266,6 +286,7 @@ QueueRegistryStatus QueueRegistry::getStats(QueueId id,
         stats.capacity = event_.capacity;
         stats.depth = static_cast<std::uint32_t>(
             uxQueueMessagesWaiting(event_.handle));
+        stats.highWaterMark = event_.highWaterMark.load(std::memory_order_relaxed);
         stats.droppedCount = event_.droppedCount.load(std::memory_order_relaxed);
         stats.itemSizeBytes = static_cast<std::uint32_t>(
             sizeof(project::models::EventRecord));
@@ -274,6 +295,7 @@ QueueRegistryStatus QueueRegistry::getStats(QueueId id,
         stats.capacity = log_.capacity;
         stats.depth = static_cast<std::uint32_t>(
             uxQueueMessagesWaiting(log_.handle));
+        stats.highWaterMark = log_.highWaterMark.load(std::memory_order_relaxed);
         stats.droppedCount = log_.droppedCount.load(std::memory_order_relaxed);
         stats.itemSizeBytes = static_cast<std::uint32_t>(sizeof(LogRecord));
         break;

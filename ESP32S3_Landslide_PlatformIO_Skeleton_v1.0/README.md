@@ -66,8 +66,9 @@ copyable.
 Queue depths are intentionally zero/unconfigured in `QueueDepths`; call `initialize()` with
 measured, reviewed values before creating application tasks. Queue creation uses FreeRTOS
 dynamic allocation and reports allocation failure without exposing a partial registry.
-Choose finite wait times; indefinite waits are rejected. Send failures increment per-queue
-drop counters, while `getStats()` provides current depth, capacity, payload size and drops.
+Choose finite wait times; indefinite queue waits are rejected. Send failures increment
+per-queue drop counters, while `getStats()` provides current depth, capacity, observed
+high-water mark, payload size and drops.
 Drop/coalescing policy, including preservation of critical events and risk transitions,
 remains the responsibility of the owning producer/consumer until those policies are approved.
 
@@ -75,6 +76,33 @@ The queue payload mapping is: `Q_SENSOR` / `SensorFrame`, `Q_FEATURE` / `Feature
 `Q_MODEL` / `ModelOutput`, `Q_RISK` / `RiskAssessment`, `Q_EVENT` / `EventRecord`, and
 `Q_LOG` / tagged `LogRecord`. The log catalog currently defines only the Event variant;
 additional variants and final queue depths remain TODOs from the system documents.
+
+## FreeRTOS task framework
+
+`project/Tasks/TaskFramework.h` and `ApplicationTasks.h` define the startup/heartbeat
+framework and `TaskSensor`, `TaskFeature`, `TaskInference`, `TaskRisk`, `TaskLogger`,
+and `TaskDiagnostics`. Each task's priority, stack size (in FreeRTOS stack words),
+cycle/queue wait and heartbeat timeout must be supplied from target measurements.
+Unset values intentionally prevent task creation; do not copy illustrative values from
+the documents as production settings.
+
+`TaskFramework::startAll()` must be called from task context after the scheduler is
+running. It validates every configuration and creates all tasks at a startup gate before
+releasing any of them. QueueRegistry must already be initialized. The startup gate is
+the only intentional indefinite task wait.
+The framework uses `xTaskCreate`, so FreeRTOS allocates each task stack/TCB dynamically;
+the total must be measured and reviewed against the board RAM budget. Tasks are
+single-owner for their managers, inference engine, feature pipeline and storage sink.
+TaskDiagnostics samples actual progress heartbeats, stack high-water marks and queue
+depth/high-water/drop counts. Heartbeat does not advance on an idle timeout.
+
+Risk context acquisition, event catalog/deduplication, log persistence/encoding and
+system health metric collection are injected interfaces because the existing subsystem
+contracts do not fully specify those operations. Their required integration points and
+the task sequence are shown in
+[TASK_RUNTIME_FLOW.md](./docs/TASK_RUNTIME_FLOW.md). The framework does not feed a
+watchdog; only the separately reviewed supervisor may do so based on health/deadline
+policy.
 
 ## Build
 1. Open this folder in VS Code.
