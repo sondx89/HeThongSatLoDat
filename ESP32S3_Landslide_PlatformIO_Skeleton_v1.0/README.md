@@ -144,6 +144,33 @@ the task sequence are shown in
 hardware watchdog; the supervisor's BSP restart path is used for detected heartbeat
 timeouts. Hardware watchdog initialization/feed remains an explicit BSP TODO.
 
+## Mock sensor environment
+
+`project/Drivers/MockSensors.h` provides deterministic, fixed-storage mock
+drivers for MPU9250 raw axes, soil raw count, rain raw count, and HX710B raw
+count. `MockEnvironmentProfile::demo()` is a development fixture only: those
+numbers are not hardware ranges, calibrated quantities, or risk thresholds.
+Physical/calibrated channels and the schema-versioned `validMask` are left
+unset; per-sensor status indicates whether a synthetic raw read succeeded.
+`MockSensorBehavior::failEveryReads` can inject repeatable read failures.
+
+`SensorManager` combines the four injected `ISensor` implementations into
+timestamped `SensorFrame`s. Sampling period and boot ID are explicit inputs;
+no production cadence or board ID is assumed.
+
+Run the sensor acquisition simulation on a host without a board or attached
+sensors with `pio run -e mock-native -t exec`. It compiles only the mock drivers,
+SensorManager, and host runner, emits twelve deterministic frames, and verifies
+that periodic rain-sensor failure injection reaches the frame status. To run
+the same sensor-only demo on an ESP32-S3 without external sensor hardware, build
+and upload `esp32-s3-mock`; the MCU board itself is still required.
+
+This repository is still a firmware skeleton: other services and complete
+application composition remain placeholders. These targets exercise the
+sensor/mock acquisition boundary, not the full inference/risk/task firmware.
+The mock classes can be injected into `TaskSensor`'s SensorManager in the
+application composition when those remaining modules are implemented.
+
 ## Health monitoring
 
 `project/Diagnostics/HealthMonitor.h` creates bounded `HealthSnapshot` data.
