@@ -105,6 +105,14 @@ from an approved, hash-verified risk configuration. The requested `SAFE` and
 `Normal` and `DangerTest` contract states. See
 [docs/RISK_MANAGER.md](docs/RISK_MANAGER.md).
 
+## Serial diagnostics CLI
+
+`project/Diagnostics/SerialDiagnostics.h` parses bounded, read-only
+`diag status`, `diag health`, `diag sensor`, `diag memory`, and `diag risk`
+commands. The UART-owner task supplies serial and snapshot adapters; responses
+are rate-limited JSON Lines, and missing values stay explicit. See
+[docs/SERIAL_DIAGNOSTICS.md](docs/SERIAL_DIAGNOSTICS.md).
+
 ## Board Support Package
 
 The BSP is under `include/project/BSP/` and `src/BSP/`. `BoardPins.h` is the single
