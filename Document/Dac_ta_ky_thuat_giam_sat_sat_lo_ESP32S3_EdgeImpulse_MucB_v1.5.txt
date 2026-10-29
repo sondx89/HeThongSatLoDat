@@ -1,0 +1,2605 @@
+TÀI LIỆU ĐẶC TẢ KỸ THUẬT
+HỆ THỐNG GIÁM SÁT NGUY CƠ SẠT LỞ ĐẤT
+SỬ DỤNG ESP32-S3 VÀ EDGE IMPULSE
+BẢN HIỆU CHỈNH CHO MỨC B — HỆ THỐNG THỬ NGHIỆM HIỆN TRƯỜNG
+
+Phiên bản: 1.5 (chốt MPU9250 qua I2C; bổ sung yêu cầu driver và xác minh phần cứng)
+Ngày cập nhật: 2026-10-29
+
+LƯU Ý PHẠM VI VÀ AN TOÀN
+Tài liệu này mô tả một hệ thống prototype/thử nghiệm hiện trường. Hệ thống hỗ trợ thu thập dữ liệu, phát hiện biến động và tạo cảnh báo thử nghiệm; chưa được chứng minh là hệ thống dự báo sạt lở đạt chuẩn an toàn. Không dùng kết quả của thiết bị này làm căn cứ duy nhất để sơ tán, cho phép tiếp tục thi công hoặc đưa ra quyết định an toàn sinh mạng. Các ngưỡng ban đầu phải được kiểm chứng tại địa điểm triển khai và được người có chuyên môn địa kỹ thuật phê duyệt trước khi sử dụng vận hành.
+
+Quy ước trong tài liệu:
+- [BẮT BUỘC]: yêu cầu cần hoàn thành trước nghiệm thu mức B.
+- [CẦN CHỐT]: thông tin phải xác định theo phần cứng, địa điểm hoặc dữ liệu thực tế.
+- [ĐỀ XUẤT]: giải pháp khuyến nghị, có thể điều chỉnh bằng hồ sơ thiết kế.
+- Những thông số chưa có bằng chứng thực nghiệm được ghi là giá trị khởi đầu hoặc TBD; không được coi là thông số đã được xác nhận.
+
+MỤC LỤC
+1. Mục tiêu và phạm vi
+2. Yêu cầu chức năng
+3. Kiến trúc tổng thể
+4. Phần cứng và giao tiếp
+5. Định nghĩa tín hiệu và dữ liệu
+6. Hiệu chuẩn và chất lượng dữ liệu
+7. Lọc dữ liệu và tạo đặc trưng
+8. Mô hình Edge Impulse
+9. Logic đánh giá rủi ro và cảnh báo
+10. Chu kỳ hoạt động và xử lý lỗi
+11. Ghi dữ liệu và lưu trữ
+12. Cấu trúc phần mềm
+13. Cấu hình build và triển khai offline
+14. Kế hoạch kiểm thử
+15. Hiệu năng và độ bền
+16. Tiêu chí nghiệm thu mức B
+17. Bảo trì và vận hành hiện trường
+18. Rủi ro, giới hạn và các quyết định còn mở
+19. System Requirement Specification (SRS)
+20. Kiến trúc FreeRTOS và quản lý tác vụ
+21. Watchdog Management
+22. UML State Machine
+23. UML Sequence Diagrams
+24. FMEA — phân tích dạng lỗi và ảnh hưởng
+25. Data Retention Policy
+26. OTA Strategy
+27. Risk Configuration Versioning
+28. Deployment Architecture
+29. Dataset Governance
+30. Safety Case và Safety Assumptions
+31. RAM Budget
+32. Flash Budget
+33. Chuẩn hóa Event ID
+34. Configuration Manifest
+35. Replay Framework
+36. Health Metrics
+37. UML bổ sung: Class, Component và Deployment Diagrams
+38. ADR-001: Lựa chọn Regression hay Classification
+39. Data Dictionary chính thức
+40. API Contract nội bộ
+41. Error Code Catalog
+Phụ lục A. Schema CSV đề xuất
+Phụ lục B. Ma trận trạng thái/cảnh báo
+Phụ lục C. Checklist triển khai
+
+1. MỤC TIÊU VÀ PHẠM VI
+
+1.1 Mục tiêu
+Xây dựng thiết bị nhúng dùng ESP32-S3 để:
+- Đọc các cảm biến tại hiện trường.
+- Hiệu chuẩn và kiểm tra chất lượng dữ liệu.
+- Tính toán đặc trưng và chạy mô hình Edge Impulse trực tiếp trên ESP32-S3.
+- Đưa ra trạng thái theo quy tắc thử nghiệm kết hợp kết quả AI và các ngưỡng cảm biến.
+- Ghi dữ liệu và sự kiện ra thẻ SD để phân tích sau thử nghiệm.
+- Hiển thị trạng thái qua Serial Monitor; có thể bổ sung còi/đèn cảnh báo.
+- Hỗ trợ tái phân tích dữ liệu và xây dựng phiên bản mô hình tiếp theo.
+
+1.2 Phạm vi
+Mục tiêu là hệ thống thử nghiệm hiện trường mức B, không phải sản phẩm an toàn đã chứng nhận.
+Các ứng dụng dự kiến: theo dõi biến động tại taluy, khu vực đất dốc, công trình hoặc vị trí thử nghiệm có kiểm soát.
+Không nằm trong phạm vi phiên bản này:
+- Khẳng định xác suất sạt lở nếu chưa có dữ liệu và phương pháp hiệu chuẩn xác suất.
+- Tự động phát lệnh sơ tán hoặc điều khiển thiết bị an toàn.
+- Đảm bảo hoạt động liên tục trong mọi điều kiện thời tiết.
+- Đảm bảo đo dịch chuyển tuyệt đối chỉ bằng IMU.
+
+1.3 Thuật ngữ
+- RiskScore: đầu ra số của mô hình, chỉ có ý nghĩa theo định nghĩa nhãn huấn luyện; không mặc nhiên là xác suất.
+- Tilt: góc nghiêng suy ra từ IMU so với tư thế tham chiếu đã xác định.
+- Sensor fault: cảm biến không trả dữ liệu, dữ liệu ngoài dải, dữ liệu cũ hoặc không hợp lý.
+- Data quality: trạng thái cho biết dữ liệu có đủ điều kiện dùng cho suy luận hay không.
+- Final status: trạng thái do logic hệ thống quyết định sau khi xem xét dữ liệu, AI và các quy tắc an toàn.
+- Mức B: prototype thử nghiệm hiện trường có ghi dữ liệu, chẩn đoán lỗi, cảnh báo thử nghiệm và quy trình kiểm thử.
+
+2. YÊU CẦU CHỨC NĂNG
+
+2.1 Thu thập dữ liệu
+- [BẮT BUỘC] Đọc MPU9250, cảm biến độ ẩm đất, cảm biến mưa và module HX710B theo lịch lấy mẫu được cấu hình.
+- [BẮT BUỘC] Mỗi mẫu phải có timestamp hoặc uptime đơn điệu, sequence ID và trạng thái hợp lệ.
+- [BẮT BUỘC] Không thay dữ liệu lỗi bằng 0 mà không ghi nhận lỗi.
+- [BẮT BUỘC] Nếu một cảm biến lỗi, ghi rõ mã lỗi và xác định liệu các chức năng còn lại có thể tiếp tục hay không.
+- [CẦN CHỐT] Tần số đọc từng cảm biến theo khả năng thực tế và yêu cầu thử nghiệm. Mục tiêu ban đầu của hệ thống là một chu kỳ tổng thể mỗi giây; không ép cảm biến chậm vào tần số cao hơn khả năng của nó.
+
+2.2 AI và đánh giá
+- [BẮT BUỘC] Mô hình được chạy cục bộ trên ESP32-S3, không cần kết nối mạng trong lúc suy luận.
+- [BẮT BUỘC] Ghi phiên bản model, trạng thái suy luận và RiskScore nếu có.
+- [BẮT BUỘC] Nếu inference lỗi, đầu ra không hợp lệ hoặc dữ liệu đầu vào thiếu, không được mặc định SAFE.
+- [BẮT BUỘC] Quy tắc cảnh báo theo ngưỡng phải hoạt động độc lập với AI để có thể phát hiện một số điều kiện bất thường rõ ràng.
+- [CẦN CHỐT] Ý nghĩa RiskScore, nhãn huấn luyện và ngưỡng phân loại trước khi huấn luyện mô hình.
+
+2.3 Cảnh báo và trạng thái
+Các trạng thái tối thiểu:
+- STARTUP: thiết bị đang khởi động/chưa hoàn thành kiểm tra.
+- NORMAL: dữ liệu hợp lệ và không có điều kiện cảnh báo nào được kích hoạt.
+- MONITOR: có dấu hiệu cần theo dõi hoặc kết quả AI vượt ngưỡng theo dõi.
+- DANGER_TEST: quy tắc thử nghiệm phát hiện điều kiện nghiêm trọng; cần kiểm tra ngay tại hiện trường.
+- SENSOR_FAULT: một hoặc nhiều cảm biến quan trọng lỗi.
+- MODEL_ERROR: mô hình không chạy hoặc đầu ra không hợp lệ.
+- STORAGE_ERROR: lỗi ghi lưu trữ.
+- TIME_UNSYNC: chưa có thời gian lịch chính xác; uptime vẫn phải hoạt động.
+Có thể lưu trạng thái chính và các cờ lỗi riêng để tránh mất thông tin khi nhiều lỗi xảy ra cùng lúc.
+
+2.4 Yêu cầu phi chức năng
+- Có thể vận hành offline sau khi đã nạp firmware và model.
+- Có thể truy xuất log để phân tích.
+- Có khả năng khởi động lại và tiếp tục ghi dữ liệu mà không làm hỏng toàn bộ log trước đó.
+- Có cơ chế phát hiện lỗi cảm biến, lỗi SD và thiếu bộ nhớ.
+- Có tài liệu build, đấu nối, hiệu chuẩn và kiểm thử đủ để tái lập triển khai.
+
+3. KIẾN TRÚC TỔNG THỂ
+
+3.1 Kiến trúc xử lý
+1. Sensor acquisition: đọc cảm biến và đánh dấu thời gian.
+2. Calibration: chuyển đổi số đo thô thành đơn vị/giá trị đã hiệu chuẩn.
+3. Data quality: kiểm tra timeout, phạm vi, dữ liệu cũ và trạng thái giao tiếp.
+4. Filtering: lọc nhiễu với độ trễ đã đánh giá.
+5. Feature engineering: tính tilt, độ lớn gia tốc, xu hướng hoặc thống kê cửa sổ.
+6. AI inference: chạy model Edge Impulse nếu đầu vào hợp lệ.
+7. Safety/rule engine: đánh giá ngưỡng kỹ thuật và trạng thái lỗi độc lập với AI.
+8. Decision manager: hợp nhất kết quả theo ma trận đã xác định.
+9. Logger: ghi dữ liệu và sự kiện.
+10. Output: Serial và tùy chọn còi/đèn.
+
+3.2 Nguyên tắc thiết kế
+- Tách driver phần cứng khỏi logic quyết định.
+- Dùng một nguồn định nghĩa đơn vị và kiểu dữ liệu xuyên suốt chương trình.
+- Mỗi hàm đọc cảm biến phải trả về dữ liệu cùng trạng thái thành công/lỗi.
+- Logger không được chặn chu kỳ đọc cảm biến quá lâu; cần đo thời gian ghi và có chiến lược khi SD chậm.
+- Không thực hiện suy luận AI nếu vector đầu vào thiếu trường, sai thứ tự, sai đơn vị hoặc chưa đủ cửa sổ dữ liệu.
+- Quyết định nguy cơ và quyết định sức khỏe thiết bị là hai thông tin riêng biệt.
+
+4. PHẦN CỨNG VÀ GIAO TIẾP
+
+4.1 Bộ điều khiển
+- MCU: ESP32-S3. [CẦN CHỐT] Xác định chính xác board, dung lượng flash, PSRAM (nếu có), loại cổng USB và nguồn cấp.
+- Firmware: PlatformIO + VS Code, framework Arduino-ESP32 (cần chốt phiên bản).
+- Inference: Edge Impulse C++ library/SDK được export cho dự án và tương thích với board.
+
+4.2 MPU9250
+- Giao tiếp đã chọn: I2C qua ESP32-S3. Không đọc MPU9250 bằng ADC. SDA/SCL GPIO, I2C address/clock, module điện áp, range, ODR, filter, scale/bias và hướng lắp đặt vẫn TBD cho đến khi xác minh BOM/datasheet/schematic và thử nghiệm bàn.
+- Ghi rõ dải đo accelerometer/gyroscope, tần số đọc, đơn vị và cách chuyển đổi raw value.
+- Xác minh chip/module thực tế và tình trạng sẵn có; không giả định mọi module mang nhãn MPU9250 có cùng cấu hình hoặc chất lượng.
+- Magnetometer không bắt buộc dùng trong phiên bản đầu, trừ khi có yêu cầu xác định hướng tuyệt đối.
+
+4.3 Cảm biến độ ẩm đất
+- [CẦN CHỐT] Xác định chính xác cảm biến điện dung hay điện trở, mã module và đầu ra analog/digital.
+- Nếu đầu ra analog: ghi rõ điện áp tối đa, dải ADC, cách nối với ESP32-S3 và yêu cầu chia áp/bảo vệ.
+- Ưu tiên cảm biến phù hợp đo dài hạn; đánh giá ăn mòn, ảnh hưởng nhiệt độ và khác biệt giữa các loại đất.
+- Không gọi giá trị 0–100% là độ ẩm thể tích nếu chưa có hiệu chuẩn tham chiếu phù hợp.
+
+4.4 Cảm biến mưa YL-83
+- Ghi rõ dùng đầu ra analog, digital hay cả hai; xác định chân, điện áp và ngưỡng.
+- Với bản mạch phát hiện nước dạng tấm, chỉ coi kết quả là mức ướt/tín hiệu tương đối trừ khi đã hiệu chuẩn độc lập.
+- Không diễn giải trực tiếp phần trăm ADC thành mm/h.
+- Đánh giá ăn mòn, bám bẩn, ngưng tụ và thời gian khô sau mưa.
+
+4.5 HX710B và đầu đo
+- HX710B là bộ chuyển đổi tín hiệu; cần xác định chính xác đầu đo được kết nối.
+- [BẮT BUỘC] Ghi mã đầu đo, đại lượng đo, dải đo, đơn vị, sơ đồ đấu nối và hệ số hiệu chuẩn.
+- Nếu đo lực/tải: cần load cell tương thích và kết cấu cơ khí phù hợp.
+- Nếu đo áp suất nước lỗ rỗng: cần đầu đo áp suất phù hợp với môi trường đất, dải áp suất, cách lắp đặt và phương pháp hiệu chuẩn.
+- Không dùng các từ Pressure/Load/Stress thay thế cho nhau. Chọn đúng một đại lượng đo chính và ghi rõ cách suy ra đại lượng khác nếu có.
+- Không dùng giá trị HX710B trong RiskScore trước khi xác định quan hệ vật lý giữa phép đo và nguy cơ tại địa điểm thử nghiệm.
+
+4.6 Thẻ SD và đầu ra cảnh báo
+- Xác định module SD, giao tiếp SPI, chân CS/SCK/MISO/MOSI, hệ thống file và dung lượng thẻ.
+- Kiểm tra mức logic, nguồn cấp và khả năng ghi trong môi trường rung/ẩm.
+- Nếu dùng còi/đèn, xác định mạch driver, dòng tải, mức kích hoạt và hành vi khi reset.
+- Cân nhắc vỏ bảo vệ, chống nước, chống ngưng tụ, chống sét lan truyền và bảo vệ nguồn tùy địa điểm.
+
+4.7 Hồ sơ bắt buộc
+Trước khi lắp đặt phải có:
+- BOM: mã linh kiện, nhà sản xuất/nhà cung cấp, số lượng và phiên bản.
+- Sơ đồ điện và bảng pin mapping.
+- Sơ đồ cơ khí/vị trí gắn cảm biến.
+- Bảng nguồn, dòng tiêu thụ ước tính và phương án cấp nguồn.
+- Danh sách các thông số đã xác minh trên phần cứng thật.
+
+5. ĐỊNH NGHĨA TÍN HIỆU VÀ DỮ LIỆU
+
+5.1 Nguyên tắc
+Mọi tín hiệu phải có tên, kiểu dữ liệu, đơn vị, dải hợp lệ, tần số cập nhật và quy tắc báo lỗi. Giá trị chưa đo được phải được biểu diễn bằng trạng thái invalid/NaN theo quy ước phần mềm, không được thay bằng số 0 một cách âm thầm.
+
+5.2 MPU9250
+Tín hiệu thô/đã hiệu chuẩn:
+- accel_x, accel_y, accel_z: m/s² hoặc g; chọn một hệ đơn vị thống nhất.
+- gyro_x, gyro_y, gyro_z: °/s hoặc rad/s.
+- tilt_roll_deg, tilt_pitch_deg: độ, tính theo tư thế tham chiếu.
+- accel_magnitude: độ lớn gia tốc; ghi rõ có trừ thành phần trọng lực hay không.
+- imu_status: trạng thái giao tiếp, kiểm tra dải và độ hợp lệ.
+
+Cần quy định:
+- Hệ tọa độ và chiều dương của từng trục.
+- Công thức tính roll/pitch và phương pháp lọc.
+- Cách xác định tư thế tham chiếu ban đầu.
+- Cách phát hiện cảm biến bị xoay/lỏng khỏi giá đỡ.
+- Giới hạn: IMU không tự cung cấp phép đo dịch chuyển tuyệt đối ổn định dài hạn; không được gọi tilt là displacement.
+
+5.3 Soil moisture
+- soil_adc_raw: số đọc ADC.
+- soil_moisture_relative_pct: phần trăm tương đối sau hiệu chuẩn, nếu chỉ có hiệu chuẩn hai điểm.
+- soil_vwc_pct: chỉ dùng nếu có phương pháp hiệu chuẩn VWC theo loại đất và phép đo tham chiếu.
+- soil_status: trạng thái hợp lệ/lỗi.
+
+Công thức nội suy hai điểm chỉ dùng khi phù hợp với cảm biến thực tế:
+moisture_pct = clamp((ADC - ADC_dry) / (ADC_wet - ADC_dry) * 100, 0, 100)
+Nếu chiều biến thiên ADC ngược lại thì công thức phải đổi tương ứng. Không giả định ADC tăng khi ẩm tăng.
+
+5.4 Rain sensor
+- rain_adc_raw hoặc rain_digital_state.
+- rain_wetness_relative_pct: chỉ là chỉ số tương đối đã chuẩn hóa nếu được hiệu chuẩn.
+- rain_status.
+Không gọi chỉ số này là lượng mưa hoặc cường độ mưa nếu không có thiết bị đo mưa phù hợp và hiệu chuẩn độc lập.
+
+5.5 HX710B
+- hx710_raw_count.
+- calibrated_measurement.
+- calibrated_unit.
+- hx710_status.
+Tên calibrated_measurement phải được thay bằng tên đại lượng thật sau khi chốt đầu đo, ví dụ load_kg hoặc pore_pressure_kpa. Không đưa giá trị chưa hiệu chuẩn vào mô hình như một đơn vị vật lý.
+
+5.6 Định dạng dữ liệu nội bộ
+Mỗi bản ghi cần có:
+- sequence_id: số thứ tự tăng dần.
+- uptime_ms: thời gian đơn điệu từ lúc khởi động.
+- timestamp_utc: thời gian UTC nếu đã đồng bộ; nếu chưa có, để trống và ghi TIME_UNSYNC.
+- Giá trị thô và giá trị hiệu chuẩn.
+- Trạng thái từng cảm biến.
+- Trạng thái model, risk score, mức AI và mức cuối cùng.
+- Lý do phát cảnh báo và trạng thái lưu trữ.
+
+6. HIỆU CHUẨN VÀ CHẤT LƯỢNG DỮ LIỆU
+
+6.1 MPU9250
+- Đặt thiết bị ở tư thế tham chiếu cố định; ghi rõ hướng các trục.
+- Thu thập tối thiểu 500 mẫu đứng yên làm bước kiểm tra ban đầu, không coi số lượng này tự động đảm bảo hiệu chuẩn đúng.
+- Ước lượng bias gyro khi thiết bị đứng yên.
+- Hiệu chuẩn accelerometer theo phương pháp phù hợp; đo nhiều tư thế nếu cần xác định bias và scale đầy đủ.
+- Ghi hệ số hiệu chuẩn, ngày hiệu chuẩn, nhiệt độ (nếu đo được), phiên bản firmware và người thực hiện.
+- Kiểm tra góc nghiêng với bàn nghiêng/thiết bị tham chiếu ở các điểm trong dải dùng thử.
+- Mục tiêu ban đầu ±0,5° chỉ được chấp nhận nếu phép đo tham chiếu chứng minh đạt trong điều kiện thử; nếu không, phải điều chỉnh tiêu chí hoặc phần cứng.
+
+6.2 Độ ẩm đất
+- Xác định loại đất và điều kiện lắp đặt.
+- Hiệu chuẩn ở nhiều mức ẩm có đo tham chiếu; ghi số lần lặp và độ phân tán.
+- Hai điểm “không khí” và “nhúng nước” chỉ là hiệu chuẩn tương đối sơ bộ, không đủ để chứng minh VWC.
+- Ghi hệ số, dải sử dụng, điều kiện nhiệt độ và ngày hiệu chuẩn.
+- Kiểm tra độ trôi và tính lặp lại sau khi cảm biến được lắp vào đất.
+
+6.3 Cảm biến mưa
+- Xác định phép đo cần thiết: phát hiện ướt hay đo lượng mưa.
+- Với cảm biến dạng tấm, thử các trạng thái khô, ướt, bẩn và khô lại; ghi độ ổn định và thời gian hồi phục.
+- Nếu yêu cầu mm/h hoặc lượng mưa tích lũy, dùng cảm biến đo mưa phù hợp và hiệu chuẩn riêng.
+- Không áp dụng ngưỡng 0–100% như một đơn vị vật lý nếu chưa có cơ sở.
+
+6.4 HX710B/đầu đo
+- Kiểm tra zero/no-load và nhiều điểm chuẩn trong dải sử dụng.
+- Dùng thiết bị chuẩn có độ chính xác phù hợp; ghi tải/áp suất chuẩn, giá trị ADC, giá trị chuyển đổi và sai số.
+- Đánh giá tuyến tính, độ lặp lại, hysteresis và độ trôi.
+- Sai số mục tiêu phải dựa vào datasheet đầu đo và yêu cầu phép đo; không mặc định ±2% nếu chưa xác định cấu hình.
+
+6.5 Quản lý hiệu chuẩn
+Mỗi bộ hệ số phải có ID/phiên bản. Hệ số không hợp lệ hoặc thiếu phải khiến dữ liệu được đánh dấu chưa hiệu chuẩn, không được âm thầm dùng giá trị mặc định. Việc thay cảm biến, thay vị trí lắp hoặc thay kết cấu cơ khí phải kích hoạt đánh giá nhu cầu hiệu chuẩn lại.
+
+6.6 Data quality checks
+Tối thiểu kiểm tra:
+- Timeout giao tiếp.
+- Giá trị ngoài dải vật lý/ADC.
+- Dữ liệu không thay đổi quá lâu khi tín hiệu đáng lẽ phải thay đổi.
+- Timestamp cũ hoặc mất mẫu.
+- NaN/Inf và lỗi chuyển đổi.
+- Đầu vào model thiếu hoặc sai thứ tự.
+- Trạng thái hiệu chuẩn không hợp lệ.
+Mỗi lỗi phải có mã, thời điểm bắt đầu, thời điểm phục hồi và được ghi vào log.
+
+7. LỌC DỮ LIỆU VÀ TẠO ĐẶC TRƯNG
+
+7.1 Lọc
+- Moving average có thể dùng cho tín hiệu biến thiên chậm như độ ẩm; cửa sổ 10 mẫu là giá trị khởi đầu, phải đánh giá theo tần số lấy mẫu và độ trễ.
+- Bộ lọc thông thấp cho IMU cần quy định alpha hoặc tần số cắt, tần số lấy mẫu và cách khởi tạo.
+- Không lọc theo cách che khuất bước nhảy thực sự có thể quan trọng đối với cảnh báo.
+- Ghi cả dữ liệu thô và dữ liệu đã xử lý trong giai đoạn thử nghiệm.
+
+7.2 Đặc trưng cơ bản
+- tilt_roll_deg, tilt_pitch_deg.
+- accel_magnitude.
+- soil_moisture_relative_pct hoặc soil_vwc_pct (chỉ dùng đúng định nghĩa).
+- rain_wetness_relative_pct hoặc tín hiệu mưa đã hiệu chuẩn.
+- calibrated_measurement của đầu đo HX710B, sau khi xác định đơn vị.
+- Các đặc trưng theo cửa sổ như mean, standard deviation, slope/rate of change chỉ được thêm khi đã thống nhất cách tính và có dữ liệu huấn luyện tương ứng.
+
+7.3 Hợp đồng feature vector
+- Ghi danh sách đặc trưng theo đúng thứ tự mà model yêu cầu.
+- Ghi đơn vị, kiểu số, chuẩn hóa và số mẫu trong cửa sổ.
+- Cùng một hàm tiền xử lý phải được dùng khi tạo dataset huấn luyện và khi suy luận trên thiết bị.
+- Không suy luận nếu vector không đủ mẫu, có giá trị không hợp lệ hoặc khác schema model.
+- Đính kèm một bộ dữ liệu mẫu cùng kết quả feature vector mong đợi để kiểm thử regression.
+
+8. MÔ HÌNH EDGE IMPULSE
+
+8.1 Chọn mục tiêu mô hình
+Regression không tự tạo ra “nguy cơ sạt lở”. Trước khi huấn luyện phải xác định biến mục tiêu và cách gán nhãn.
+
+Các phương án mục tiêu có thể xem xét:
+A. Dự báo một đại lượng vật lý trong tương lai, ví dụ mức thay đổi góc nghiêng/đại lượng dịch chuyển đã được đo tham chiếu trong khoảng thời gian xác định.
+B. Ước lượng điểm rủi ro theo quy tắc chuyên môn đã được định nghĩa và có dữ liệu tham chiếu.
+C. Nếu mục tiêu thực sự là phân loại trạng thái an toàn, xem xét mô hình classification thay vì cố ép bài toán thành regression.
+
+Chọn một phương án cho phiên bản thử nghiệm và ghi rõ:
+- Tên target.
+- Đơn vị hoặc miền giá trị.
+- Khoảng thời gian dự báo nếu là target tương lai.
+- Nguồn dữ liệu/thiết bị tham chiếu.
+- Quy tắc gán nhãn và xử lý nhãn không chắc chắn.
+
+8.2 RiskScore
+- Miền 0–1 chỉ là quy ước nếu mô hình được huấn luyện đúng miền đó.
+- Không gọi RiskScore là xác suất xảy ra sạt lở trừ khi có quy trình hiệu chuẩn xác suất và đánh giá độc lập phù hợp.
+- Không áp dụng mapping 0,00–0,33 SAFE; 0,34–0,66 MONITOR; 0,67–1,00 DANGER như ngưỡng đã được chứng minh. Có thể giữ làm ngưỡng thử nghiệm ban đầu, phải gắn nhãn provisional và hiệu chỉnh bằng validation data.
+- Quy định chính xác xử lý giá trị tại biên, ngoài miền, NaN/Inf và inference error.
+
+8.3 Dataset
+Tối thiểu ghi:
+- Nguồn, địa điểm, thời gian, loại đất và điều kiện môi trường.
+- ID thiết bị/cảm biến, hệ số hiệu chuẩn và phiên bản firmware.
+- Các sự kiện bất thường và phương pháp xác minh.
+- Cách gán nhãn, người/nguồn xác nhận và độ tin cậy nhãn.
+- Tỷ lệ dữ liệu thiếu và cách xử lý.
+- Điều kiện thu thập để tránh chỉ có dữ liệu bình thường.
+Không được tự tạo nhãn “DANGER” chỉ từ một ngưỡng tùy ý rồi tuyên bố mô hình đã học được nguy cơ thực tế.
+
+8.4 Chia tập và đánh giá
+- Chia train/validation/test theo sự kiện, khoảng thời gian hoặc địa điểm khi có thể; tránh rò rỉ giữa các cửa sổ dữ liệu gần nhau.
+- Không dùng test set để điều chỉnh ngưỡng.
+- Regression: báo cáo MAE, RMSE và sai số theo các điều kiện vận hành.
+- Đánh giá riêng khả năng bỏ sót các sự kiện quan trọng, cảnh báo giả và thời gian cảnh báo sớm nếu có nhãn sự kiện đáng tin cậy.
+- Nếu dữ liệu chưa đủ để đánh giá, ghi rõ đây là mô hình thử nghiệm và không dùng để đưa ra kết luận dự báo đáng tin cậy.
+
+8.5 Triển khai model
+- Export thư viện Edge Impulse phù hợp với board và phiên bản toolchain.
+- Ghi model version, ngày export, cấu hình input, label/target và mã băm hoặc nhận dạng gói model nếu quy trình dự án hỗ trợ.
+- Kiểm thử kết quả suy luận trên cùng bộ input ở máy phát triển và ESP32-S3; đặt ngưỡng sai khác cho phép.
+- Xác nhận RAM, flash, thời gian suy luận và ổn định.
+- Khi cập nhật model, phải chạy lại bộ kiểm thử hồi quy và lưu phiên bản model cùng log.
+
+9. LOGIC ĐÁNH GIÁ RỦI RO VÀ CẢNH BÁO
+
+9.1 Nguyên tắc
+- AI là một nguồn thông tin, không phải nguồn duy nhất.
+- Quy tắc dựa trên cảm biến và sức khỏe hệ thống phải độc lập với AI.
+- Khi dữ liệu quan trọng không hợp lệ, trạng thái hệ thống phải thể hiện không đủ dữ liệu; không gán SAFE.
+- Mức DANGER_TEST là cảnh báo thử nghiệm, không phải ngưỡng an toàn địa kỹ thuật đã chứng nhận.
+
+9.2 Mức tilt ban đầu
+Tài liệu phiên bản trước đưa ra:
+- Tilt < 3°: SAFE.
+- 3° ≤ Tilt < 8°: MONITOR.
+- Tilt ≥ 8°: DANGER.
+
+Trong bản này, các giá trị đó chỉ là ngưỡng khởi đầu để kiểm thử phần mềm. Chúng phải được xác minh theo tư thế lắp, độ nhiễu, độ trôi, kết cấu gắn và dữ liệu hiện trường trước khi dùng làm tiêu chí vận hành. Cần phân biệt góc nghiêng tuyệt đối so với tham chiếu với thay đổi góc so với baseline.
+
+9.3 Mapping RiskScore ban đầu
+Nếu vẫn dùng mô hình regression với đầu ra 0–1, có thể dùng mapping provisional:
+- 0,00–0,33: NORMAL/SAFE candidate.
+- >0,33–0,66: MONITOR.
+- >0,66–1,00: DANGER_TEST candidate.
+Phải quy định cách xử lý chính xác các biên và kiểm tra đầu ra ngoài [0,1]. Đây không phải ngưỡng đã được chứng minh cho sạt lở.
+
+9.4 Quy tắc hợp nhất đề xuất
+- Nếu có điều kiện ngưỡng nghiêm trọng đã được kiểm chứng trong phạm vi thử nghiệm: phát DANGER_TEST bất kể AI.
+- Nếu dữ liệu cảm biến thiết yếu không hợp lệ: đặt SENSOR_FAULT hoặc DATA_INVALID; không phát kết luận SAFE.
+- Nếu inference lỗi: đặt MODEL_ERROR; vẫn chạy quy tắc cảm biến độc lập.
+- Nếu quy tắc cảm biến cho MONITOR hoặc AI cho MONITOR: mức cuối ít nhất là MONITOR.
+- Nếu AI cho DANGER_TEST: mức cuối là DANGER_TEST candidate và phải ghi lý do.
+- Chỉ cho phép NORMAL khi dữ liệu bắt buộc hợp lệ, model/rule engine không lỗi theo cấu hình và không điều kiện cảnh báo nào đang hoạt động.
+- Khi đồng thời có nhiều lỗi, lưu tất cả cờ lỗi; trạng thái hiển thị có thể chọn trạng thái ưu tiên nhưng không được xóa nguyên nhân khác.
+
+9.5 Chống dao động
+- Cân nhắc yêu cầu điều kiện xuất hiện trong N mẫu liên tiếp trước khi nâng mức, ngoại trừ điều kiện nghiêm trọng đã được quy định riêng.
+- Hạ mức cảnh báo dùng ngưỡng hồi phục hoặc thời gian ổn định riêng (hysteresis).
+- Ghi thời điểm bắt đầu, thay đổi, xác nhận và kết thúc cảnh báo.
+- Các giá trị N và thời gian phải được cấu hình, thử nghiệm và ghi trong risk_config; không đặt cố định không có lý do.
+
+9.6 Đầu ra cảnh báo
+- Serial Monitor hiển thị trạng thái, RiskScore, giá trị cảm biến, cờ lỗi và lý do cảnh báo.
+- Nếu có còi/đèn, quy định mẫu nháy/âm thanh cho từng trạng thái và hành vi khi MCU khởi động lại.
+- Cảnh báo cục bộ không phụ thuộc Internet.
+- Nếu hệ thống được đặt tại địa điểm có nguy cơ thật, phải có quy trình vận hành thủ công và phương tiện cảnh báo độc lập phù hợp.
+
+10. CHU KỲ HOẠT ĐỘNG VÀ XỬ LÝ LỖI
+
+10.1 Chu kỳ dự kiến
+Mục tiêu ban đầu: một chu kỳ tổng thể mỗi giây, tùy tốc độ thực tế của cảm biến và thời gian suy luận.
+1. Đánh dấu thời gian và sequence ID.
+2. Đọc các cảm biến theo lịch phù hợp.
+3. Kiểm tra giao tiếp và chất lượng dữ liệu.
+4. Hiệu chuẩn và lọc.
+5. Cập nhật feature window.
+6. Nếu đủ dữ liệu hợp lệ, chạy inference.
+7. Chạy rule engine độc lập.
+8. Hợp nhất trạng thái và cập nhật cảnh báo.
+9. Ghi log dữ liệu và sự kiện.
+10. Đo thời gian thực thi, kiểm tra deadline và bắt đầu chu kỳ kế tiếp.
+
+10.2 Lập lịch
+- Dùng lịch theo thời gian đơn điệu, ví dụ esp_timer hoặc millis() với xử lý tràn số phù hợp; tránh cộng dồn delay cố định làm trôi chu kỳ.
+- Không giả định tất cả cảm biến phải đọc đồng thời nếu phần cứng có tốc độ khác nhau.
+- Ghi timestamp từng cảm biến nếu độ lệch thời gian giữa các phép đo có ý nghĩa.
+- Mục tiêu một mẫu/giây cần được kiểm chứng bằng log; nếu đọc cảm biến hoặc ghi SD vượt deadline, phải có bộ đếm missed deadline.
+
+10.3 Xử lý lỗi
+Quy định hành vi cho:
+- Sensor timeout/không nhận dạng được.
+- Giá trị ADC ngoài dải.
+- SD không gắn, đầy hoặc ghi lỗi.
+- Inference error hoặc model input không hợp lệ.
+- Bộ nhớ thấp, watchdog và reset bất ngờ.
+- Mất đồng bộ thời gian.
+- Nguồn bị sụt hoặc thiết bị khởi động lại.
+
+Không được bỏ qua lỗi chỉ bằng cách in ra Serial. Lỗi quan trọng phải được lưu vào log nếu storage còn hoạt động và có bộ đếm trong RAM để chẩn đoán khi storage lỗi.
+
+11. GHI DỮ LIỆU VÀ LƯU TRỮ
+
+11.1 CSV
+- Dùng header cố định, đơn vị rõ ràng và định dạng số thống nhất.
+- Quy định cách biểu diễn trường thiếu; không dùng 0 thay cho dữ liệu không hợp lệ.
+- Ghi model_version, firmware_version và calibration_version.
+- Ghi sequence ID để phát hiện mất mẫu.
+- Dùng timestamp UTC khi có thời gian chính xác; luôn có uptime_ms để sắp xếp bản ghi offline.
+- Mở file mới hoặc cơ chế xoay file theo dung lượng/thời gian; không ghi đè dữ liệu cũ ngoài chủ đích.
+- Có cơ chế phát hiện thẻ đầy và lỗi flush/write.
+- Xác định tần suất flush phù hợp giữa an toàn dữ liệu và độ trễ ghi.
+- Kiểm thử mất điện đột ngột; không tuyên bố chống mất dữ liệu tuyệt đối nếu chưa chứng minh.
+
+11.2 Sự kiện
+Ngoài dữ liệu định kỳ, ghi sự kiện:
+- Boot/reset và nguyên nhân reset.
+- Bắt đầu/kết thúc cảnh báo.
+- Sensor fault bắt đầu/phục hồi.
+- Model error.
+- Storage error.
+- Thay đổi cấu hình hoặc phiên bản model.
+- Bắt đầu/kết thúc hiệu chuẩn.
+
+11.3 Bảo vệ dữ liệu
+- Dùng thẻ SD chất lượng phù hợp và kiểm tra tuổi thọ/độ bền.
+- Dữ liệu thử nghiệm cần được sao lưu định kỳ sang máy tính.
+- Dùng công cụ kiểm tra CSV để phát hiện header sai, bản ghi thiếu cột, sequence gap và timestamp bất thường.
+- Không huấn luyện lại bằng log chưa qua kiểm tra chất lượng.
+
+12. CẤU TRÚC PHẦN MỀM
+
+Cấu trúc đề xuất:
+
+project/
+  platformio.ini
+  include/
+    config/
+      pins.h
+      sampling_config.h
+      risk_config.h
+    interfaces/
+  src/
+    main.cpp
+    sensors/
+    managers/
+    features/
+    inference/
+    safety/
+    storage/
+    utils/
+  lib/
+    [thư viện tùy biến; không mặc định đặt SDK Edge Impulse vào đây]
+  test/
+    test_sensors/
+    test_features/
+    test_risk_logic/
+    test_storage/
+  tools/
+    csv_validator.py
+    dataset_analysis.py
+  docs/
+    wiring.md
+    calibration.md
+    test_plan.md
+  README.md
+
+12.1 Trách nhiệm lớp
+- Sensor drivers: giao tiếp phần cứng, trả raw data và status.
+- SensorManager: lập lịch đọc và tổng hợp trạng thái.
+- Calibration: chuyển raw data sang đại lượng đã hiệu chuẩn.
+- DataQualityManager: kiểm tra tính hợp lệ, timeout và dữ liệu cũ.
+- FeatureManager: lọc và tạo vector theo schema model.
+- InferenceManager: gọi thư viện Edge Impulse và trả kết quả/status.
+- RiskManager: thực thi ngưỡng và hợp nhất trạng thái.
+- AlertManager: quản lý thay đổi cảnh báo, hysteresis và đầu ra.
+- CsvLogger/StorageManager: ghi dữ liệu, xử lý lỗi thẻ SD và xoay file.
+- DiagnosticsManager: thống kê uptime, reset, missed deadline, bộ nhớ và lỗi.
+
+12.2 Quy tắc mã nguồn
+- Dùng kiểu dữ liệu và đơn vị nhất quán.
+- Hằng số/ngưỡng đặt trong config, không rải rác trong code.
+- Không dùng delay dài trong các đường xử lý cần giữ chu kỳ.
+- Không cấp phát động không kiểm soát trong vòng lặp chạy lâu dài.
+- Tách logic quyết định khỏi phần cứng để unit test được trên máy phát triển.
+- Mọi lỗi quan trọng phải trả mã trạng thái; không dùng boolean mơ hồ nếu cần phân biệt nhiều lỗi.
+
+13. CẤU HÌNH BUILD VÀ TRIỂN KHAI OFFLINE
+
+13.1 Môi trường
+Cần ghi và khóa phiên bản:
+- VS Code.
+- PlatformIO Core/extension.
+- Board ID chính xác trong PlatformIO.
+- Framework Arduino-ESP32.
+- Thư viện driver từng cảm biến.
+- Phiên bản thư viện Edge Impulse export.
+- Phiên bản compiler/toolchain nếu cần tái lập build.
+
+13.2 platformio.ini
+Không chốt cấu hình hoàn chỉnh trước khi xác định board và các thư viện thực tế. Tệp cấu hình cuối phải chỉ rõ:
+- platform, board, framework.
+- monitor_speed.
+- lib_deps hoặc cách quản lý thư viện offline.
+- build_flags cần thiết.
+- Cấu hình partition/PSRAM nếu cần và được board hỗ trợ.
+- Cách xử lý cảnh báo compiler.
+- Cách build debug và release nếu dự án dùng cả hai.
+
+13.3 Quy trình build
+1. Cài toolchain và các thư viện đúng phiên bản.
+2. Export thư viện/model từ Edge Impulse.
+3. Tích hợp SDK theo hướng dẫn của gói export tương ứng.
+4. Build sạch.
+5. Ghi lại log build và phiên bản.
+6. Nạp firmware.
+7. Kiểm tra nhận dạng cảm biến, SD và model.
+8. Thử inference với dữ liệu mẫu đã biết.
+9. Rút mạng và xác nhận suy luận/cảnh báo vẫn hoạt động offline.
+10. Sao lưu firmware, model và cấu hình đã nghiệm thu.
+
+13.4 Cấu hình ngoại tuyến
+- Chuẩn bị trước các gói thư viện/toolchain cần thiết và xác minh có thể build khi không truy cập mạng nếu yêu cầu dự án là build offline.
+- Runtime không được phụ thuộc Internet để đọc cảm biến, inference, quyết định hoặc ghi CSV.
+- Nếu không có RTC/NTP, ghi uptime và đánh dấu TIME_UNSYNC thay vì tạo timestamp lịch giả.
+- Tài liệu này chưa khẳng định build đã thành công trên board cụ thể; cần xác nhận sau khi board ID, phiên bản framework và gói Edge Impulse được chốt.
+
+14. KẾ HOẠCH KIỂM THỬ
+
+14.1 Unit test
+A. IMU:
+- Kiểm tra giao tiếp, raw range, chuyển đổi đơn vị và hướng trục.
+- Kiểm tra tilt ở các góc tham chiếu.
+- Mục tiêu ±0,5° chỉ chấp nhận khi thiết bị tham chiếu và điều kiện đo chứng minh đạt.
+
+B. Soil:
+- Kiểm tra nhiều điểm hiệu chuẩn và giá trị ngoài dải.
+- Đánh giá độ lặp lại, độ trôi và ảnh hưởng điều kiện đất.
+- Sai số ±3% chỉ dùng nếu định nghĩa rõ “%” và phép đo tham chiếu hỗ trợ.
+
+C. Rain:
+- Thử khô, ướt, bẩn, ngưng tụ và hồi phục sau khi khô.
+- Nếu là cảm biến tấm, kiểm thử trạng thái tương đối; không đặt tiêu chí mm/h.
+
+D. HX710B:
+- Kiểm tra zero, nhiều điểm chuẩn, lặp lại và sai số.
+- Chỉ đặt mục tiêu ±2% sau khi xác định đầu đo và dải đo.
+
+E. Risk logic:
+- Kiểm thử tất cả tổ hợp mức AI, mức tilt, sensor fault, model error và data invalid.
+- Kiểm thử giá trị tại ngưỡng, hysteresis và khôi phục.
+
+F. CSV:
+- Kiểm tra header, cột, giá trị thiếu, lỗi SD, thẻ đầy, xoay file và khôi phục sau reset.
+
+14.2 Integration test
+- Sensor -> calibration -> data quality -> feature vector.
+- Feature vector -> Edge Impulse -> output.
+- Sensor/rule engine + AI -> final status.
+- Final status -> logger + Serial + còi/đèn (nếu có).
+- Kiểm tra vector đầu vào và output so với bộ dữ liệu tham chiếu.
+- Xác nhận một lỗi cảm biến không làm treo toàn hệ thống.
+
+14.3 System test
+Tình huống tối thiểu:
+1. Thiết bị khởi động bình thường.
+2. Đất khô, tín hiệu mưa khô, tilt ổn định.
+3. Độ ẩm tăng và cảm biến mưa ướt.
+4. Tilt thay đổi theo các điểm kiểm thử.
+5. Đầu đo HX710B thay đổi theo tải/áp suất chuẩn.
+6. Một cảm biến bị ngắt kết nối.
+7. Dữ liệu nằm ngoài dải.
+8. Model trả lỗi hoặc đầu ra không hợp lệ.
+9. Thẻ SD không có, đầy hoặc ghi lỗi.
+10. Mất nguồn và khởi động lại.
+11. Mất đồng bộ thời gian.
+12. Chu kỳ lấy mẫu bị trễ.
+13. Nhiễu/rung hoặc thay đổi tư thế lắp đặt.
+14. Offline hoàn toàn.
+
+Các tình huống phải có kết quả mong đợi được xác định trước; không suy ra kết quả đạt chỉ vì thiết bị không crash.
+
+14.4 Thử nghiệm hiện trường
+- Chọn vị trí thử có kiểm soát và phương án an toàn.
+- Ghi rõ loại đất, độ dốc, vị trí/độ sâu cảm biến, thời tiết và cấu hình lắp đặt.
+- Đối chiếu cảm biến với thiết bị tham chiếu độc lập khi có thể.
+- Lưu log thô, log đã xử lý, phiên bản model và nhật ký sự kiện.
+- Ghi các lần cảnh báo giả, bỏ sót, lỗi thiết bị và nguyên nhân.
+- Không cố tạo sạt lở nguy hiểm để kiểm thử. Dùng mô phỏng, dữ liệu lịch sử hoặc thử nghiệm kiểm soát phù hợp.
+- Thời gian thử nghiệm phải đủ để quan sát các điều kiện mục tiêu; 72 giờ là kiểm tra độ bền ban đầu chứ không đại diện cho mọi mùa/thời tiết.
+
+14.5 Báo cáo kiểm thử
+Mỗi test case gồm:
+- Test ID.
+- Yêu cầu được xác minh.
+- Thiết bị và phiên bản.
+- Điều kiện ban đầu.
+- Các bước thử.
+- Kết quả mong đợi.
+- Ngưỡng đạt.
+- Kết quả thực tế.
+- Pass/Fail.
+- File log/bằng chứng.
+- Người thực hiện và ngày thử.
+
+15. HIỆU NĂNG VÀ ĐỘ BỀN
+
+15.1 Mục tiêu ban đầu
+- Chu kỳ tổng thể: mục tiêu 1 giây/lần, xác minh bằng uptime/sequence log.
+- Thời gian inference: mục tiêu dưới 200 ms, đo trên board và model thực tế.
+- Thời gian đọc cảm biến: mục tiêu tổng dưới 300 ms nếu phần cứng và lịch đọc cho phép.
+- Các mục tiêu trên phải được đo cùng với ghi SD và xử lý cảnh báo; ghi rõ worst-case hoặc percentile dùng để đánh giá.
+
+15.2 Ổn định
+- Chạy thử liên tục tối thiểu 72 giờ cho nghiệm thu độ bền ban đầu.
+- Ghi reset reason, free heap, missed deadline, lỗi sensor và lỗi storage.
+- Tiêu chí đề xuất: không có reset ngoài dự kiến; không có memory leak tăng dần không giải thích được; mọi lỗi có thể quan sát được; dữ liệu log được kiểm tra sau thử.
+- Không tuyên bố “không mất dữ liệu” nếu chưa thử nghiệm mất nguồn và lỗi ghi.
+- Kiểm tra nhiệt độ hoạt động và nguồn cấp trong điều kiện dự kiến.
+
+15.3 Định nghĩa thời gian
+- Sampling period: khoảng thời gian giữa hai lần lấy mẫu logic liên tiếp.
+- Acquisition duration: thời gian đọc toàn bộ cảm biến cần thiết.
+- Inference latency: thời gian gọi model.
+- End-to-end latency: từ thời điểm dữ liệu được thu nhận đến khi trạng thái/cảnh báo được cập nhật.
+Các chỉ số phải được đo riêng, không dùng một chỉ số thay thế cho các chỉ số còn lại.
+
+16. TIÊU CHÍ NGHIỆM THU MỨC B
+
+Hệ thống đạt mức B khi đáp ứng các tiêu chí đã thống nhất sau:
+
+16.1 Phần cứng
+- Tất cả cảm biến được nhận dạng và đọc ổn định trong điều kiện thử.
+- Có BOM, sơ đồ đấu nối và pin mapping đã xác minh.
+- Đại lượng đo, đơn vị, dải đo và trạng thái lỗi được định nghĩa.
+- Các phép đo có kiểm tra hiệu chuẩn và sai số so với tham chiếu.
+
+16.2 Phần mềm và AI
+- Firmware build được từ cấu hình đã ghi lại.
+- Edge Impulse chạy trực tiếp trên ESP32-S3 và hoạt động offline.
+- Có phiên bản model, schema đầu vào và kết quả kiểm thử so sánh.
+- Lỗi model/đầu vào không hợp lệ không được ánh xạ thành SAFE.
+- Risk logic có unit test cho toàn bộ trường hợp đã định nghĩa.
+
+16.3 Dữ liệu và cảnh báo
+- CSV có header, sequence ID, uptime, trạng thái cảm biến, trạng thái model và lý do cảnh báo.
+- Các lỗi quan trọng và sự kiện cảnh báo được ghi lại.
+- Thẻ SD đầy/mất/lỗi được phát hiện và hiển thị.
+- Cảnh báo được kích hoạt đúng theo test case đã phê duyệt.
+- Có thể phân tích log và tái tạo quyết định của hệ thống.
+
+16.4 Độ bền
+- Hoàn thành chạy liên tục ít nhất 72 giờ theo kịch bản đã ghi.
+- Báo cáo reset, deadline miss, lỗi ghi và tình trạng bộ nhớ.
+- Không có lỗi nghiêm trọng chưa giải thích hoặc chưa có phương án xử lý.
+
+16.5 Hồ sơ bàn giao
+- Mã nguồn và cấu hình build.
+- Firmware/model đúng phiên bản.
+- BOM và sơ đồ kết nối.
+- Quy trình hiệu chuẩn.
+- Schema CSV và công cụ kiểm tra log.
+- Test plan, test report và danh sách lỗi còn tồn tại.
+- Hướng dẫn khởi động, vận hành, sao lưu dữ liệu và xử lý sự cố.
+
+16.6 Giới hạn nghiệm thu
+Nghiệm thu mức B chỉ xác nhận prototype hoạt động theo các test case đã thực hiện. Không xác nhận hệ thống có thể dự báo chính xác mọi sự kiện sạt lở, không thay thế đánh giá địa kỹ thuật và không chứng nhận mức an toàn sinh mạng.
+
+17. BẢO TRÌ VÀ VẬN HÀNH HIỆN TRƯỜNG
+
+Trước khi chạy:
+- Kiểm tra giá đỡ và vị trí lắp cảm biến.
+- Kiểm tra nguồn, vỏ bảo vệ, cáp và đầu nối.
+- Kiểm tra thẻ SD và dung lượng trống.
+- Xác nhận hệ số hiệu chuẩn, phiên bản firmware/model.
+- Xác nhận thời gian hoặc ghi nhận TIME_UNSYNC.
+- Kiểm tra thử cảnh báo và trạng thái lỗi.
+
+Trong khi chạy:
+- Theo dõi trạng thái cảm biến và storage.
+- Ghi nhận các tác động cơ khí, bảo trì hoặc thay đổi vị trí thiết bị.
+- Sao lưu log theo lịch.
+- Không tự ý thay đổi ngưỡng khi chưa ghi lại cấu hình và lý do.
+
+Sau khi chạy:
+- Kiểm tra sequence gap, dữ liệu thiếu và lỗi cảm biến.
+- Sao lưu dữ liệu gốc trước khi xử lý/huấn luyện.
+- Ghi nhật ký sự kiện và bảo trì.
+- Đánh giá lại hiệu chuẩn sau khi thay cảm biến hoặc thay đổi lắp đặt.
+
+18. RỦI RO, GIỚI HẠN VÀ CÁC QUYẾT ĐỊNH CÒN MỞ
+
+18.1 Rủi ro chính
+- Nhãn huấn luyện không đại diện cho nguy cơ thực tế.
+- Sensor drift, ăn mòn hoặc thay đổi cơ khí làm sai số đo.
+- IMU thay đổi tilt nhưng không phản ánh dịch chuyển đất.
+- Cảm biến mưa dạng tấm không đo được cường độ mưa định lượng.
+- Đầu đo HX710B chưa xác định khiến dữ liệu không có ý nghĩa vật lý rõ ràng.
+- Ngưỡng cố định không phù hợp với mọi địa điểm/loại đất.
+- Mất nguồn/thẻ SD làm thiếu dữ liệu.
+- Dữ liệu train/test bị rò rỉ khiến đánh giá AI quá lạc quan.
+- Cảnh báo giả gây mất niềm tin; cảnh báo bỏ sót có thể gây hậu quả nghiêm trọng nếu bị dùng sai mục đích.
+
+18.2 Quyết định phải chốt trước khi triển khai
+1. Board ESP32-S3 chính xác và dung lượng flash/PSRAM.
+2. Mã cảm biến độ ẩm đất và cách xuất tín hiệu.
+3. Cách dùng YL-83: phát hiện ướt hay thay bằng thiết bị đo mưa định lượng.
+4. Loại đầu đo kết nối HX710B và đại lượng vật lý cần đo.
+5. Đơn vị, dải đo, tần số lấy mẫu và vị trí lắp của từng cảm biến.
+6. Mục tiêu mô hình Edge Impulse và cách gán nhãn.
+7. Feature vector chính thức và schema đầu vào.
+8. Ngưỡng thử nghiệm và quy tắc hợp nhất.
+9. Cách tạo timestamp khi offline.
+10. Cấu hình SD, chu kỳ ghi và cơ chế phục hồi.
+11. Phiên bản PlatformIO, Arduino-ESP32, thư viện driver và Edge Impulse SDK.
+12. Vị trí thử nghiệm, phương pháp đối chiếu và kế hoạch an toàn.
+
+PHỤ LỤC A. SCHEMA CSV ĐỀ XUẤT
+
+Header đề xuất:
+device_id,boot_id,sequence_id,timestamp_utc,uptime_ms,
+accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,
+tilt_roll_deg,tilt_pitch_deg,accel_magnitude,
+soil_adc_raw,soil_moisture_relative_pct,
+rain_adc_raw,rain_wetness_relative_pct,
+hx710_raw_count,hx710_measurement,hx710_unit,
+imu_status,soil_status,rain_status,hx710_status,
+data_quality_status,model_version,inference_status,risk_score,
+ai_level,rule_level,final_status,alarm_reason,
+free_heap,reset_reason
+
+Quy tắc:
+- Trước khi dùng, chốt đơn vị cho tất cả trường.
+- Trường không hợp lệ để trống theo quy ước CSV và phải có status tương ứng; không ghi 0 giả.
+- hx710_measurement/hx710_unit phải được đổi thành tên đại lượng rõ ràng sau khi chốt đầu đo.
+- Nếu log quá rộng, có thể tách sensor_data.csv và event_log.csv nhưng cần cùng sequence ID/timestamp để liên kết.
+- Header này là đề xuất, cần đồng bộ với parser và công cụ phân tích.
+
+PHỤ LỤC B. MA TRẬN TRẠNG THÁI/CẢNH BÁO ĐỀ XUẤT
+
+1. STARTUP:
+Thiết bị đang khởi động hoặc chưa hoàn tất kiểm tra. Không tuyên bố NORMAL.
+
+2. NORMAL:
+Dữ liệu thiết yếu hợp lệ; model/rule engine hoạt động theo cấu hình; không có điều kiện cảnh báo đang kích hoạt.
+
+3. MONITOR:
+Một hoặc nhiều điều kiện theo dõi được kích hoạt từ rule hoặc AI.
+
+4. DANGER_TEST:
+Điều kiện thử nghiệm nghiêm trọng được kích hoạt. Ghi rõ rule/model đã kích hoạt. Đây là cảnh báo thử nghiệm, không phải chứng nhận nguy cơ địa kỹ thuật.
+
+5. SENSOR_FAULT:
+Một hoặc nhiều cảm biến quan trọng không hợp lệ. Không được chuyển thành NORMAL chỉ vì AI vẫn trả số.
+
+6. MODEL_ERROR:
+Model không chạy hoặc đầu ra không hợp lệ. Rule engine vẫn tiếp tục nếu dữ liệu cảm biến còn đủ tin cậy.
+
+7. STORAGE_ERROR:
+Không thể ghi log. Tiếp tục đo/cảnh báo nếu có thể, đồng thời hiển thị lỗi và đếm số bản ghi có nguy cơ chưa lưu.
+
+8. TIME_UNSYNC:
+Không có thời gian lịch đáng tin cậy. Vẫn dùng uptime_ms để sắp xếp dữ liệu.
+
+Khi nhiều trạng thái cùng xuất hiện, lưu tất cả cờ lỗi và sự kiện. Trạng thái chính trên giao diện không được làm mất nguyên nhân chi tiết.
+
+PHỤ LỤC C. CHECKLIST TRIỂN KHAI
+
+PHẦN CỨNG
+[ ] Board ESP32-S3 và cấu hình bộ nhớ đã chốt.
+[ ] Mã chính xác của từng cảm biến đã ghi.
+[ ] Đầu đo HX710B và đại lượng đo đã xác định.
+[ ] Sơ đồ điện/pin mapping đã kiểm tra trên phần cứng thật.
+[ ] Nguồn, vỏ và cơ cấu lắp đặt đã được kiểm tra.
+
+DỮ LIỆU VÀ HIỆU CHUẨN
+[ ] Đơn vị và dải hợp lệ của từng tín hiệu đã chốt.
+[ ] Quy trình hiệu chuẩn và thiết bị tham chiếu đã ghi.
+[ ] Trạng thái lỗi cảm biến đã được kiểm thử.
+[ ] Cách biểu diễn dữ liệu thiếu đã thống nhất.
+[ ] Bộ dữ liệu kiểm thử feature vector đã có.
+
+AI VÀ LOGIC
+[ ] Mục tiêu/nhãn model đã định nghĩa.
+[ ] Dataset và cách chia train/validation/test đã ghi.
+[ ] Model chạy offline trên ESP32-S3.
+[ ] Phiên bản model và schema input được lưu.
+[ ] Tất cả tổ hợp trạng thái/rule đã có unit test.
+[ ] Ngưỡng thử nghiệm được đánh dấu provisional.
+
+LƯU TRỮ VÀ ĐỘ BỀN
+[ ] CSV có sequence ID, uptime và status.
+[ ] Thẻ SD đầy/mất/lỗi được kiểm thử.
+[ ] Khởi động lại không làm mất toàn bộ log cũ.
+[ ] Reset reason và missed deadline được ghi.
+[ ] Hoàn thành bài chạy liên tục 72 giờ và kiểm tra log sau chạy.
+
+NGHIỆM THU
+[ ] Test report có Pass/Fail và bằng chứng.
+[ ] Các lỗi tồn tại được ghi vào danh sách.
+[ ] Mã nguồn, firmware, model và cấu hình đã sao lưu.
+[ ] Có hướng dẫn vận hành, bảo trì và xử lý lỗi.
+[ ] Đã xác nhận phạm vi sử dụng là prototype mức B, chưa phải hệ thống an toàn được chứng nhận.
+
+KẾT LUẬN
+Bản đặc tả này tổ chức lại thiết kế theo mục tiêu thử nghiệm hiện trường mức B. Các điểm chưa thể xác định chỉ từ tài liệu ban đầu — đặc biệt là mã cảm biến thực tế, đầu đo HX710B, mục tiêu/nhãn AI, ngưỡng cảnh báo, board ID và phiên bản thư viện — được giữ dưới dạng quyết định cần chốt thay vì tự giả định. Trước khi viết firmware hoàn chỉnh, cần hoàn thành các quyết định đó, sau đó triển khai theo từng lớp và kiểm thử bằng dữ liệu/thiết bị thực tế.
+
+
+===============================================================================
+19. SYSTEM REQUIREMENT SPECIFICATION (SRS)
+===============================================================================
+
+19.1 Mục đích và quy tắc
+Chương này là baseline yêu cầu hệ thống mức B. Mỗi yêu cầu có ID để truy vết
+sang thiết kế, mã nguồn, test case và bằng chứng nghiệm thu. Các yêu cầu có
+giá trị TBD phải được chốt trước khi nghiệm thu; không tự xem TBD là đạt.
+
+Mức ưu tiên:
+- MUST: bắt buộc cho nghiệm thu mức B.
+- SHOULD: nên thực hiện; nếu không thực hiện phải ghi lý do/rủi ro.
+- TBD: chưa đủ thông tin để đặt giá trị định lượng.
+
+19.2 Functional Requirements (FR)
+
+FR-001 [MUST] Hệ thống phải khởi động và thực hiện kiểm tra khởi động trước khi
+cho phép trạng thái NORMAL.
+FR-002 [MUST] Hệ thống phải đọc từng cảm biến theo lịch được cấu hình và gắn
+sequence_id cùng uptime_ms cho mỗi bản ghi logic.
+FR-003 [MUST] Mỗi phép đọc phải trả về giá trị và trạng thái hợp lệ/lỗi; không
+được âm thầm thay giá trị lỗi bằng 0.
+FR-004 [MUST] Hệ thống phải kiểm tra timeout, phạm vi hợp lệ, dữ liệu cũ và
+lỗi chuyển đổi số.
+FR-005 [MUST] Hệ thống phải áp dụng đúng phiên bản hệ số hiệu chuẩn đã được
+cấu hình; thiếu hoặc sai phiên bản phải được thể hiện rõ.
+FR-006 [MUST] Hệ thống chỉ được gọi model khi feature vector đủ mẫu, đúng thứ
+tự, đúng đơn vị và không chứa giá trị không hợp lệ.
+FR-007 [MUST] Hệ thống phải ghi model_version, inference_status và đầu ra
+model nếu inference được thực hiện.
+FR-008 [MUST] Rule engine phải có thể đánh giá điều kiện cảm biến độc lập với
+AI; lỗi AI không được làm dừng rule engine nếu dữ liệu cảm biến còn dùng được.
+FR-009 [MUST] Hệ thống phải tạo final_status và lưu tất cả nguyên nhân/cờ lỗi
+đang hoạt động.
+FR-010 [MUST] Trạng thái dữ liệu không hợp lệ hoặc lỗi model không được ánh xạ
+thành NORMAL/SAFE.
+FR-011 [MUST] Hệ thống phải ghi dữ liệu định kỳ và các sự kiện khởi động, lỗi,
+phục hồi, cảnh báo, thay đổi cấu hình và cập nhật model.
+FR-012 [MUST] Hệ thống phải phát hiện lỗi thẻ SD, lỗi ghi và trạng thái thẻ đầy.
+FR-013 [MUST] Hệ thống phải hiển thị trạng thái và chẩn đoán cơ bản qua Serial
+Monitor; đầu ra còi/đèn là tùy chọn nếu phần cứng được chốt.
+FR-014 [MUST] Hệ thống phải tiếp tục hoạt động offline sau khi firmware, model
+và cấu hình đã được cài đặt.
+FR-015 [MUST] Hệ thống phải phát hiện hoặc ghi nhận reset bất ngờ và nguyên nhân
+reset nếu nền tảng cung cấp.
+FR-016 [MUST] Hệ thống phải có cơ chế phát hiện tác vụ bị treo hoặc chu kỳ vượt
+deadline, phù hợp với watchdog được cấu hình.
+FR-017 [MUST] Hệ thống phải cho phép xác định phiên bản firmware, model, risk
+configuration và calibration configuration từ log hoặc thông tin chẩn đoán.
+FR-018 [MUST] Hệ thống phải kiểm tra tính toàn vẹn cấu hình trước khi áp dụng.
+FR-019 [SHOULD] Hệ thống nên hỗ trợ xoay file log theo dung lượng/thời gian.
+FR-020 [SHOULD] Hệ thống nên có công cụ ngoại tuyến kiểm tra CSV và tạo báo cáo
+chất lượng dữ liệu.
+FR-021 [TBD] Có cần RTC, đồng bộ thời gian ngoài mạng hoặc chỉ dùng uptime_ms:
+chủ sở hữu dự án phải quyết định.
+
+19.3 Non-Functional Requirements (NFR)
+
+NFR-001 Hiệu năng [MUST]: mục tiêu chu kỳ logic ban đầu là 1 Hz; phải đo và báo
+cáo sampling period, acquisition duration, inference latency và end-to-end
+latency trên phần cứng thật.
+NFR-002 Hiệu năng [TBD]: mục tiêu inference <200 ms và acquisition <300 ms là
+mục tiêu sơ bộ, phải xác nhận theo model, cảm biến và cách ghi SD.
+NFR-003 Độ tin cậy [MUST]: chạy thử liên tục tối thiểu 72 giờ theo kịch bản đã
+ghi; mọi reset, lỗi SD, lỗi sensor và missed deadline phải được báo cáo.
+NFR-004 Tính sẵn sàng [MUST]: lỗi một cảm biến không được làm treo toàn hệ thống;
+trạng thái chức năng bị ảnh hưởng phải được đánh dấu.
+NFR-005 Tính an toàn [MUST]: prototype không được quảng bá như hệ thống cảnh báo
+sinh mạng đã chứng nhận; cảnh báo thử nghiệm phải có nhãn rõ.
+NFR-006 Khả năng bảo trì [MUST]: build phải tái lập được từ mã nguồn và phiên bản
+toolchain/thư viện được ghi lại.
+NFR-007 Khả năng truy vết [MUST]: mọi bản ghi phải liên kết được với thiết bị,
+boot_id, firmware, model và cấu hình.
+NFR-008 Bảo toàn dữ liệu [MUST]: lỗi ghi phải được phát hiện; chính sách mất dữ
+liệu có thể chấp nhận và tần suất flush phải được ghi trong cấu hình.
+NFR-009 Bảo mật [SHOULD]: nếu dùng OTA, chỉ chấp nhận image được xác minh theo
+cơ chế hỗ trợ bởi bootloader/framework; không cập nhật từ nguồn không tin cậy.
+NFR-010 Môi trường [TBD]: nhiệt độ, độ ẩm, chống nước, rung và thời gian vận hành
+phải được xác định theo địa điểm thực tế.
+NFR-011 Dung lượng [TBD]: cần đo kích thước bản ghi và dung lượng log/ngày để
+chốt dung lượng SD và thời gian lưu.
+NFR-012 Khả năng phục hồi [MUST]: khi lỗi được khắc phục, hệ thống phải ghi sự
+kiện phục hồi; không tự xóa lịch sử lỗi.
+
+19.4 Traceability Matrix
+Duy trì bảng có các cột:
+Requirement ID | Design component | Source file/function | Test ID | Evidence/log
+| Status | Issue/waiver.
+Không được đánh dấu yêu cầu là PASS nếu thiếu test evidence. Yêu cầu được miễn
+phải có lý do, người phê duyệt và ngày phê duyệt.
+
+===============================================================================
+20. KIẾN TRÚC FREERTOS VÀ QUẢN LÝ TÁC VỤ
+===============================================================================
+
+20.1 Nguyên tắc
+ESP32-S3 với Arduino framework thường chạy trên FreeRTOS. Kiến trúc dưới đây là
+đề xuất thiết kế; số core, priority, stack và cách ghim core phải được xác minh
+theo board, phiên bản framework và thư viện thực tế. Không dùng delay dài trong
+tác vụ có deadline. Không giả định đa luồng tự động làm hệ thống an toàn hơn.
+
+20.2 Tác vụ đề xuất
+
+TaskSensorAcq:
+- Trách nhiệm: đọc cảm biến theo lịch, timestamp, cập nhật trạng thái.
+- Nhịp mục tiêu: logic 1 Hz cho bộ dữ liệu tổng hợp; từng cảm biến có thể có lịch
+  riêng.
+- Ưu tiên: trung bình-cao, sau khi đo thời gian thực tế.
+- Không ghi file SD trực tiếp trong vùng đọc cảm biến.
+
+TaskDataQualityFeature:
+- Trách nhiệm: kiểm tra chất lượng, hiệu chuẩn, lọc và cập nhật feature window.
+- Đầu vào: queue các mẫu cảm biến.
+- Đầu ra: bản ghi đã xử lý và feature vector khi đủ điều kiện.
+
+TaskInference:
+- Trách nhiệm: gọi Edge Impulse khi có vector hợp lệ, trả inference_status và
+  output.
+- Không được chặn TaskSensorAcq hoặc watchdog lâu hơn giới hạn đã cấu hình.
+- Nếu model không re-entrant, chỉ một task được phép gọi inference.
+
+TaskRiskManager:
+- Trách nhiệm: thực hiện rule engine, hợp nhất AI, dữ liệu cảm biến và trạng
+  thái lỗi; quản lý hysteresis.
+- Đầu ra: trạng thái chính, các cờ lỗi và lý do.
+
+TaskLogger:
+- Trách nhiệm: nhận bản ghi qua queue và ghi SD, flush theo chính sách.
+- Phải có giới hạn queue và bộ đếm overflow/drop.
+- Khi queue đầy, ưu tiên ghi event quan trọng theo policy; không được giả vờ rằng
+  bản ghi đã lưu nếu thao tác ghi thất bại.
+
+TaskDiagnostics:
+- Trách nhiệm: thống kê free heap, stack high-water mark, queue depth, deadline
+  miss, reset reason và health counters.
+- Nhịp chẩn đoán ban đầu: 1–10 giây; phải cân bằng với chi phí runtime.
+
+TaskWatchdogSupervisor:
+- Trách nhiệm: kiểm tra heartbeat/progress của các tác vụ thiết yếu và chỉ feed
+  watchdog khi các điều kiện health đã đạt.
+- Không feed watchdog vô điều kiện trong vòng lặp giám sát.
+
+20.3 Giao tiếp giữa tác vụ
+- Dùng FreeRTOS queue cho dữ liệu có cấu trúc và event.
+- Dùng mutex cho tài nguyên chia sẻ như SD/file handle hoặc bus nếu thực sự cần.
+- Không giữ mutex khi gọi inference, ghi file chậm hoặc thực hiện thao tác có thể
+  block lâu.
+- Dùng queue length có tính toán từ tốc độ tạo dữ liệu và thời gian block tối đa.
+- Mỗi queue cần thống kê high-water mark, overflow và chính sách drop.
+- Tránh nhiều task cùng ghi SD hoặc cùng gọi API của cùng một model.
+- ISR chỉ làm công việc tối thiểu; không gọi API không an toàn trong ISR.
+
+20.4 Priority, stack và core affinity
+Không điền con số priority/stack/core cố định trước khi đo. Thực hiện:
+1. Xác minh board và cấu hình FreeRTOS.
+2. Đo stack high-water mark trong kịch bản tải lớn nhất.
+3. Kiểm tra starvation, deadlock và priority inversion.
+4. Xác minh thư viện cảm biến/SD/Edge Impulse có an toàn khi gọi từ task dự kiến.
+5. Ghi cấu hình đã nghiệm thu vào tài liệu và source control.
+
+20.5 Phương án đơn giản hóa
+Nếu prototype ban đầu chưa cần concurrency phức tạp, có thể bắt đầu với một task
+điều phối chính và task logger riêng. Chỉ tách thêm task khi có bằng chứng về
+deadline, độ trễ hoặc tính độc lập. Mọi phương án phải có watchdog và xử lý lỗi.
+
+===============================================================================
+21. WATCHDOG MANAGEMENT
+===============================================================================
+
+21.1 Mục tiêu
+Phát hiện và phục hồi có kiểm soát khi firmware bị treo, task không tiến triển,
+deadlock hoặc chu kỳ vượt giới hạn. Watchdog không thay thế việc xử lý lỗi logic
+và không chứng minh thiết bị an toàn.
+
+21.2 Các lớp watchdog
+- Hardware/SoC watchdog: dùng cơ chế được ESP-IDF/Arduino framework hỗ trợ.
+- Task watchdog: giám sát các task được đăng ký theo cơ chế của framework.
+- Application watchdog supervisor: theo dõi heartbeat/progress của các task
+  thiết yếu và deadline của pipeline.
+Không tự triển khai bộ đếm watchdog phần mềm có thể bị treo cùng task mà nó giám
+sát.
+
+21.3 Heartbeat
+Mỗi tác vụ thiết yếu cần cập nhật progress counter hoặc timestamp đơn điệu sau
+khi hoàn thành một đơn vị công việc có ý nghĩa. Không cập nhật heartbeat chỉ vì
+task còn chạy vòng lặp nếu nó không tiến triển.
+
+Ví dụ tín hiệu health:
+- sensor_task_last_progress_ms
+- feature_task_last_progress_ms
+- risk_task_last_progress_ms
+- logger_task_last_progress_ms
+- last_successful_cycle_ms
+- queue_overflow_count
+- missed_deadline_count
+
+21.4 Quy tắc feed
+Supervisor chỉ feed watchdog nếu:
+- các task thiết yếu đã tiến triển trong timeout cho phép;
+- không có deadlock/timeout đã vượt giới hạn;
+- vòng lặp chính hoặc pipeline vẫn tiến triển;
+- trạng thái lỗi đã được ghi nhận hoặc được xử lý theo policy.
+Không yêu cầu logger phải thành công tuyệt đối để feed watchdog nếu storage fault
+đã được nhận diện và hệ thống được thiết kế tiếp tục cảnh báo; tuy nhiên phải
+phát hiện và công bố STORAGE_ERROR.
+
+21.5 Timeout và phản ứng
+Các giá trị timeout phải được tính từ worst-case execution time, sampling period,
+inference latency, SD latency và queueing; không chọn tùy ý.
+Khi watchdog kích hoạt:
+1. Ghi thông tin chẩn đoán nếu còn khả năng.
+2. Để watchdog reset nếu hệ thống không phục hồi trong thời hạn.
+3. Khi boot, ghi reset_reason và tăng boot_id.
+4. Không tự khôi phục trạng thái NORMAL trước khi hoàn tất self-check.
+5. Nếu lỗi lặp lại, duy trì trạng thái lỗi và yêu cầu kiểm tra thủ công theo policy.
+
+21.6 Kiểm thử watchdog
+- Task bị cố ý block lâu hơn timeout.
+- Deadlock mô phỏng giữa các task.
+- Inference quá lâu hoặc không trả về.
+- SD write bị chậm/treo theo cách kiểm thử an toàn.
+- Queue đầy.
+- Tắt/bật nguồn và xác minh reset reason.
+- Xác nhận watchdog không reset nhầm trong tình huống tải hợp lệ.
+Lưu test ID, timeout, phản ứng mong đợi, reset reason và log.
+
+===============================================================================
+22. UML STATE MACHINE
+===============================================================================
+
+22.1 Mô hình trạng thái
+Trạng thái vận hành chính tách khỏi cờ lỗi. Cách này cho phép hệ thống vừa ở
+MONITOR vừa ghi nhận STORAGE_ERROR hoặc SENSOR_FAULT, thay vì mất một trong các
+thông tin. STARTUP và RECOVERY là các trạng thái điều khiển; NORMAL/MONITOR/
+DANGER_TEST là trạng thái đánh giá; lỗi được biểu diễn bằng fault flags và có
+thể nâng thành trạng thái hiển thị ưu tiên.
+
+22.2 State machine dạng Mermaid
+
+```mermaid
+stateDiagram-v2
+    [*] --> STARTUP
+    STARTUP --> SELF_CHECK: boot complete
+    SELF_CHECK --> NORMAL: required checks pass
+    SELF_CHECK --> DEGRADED: noncritical check fails
+    SELF_CHECK --> FAULT: critical check fails
+
+    NORMAL --> MONITOR: monitor rule or AI threshold
+    NORMAL --> DANGER_TEST: validated severe test rule
+    NORMAL --> DEGRADED: sensor/model/storage/time fault
+    MONITOR --> DANGER_TEST: validated severe test rule
+    MONITOR --> NORMAL: all clear and recovery hysteresis passed
+    MONITOR --> DEGRADED: critical data quality fault
+    DANGER_TEST --> MONITOR: recovery condition passed
+    DANGER_TEST --> DEGRADED: sensor/model/storage fault also active
+
+    DEGRADED --> NORMAL: faults cleared and self-check passed
+    DEGRADED --> MONITOR: faults cleared but monitor condition remains
+    DEGRADED --> DANGER_TEST: severe rule remains active
+    DEGRADED --> FAULT: unrecoverable critical fault
+    FAULT --> RECOVERY: manual or configured recovery permitted
+    RECOVERY --> SELF_CHECK: restart/reinitialize
+    RECOVERY --> FAULT: recovery failed
+```
+
+22.3 Guard conditions
+- `required checks pass`: cảm biến bắt buộc, cấu hình, feature schema và các
+  chức năng thiết yếu đã được kiểm tra.
+- `validated severe test rule`: chỉ dùng rule đã phê duyệt cho thử nghiệm; không
+  coi ngưỡng provisional là ngưỡng địa kỹ thuật đã xác nhận.
+- `recovery hysteresis passed`: điều kiện hồi phục liên tục trong khoảng đã
+  cấu hình.
+- `faults cleared`: lỗi đã phục hồi và có bằng chứng; không chỉ dựa trên timeout.
+- `manual or configured recovery permitted`: tùy loại lỗi; lỗi cấu hình/model
+  không hợp lệ có thể yêu cầu can thiệp thủ công.
+
+22.4 Event và hành động khi chuyển trạng thái
+Mỗi lần chuyển trạng thái phải:
+- ghi timestamp/uptime, trạng thái trước/sau và nguyên nhân;
+- cập nhật còi/đèn/Serial nếu được cấu hình;
+- lưu cờ lỗi đang hoạt động;
+- tránh ghi lặp cùng một event mỗi chu kỳ nếu trạng thái không đổi;
+- ghi riêng event bắt đầu và kết thúc lỗi.
+
+22.5 Quy tắc ưu tiên hiển thị
+Ưu tiên hiển thị đề xuất:
+STARTUP/SELF_CHECK > DANGER_TEST > FAULT > DEGRADED > MONITOR > NORMAL.
+Thứ tự này chỉ là quy tắc hiển thị. Không được bỏ các cờ lỗi khác khi chọn một
+trạng thái chính. Nếu phát hiện điều kiện nguy hiểm đồng thời với lỗi cảm biến,
+phải giữ cả hai nguyên nhân trong event record.
+
+===============================================================================
+23. UML SEQUENCE DIAGRAMS
+===============================================================================
+
+23.1 Luồng chu kỳ bình thường
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant S as SensorManager
+    participant Q as SampleQueue
+    participant D as DataQuality/Calibration
+    participant F as FeatureManager
+    participant I as EdgeImpulse Inference
+    participant R as RiskManager
+    participant L as Logger
+    participant O as Output/Diagnostics
+
+    S->>S: schedule sample and timestamp
+    S->>Q: enqueue raw sample + status
+    Q->>D: dequeue sample
+    D->>D: validate, calibrate, filter
+    D->>F: valid processed sample
+    F->>F: update feature window
+    alt feature window ready and valid
+        F->>I: infer(feature vector)
+        I-->>F: result + inference status
+    else insufficient/invalid data
+        F-->>R: inference skipped + reason
+    end
+    F->>R: feature/result/status
+    R->>R: apply rules, hysteresis, final status
+    R->>L: data record + event if changed
+    R->>O: update status and diagnostics
+    L-->>O: write result/status
+```
+
+23.2 Luồng lỗi cảm biến
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant S as Sensor Driver
+    participant Q as SampleQueue
+    participant D as DataQualityManager
+    participant R as RiskManager
+    participant L as Logger
+    participant O as Output
+
+    S->>S: read sensor
+    S-->>Q: error code + invalid flag
+    Q->>D: sample with fault
+    D->>D: reject invalid feature input
+    D->>R: SENSOR_FAULT / DATA_INVALID
+    R->>R: continue independent rules if possible
+    R->>L: fault-start event + record
+    R->>O: show fault; do not report NORMAL
+    S-->>Q: later valid sample
+    Q->>D: valid sample
+    D->>R: fault recovery candidate
+    R->>R: verify recovery policy
+    R->>L: fault-clear event when confirmed
+```
+
+23.3 Luồng ghi SD lỗi
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant R as RiskManager
+    participant Q as LogQueue
+    participant L as StorageManager
+    participant D as Diagnostics
+    participant O as Output
+
+    R->>Q: enqueue record/event
+    Q->>L: dequeue
+    L->>L: write/flush
+    alt write succeeds
+        L-->>D: storage health OK
+    else write fails or card full
+        L-->>D: STORAGE_ERROR + counter
+        D->>O: expose storage fault
+        L->>L: apply retry/backoff/drop policy
+    end
+```
+
+23.4 Luồng watchdog reset
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant T as Critical Tasks
+    participant W as Watchdog Supervisor
+    participant HW as SoC/Task Watchdog
+    participant B as Boot/Diagnostics
+    participant L as Logger
+
+    T->>W: progress heartbeat
+    W->>W: verify deadlines and health
+    alt required tasks progress
+        W->>HW: feed according to framework API
+    else task stalled / deadline exceeded
+        W->>W: stop feeding and/or raise fault
+        HW-->>B: watchdog reset
+        B->>B: capture reset reason, increment boot_id
+        B->>L: log boot/reset event if storage available
+        B->>B: run self-check; never assume NORMAL
+    end
+```
+
+23.5 Luồng OTA đề xuất (chỉ khi OTA được triển khai)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Authorized Operator
+    participant U as Update Manager
+    participant V as Image Verification
+    participant P as OTA Partition
+    participant B as Bootloader
+    participant H as Health Check
+
+    A->>U: request update + package
+    U->>V: verify signature/hash/version
+    V-->>U: valid/invalid
+    alt package valid and compatible
+        U->>P: write inactive partition
+        U->>P: verify written image
+        U->>B: mark candidate for test boot
+        B->>H: boot candidate
+        H->>H: self-check and smoke test
+        alt health check passes
+            H->>B: confirm image
+        else health check fails
+            H->>B: do not confirm; rollback if supported
+        end
+    else package invalid
+        U-->>A: reject update and log reason
+    end
+```
+
+===============================================================================
+24. FMEA — PHÂN TÍCH DẠNG LỖI VÀ ẢNH HƯỞNG
+===============================================================================
+
+24.1 Phạm vi và phương pháp
+Bảng dưới là FMEA sơ bộ cho prototype; không thay thế phân tích chuyên gia tại
+địa điểm cụ thể. S/O/D có thể chấm 1–10 (Severity/Occurrence/Detection), trong
+đó 10 là mức cao nhất. RPN = S x O x D chỉ dùng để sắp xếp ưu tiên nội bộ, không
+phải xác suất rủi ro tuyệt đối. Các điểm dưới đây là ước lượng ban đầu, cần nhóm
+dự án xác nhận bằng dữ liệu.
+
+24.2 FMEA sơ bộ
+
+ID | Dạng lỗi | Ảnh hưởng | Nguyên nhân khả dĩ | Phát hiện | Biện pháp | S/O/D/RPN sơ bộ
+---|---|---|---|---|---|---
+F-01 | IMU mất kết nối | Thiếu tilt/đặc trưng | Cáp, nguồn, bus | Timeout, ID/read check | SENSOR_FAULT; kiểm tra đầu nối; không kết luận NORMAL | 7/3/3/63
+F-02 | IMU bị xoay/lỏng | Tilt sai nhưng dữ liệu vẫn có vẻ hợp lệ | Giá đỡ lỏng, tác động cơ khí | Kiểm tra baseline, kiểm tra lắp đặt, cảm biến tham chiếu | Khóa cơ khí; kiểm tra sau bảo trì; log thay đổi tư thế | 8/4/7/224
+F-03 | IMU drift/bias | Cảnh báo sai hoặc bỏ sót | Nhiệt độ, drift, hiệu chuẩn | So với baseline/tham chiếu | Hiệu chuẩn; theo dõi drift; giới hạn thời gian dùng baseline | 7/5/6/210
+F-04 | Soil sensor drift/corrosion | Độ ẩm sai | Ăn mòn, loại đất, nhiệt độ | So với tham chiếu, kiểm tra xu hướng bất thường | Chọn cảm biến phù hợp; bảo trì và hiệu chuẩn lại | 6/5/6/180
+F-05 | Rain plate bẩn/ăn mòn | Mưa giả hoặc bỏ sót | Bám bẩn, oxy hóa, ngưng tụ | Kiểm tra khô/ướt và thời gian hồi phục | Vệ sinh/bảo trì; chỉ coi là tín hiệu tương đối | 5/5/5/125
+F-06 | HX710B/đầu đo sai cấu hình | Đại lượng vật lý sai đơn vị | Đấu nhầm, sai load cell/pressure sensor | Kiểm tra BOM, zero và đa điểm chuẩn | Chốt mã đầu đo; khóa đơn vị/hệ số | 9/4/8/288
+F-07 | Feature order sai | Inference sai nhưng không crash | Schema lệch model | Test vector tham chiếu, kiểm tra schema/version | Đóng gói schema; test hồi quy | 8/3/7/168
+F-08 | Dataset/label sai | Mô hình không phản ánh nguy cơ | Nhãn chủ quan, rò rỉ dữ liệu | Audit dataset, split theo sự kiện/địa điểm | Dataset governance, review độc lập | 10/5/8/400
+F-09 | Model inference lỗi | Không có kết quả AI | RAM, model mismatch, lỗi thư viện | Status/error code, timeout | MODEL_ERROR; rule engine tiếp tục | 7/3/3/63
+F-10 | SD đầy/lỗi | Mất log | Dung lượng, filesystem, hỏng thẻ | Kiểm tra write/flush và dung lượng | STORAGE_ERROR; xoay file/sao lưu | 6/5/3/90
+F-11 | Queue logger tràn | Mất bản ghi | SD chậm, task ưu tiên không hợp lý | Queue high-water/overflow counter | Tính queue size; policy event priority; cảnh báo | 7/4/4/112
+F-12 | Task deadlock/treo | Chu kỳ dừng | Mutex, blocking call | Heartbeat/deadline/watchdog | Watchdog supervisor; giới hạn thời gian block | 8/3/4/96
+F-13 | Reset nguồn bất ngờ | Mất dữ liệu cuối, khởi động lại | Sụt áp, cáp/nguồn yếu | Reset reason, power test | Thiết kế nguồn; flush policy; boot event | 7/4/5/140
+F-14 | Cấu hình ngưỡng sai | Cảnh báo sai/bỏ sót | Thay đổi không kiểm soát | Version/hash/range check | Versioning, review, test trước phát hành | 9/4/7/252
+F-15 | OTA image lỗi/không tương thích | Thiết bị không boot/hoạt động sai | Image sai, update gián đoạn | Signature/hash, boot health check | Chỉ bật OTA khi rollback được kiểm chứng; recovery qua USB | 8/2/6/96
+F-16 | Timestamp sai | Phân tích trình tự sai | RTC sai, không đồng bộ | TIME_UNSYNC, uptime monotonic | Ghi uptime và cờ thời gian; không tạo thời gian giả | 5/5/4/100
+F-17 | Watchdog feed sai cách | Treo không được reset hoặc reset nhầm | Feed vô điều kiện, timeout quá ngắn | Fault injection test | Feed theo health; đo worst-case latency | 8/3/6/144
+F-18 | Vỏ/nước xâm nhập | Hỏng điện tử, dữ liệu sai | IP rating/lắp đặt không phù hợp | Kiểm tra vỏ và kiểm tra sau mưa | Vỏ phù hợp; chống ngưng tụ; bảo trì | 8/3/6/144
+
+24.3 Hành động ưu tiên
+- Ưu tiên xử lý các mục RPN cao và mọi lỗi Severity cao, kể cả khi RPN không cao.
+- Trước thử nghiệm hiện trường: bắt buộc xử lý F-06, F-07, F-08 và F-14 ở mức có
+  thể chứng minh; F-02/F-03 cũng phải có kiểm tra cơ khí/độ trôi.
+- Mỗi hành động phải có owner, due date, trạng thái và bằng chứng đóng lỗi.
+- RPN được tính lại sau biện pháp giảm thiểu; không xóa hàng lỗi khỏi FMEA.
+- Bổ sung các lỗi thực tế phát hiện trong thử nghiệm và cập nhật FMEA theo phiên bản.
+
+===============================================================================
+25. DATA RETENTION POLICY
+===============================================================================
+
+25.1 Mục tiêu
+Quy định thời gian lưu, cách xoay file, sao lưu, truy cập và xóa dữ liệu. Chính
+sách cuối cùng cần phù hợp với dung lượng SD, chu kỳ ghi, yêu cầu nghiên cứu,
+quy định của tổ chức và các điều kiện pháp lý có liên quan.
+
+25.2 Phân loại dữ liệu
+- Raw sensor log: dữ liệu thô và trạng thái cảm biến.
+- Processed log: dữ liệu hiệu chuẩn, feature và kết quả inference.
+- Event log: cảnh báo, lỗi, reset, cập nhật cấu hình/model.
+- Calibration/config record: hệ số và cấu hình từng phiên bản.
+- Dataset release: dữ liệu đã được kiểm tra và chọn để huấn luyện/đánh giá.
+- Test evidence: báo cáo kiểm thử, log tham chiếu và kết quả nghiệm thu.
+
+25.3 Chính sách đề xuất cho prototype
+Các thời hạn dưới đây là đề xuất ban đầu, phải được owner phê duyệt:
+- Raw sensor log: giữ trên thiết bị tối thiểu đến khi sao lưu thành công; mục
+  tiêu lưu tại kho dự án ít nhất 12 tháng sau chiến dịch thử nghiệm.
+- Event log và reset/fault log: giữ cùng raw log; ưu tiên không xóa trước khi
+  kết thúc phân tích sự cố.
+- Calibration/config/model manifest: giữ toàn bộ phiên bản đã dùng trong các
+  thử nghiệm; không ghi đè bản cũ.
+- Dataset release và test evidence: giữ lâu dài trong vòng đời prototype hoặc
+  theo chính sách dự án; lưu kèm checksum và metadata.
+Không áp dụng thời hạn này nếu chủ dự án/đơn vị quản lý có chính sách khác; phải
+ghi chính sách chính thức trước khi vận hành.
+
+25.4 Xoay file và dung lượng
+- Đề xuất tạo file mới theo ngày hoặc theo kích thước tối đa đã cấu hình.
+- Khi dung lượng thấp, tạo event STORAGE_LOW trước khi hết chỗ nếu có thể.
+- Không tự xóa file chưa sao lưu chỉ để giải phóng dung lượng.
+- Nếu bắt buộc áp dụng vòng đệm, phải có danh sách file bị xóa, thời gian, lý do
+  và policy rõ ràng; không dùng vòng đệm âm thầm.
+- Tính dung lượng dự kiến bằng:
+  dung lượng/ngày = kích thước bản ghi trung bình x số bản ghi/ngày + overhead.
+  Đo kích thước thực tế thay vì dùng ước lượng làm cam kết.
+
+25.5 Sao lưu và kiểm tra toàn vẹn
+- Sao lưu sau mỗi phiên thử nghiệm và theo lịch khi chiến dịch dài ngày.
+- Sau sao lưu, kiểm tra số file, dung lượng, parse CSV và checksum (ví dụ SHA-256).
+- Giữ bản gốc read-only khi có thể; mọi chuyển đổi dữ liệu tạo bản mới.
+- Kiểm tra khôi phục từ backup định kỳ.
+- Nếu SD lỗi, ghi STORAGE_ERROR và tiếp tục cảnh báo nếu thiết kế cho phép; không
+  khẳng định dữ liệu đã được lưu khi write chưa xác nhận.
+
+25.6 Quyền truy cập và xóa
+- Chỉ người được phân quyền mới sửa/xóa dữ liệu chuẩn.
+- Xóa dữ liệu phải có lý do, người thực hiện, ngày và phạm vi.
+- Dữ liệu dùng huấn luyện phải truy xuất được nguồn gốc và phiên bản.
+- Không đưa dữ liệu cá nhân/nhạy cảm vào log nếu không cần thiết.
+
+===============================================================================
+26. OTA STRATEGY
+===============================================================================
+
+26.1 Phạm vi
+OTA không phải yêu cầu bắt buộc để nghiệm thu prototype mức B nếu cập nhật bằng
+USB/serial phù hợp hơn. Vì thiết bị chạy offline và có thể ở vị trí khó tiếp cận,
+OTA chỉ nên triển khai khi có nhu cầu vận hành rõ ràng và có cơ chế phục hồi đã
+kiểm thử.
+
+26.2 Phương án phát hành
+- Giai đoạn đầu: cập nhật firmware/model qua cổng USB/serial theo quy trình có
+  kiểm soát; lưu firmware hiện tại và gói rollback.
+- Giai đoạn sau, nếu cần OTA: dùng cơ chế OTA/partition được framework/bootloader
+  của board hỗ trợ; xác minh dung lượng flash, partition table và khả năng rollback.
+- Không tự giả định board có đủ hai OTA partition; phải xác minh trên board ID và
+  flash size thật.
+
+26.3 Thành phần gói cập nhật
+Gói release nên gồm:
+- firmware image.
+- model image/library version nếu model được đóng gói riêng.
+- manifest: release_id, firmware_version, model_version, risk_config_version,
+  calibration compatibility, board target, minimum bootloader/framework version.
+- checksum và chữ ký số nếu cơ chế ký/verification được triển khai.
+- release notes, known issues, test report và rollback instructions.
+
+26.4 Quy trình cập nhật
+1. Xác minh gói dành đúng board/hardware revision.
+2. Kiểm tra chữ ký/hash và version compatibility.
+3. Kiểm tra nguồn ổn định và dung lượng phân vùng.
+4. Ghi vào vùng/partition không hoạt động nếu nền tảng hỗ trợ.
+5. Đọc lại/verify image sau khi ghi.
+6. Khởi động phiên bản candidate.
+7. Chạy self-check: cảm biến, model, cấu hình, storage và watchdog.
+8. Chỉ xác nhận phiên bản mới khi health check đạt.
+9. Nếu không đạt, rollback theo cơ chế đã xác minh hoặc yêu cầu recovery thủ công.
+10. Ghi event update start/result/failure và các version trước/sau.
+
+26.5 Bảo mật
+- Không nhận image không xác minh được nguồn gốc.
+- Không đặt khóa bí mật trong repository hoặc log.
+- Không cho phép gói firmware thay đổi ngưỡng/config ngoài manifest được kiểm tra.
+- Secure boot/flash encryption chỉ được tuyên bố có sử dụng khi đã cấu hình và
+  kiểm chứng trên phần cứng thực tế.
+- Nếu OTA không có chữ ký, ghi rõ rủi ro và chỉ dùng trong môi trường thử nghiệm
+  được kiểm soát; khuyến nghị không triển khai qua mạng không tin cậy.
+
+26.6 Điều kiện bật OTA
+- Có partition layout đã kiểm tra.
+- Có test update interrupted/mất nguồn.
+- Có test image sai/chữ ký sai/board không tương thích.
+- Có test rollback hoặc quy trình phục hồi vật lý.
+- Có backup firmware/config/model đang hoạt động.
+Nếu chưa đạt các điều kiện này, giữ cập nhật qua USB/serial.
+
+===============================================================================
+27. RISK CONFIG VERSIONING
+===============================================================================
+
+27.1 Phạm vi cấu hình
+Risk configuration bao gồm:
+- ngưỡng tilt/baseline và quy tắc rate-of-change;
+- ngưỡng AI và mapping RiskScore;
+- hysteresis, số mẫu xác nhận và thời gian hồi phục;
+- danh sách cảm biến bắt buộc;
+- cách hợp nhất AI/rule/fault;
+- cấu hình lọc có ảnh hưởng đến logic cảnh báo;
+- policy trạng thái khi dữ liệu thiếu hoặc model lỗi.
+
+Không gộp calibration coefficients vào risk configuration nếu việc tách riêng
+giúp truy vết rõ hơn; nhưng mọi manifest phải tham chiếu đúng calibration version.
+
+27.2 Schema và metadata
+Mỗi bản cấu hình phải có:
+- config_schema_version;
+- risk_config_version;
+- created_at hoặc thời gian tạo theo định dạng rõ;
+- author/reviewer;
+- target_device/hardware revision;
+- model_version tương thích;
+- calibration_version tham chiếu;
+- mô tả thay đổi và lý do;
+- checksum/hash;
+- trạng thái: draft, tested, approved, deployed, retired.
+
+27.3 Quy tắc áp dụng
+- Cấu hình phải được kiểm tra schema, miền giá trị, trường bắt buộc và tính tương
+  thích trước khi áp dụng.
+- Nếu cấu hình thiếu/sai, không âm thầm dùng các ngưỡng mặc định; chuyển sang
+  CONFIG_ERROR/DEGRADED theo policy và không tuyên bố NORMAL.
+- Cấu hình đang chạy không được sửa từng trường tùy tiện trong runtime.
+- Mọi thay đổi phải được lưu thành phiên bản mới; không ghi đè phiên bản đã dùng
+  cho một chiến dịch thử nghiệm.
+- Ngưỡng thay đổi cần test hồi quy và phê duyệt trước khi deploy.
+
+27.4 Quy trình thay đổi
+1. Tạo bản draft.
+2. Review bởi người chịu trách nhiệm kỹ thuật.
+3. Chạy unit test cho rule engine và boundary conditions.
+4. Chạy replay trên dataset validation đã kiểm soát.
+5. So sánh số cảnh báo, false positive/false negative proxy và thay đổi trạng thái.
+6. Phê duyệt và phát hành manifest.
+7. Triển khai có kiểm soát.
+8. Xác minh thiết bị báo đúng version/hash.
+9. Lưu log triển khai và kế hoạch rollback.
+
+27.5 Truy vết mỗi bản ghi
+Mỗi record hoặc session manifest phải cho phép xác định chính xác:
+firmware_version + model_version + risk_config_version +
+calibration_version + feature_schema_version.
+Khi có cảnh báo, phải có thể tái phát lại cùng dữ liệu và cấu hình để giải thích
+quyết định, trong giới hạn sai khác số học đã xác định.
+
+===============================================================================
+28. DEPLOYMENT ARCHITECTURE
+===============================================================================
+
+28.1 Kiến trúc tại thiết bị
+Thiết bị hiện trường:
+- ESP32-S3 và các cảm biến;
+- firmware, model Edge Impulse và risk config cục bộ;
+- thẻ SD để lưu raw/processed/event log;
+- Serial/USB để cấu hình, chẩn đoán và trích xuất log;
+- còi/đèn tùy chọn;
+- nguồn và vỏ bảo vệ phù hợp.
+Runtime không cần cloud hoặc PC để đọc cảm biến, inference, đánh giá rule và cảnh
+báo cục bộ.
+
+28.2 Luồng offline
+
+```mermaid
+flowchart LR
+    A[IMU / Soil / Rain / HX710B] --> B[ESP32-S3 Sensor Acquisition]
+    B --> C[Calibration and Data Quality]
+    C --> D[Feature Window]
+    D --> E[Edge Impulse Inference]
+    C --> F[Independent Rule Engine]
+    E --> G[Risk Manager]
+    F --> G
+    G --> H[Serial / Optional Buzzer LED]
+    B --> I[Logger Queue]
+    C --> I
+    E --> I
+    G --> I
+    I --> J[SD Card]
+    J --> K[USB Export to Development PC]
+    K --> L[CSV Validation / Analysis]
+    L --> M[Dataset Review and Model Training]
+    M -. approved release package .-> N[Controlled Firmware/Model Deployment]
+    N -. USB/serial initially; OTA only if approved .-> B
+```
+
+28.3 Máy phát triển và quy trình phát hành
+Máy phát triển không nằm trong đường xử lý runtime. Vai trò:
+- quản lý source code;
+- build firmware tái lập;
+- huấn luyện/đánh giá model;
+- kiểm tra log và dataset;
+- phát hành gói firmware/model/config đã phê duyệt;
+- lưu test evidence và manifest.
+Không dùng kết quả suy luận trên PC để thay cho kiểm thử inference trên ESP32-S3.
+
+28.4 Phân vùng trách nhiệm
+- Edge device: acquisition, local inference, rules, alert, logging.
+- Development workstation: build, dataset analysis, model training, release packaging.
+- Optional central storage: backup/log aggregation sau khi trích xuất hoặc khi có
+  kết nối được phê duyệt.
+- Optional remote update service: chỉ khi OTA được triển khai; không phải thành
+  phần bắt buộc của bản mức B.
+Không giả định có server/cloud trong hệ thống nếu chưa được yêu cầu.
+
+28.5 Lắp đặt và commissioning
+Mỗi thiết bị cần deployment record:
+- device_id, serial/hardware revision;
+- vị trí, sơ đồ và ảnh lắp đặt nếu phù hợp;
+- cảm biến, hướng trục, độ sâu và cách cố định;
+- phiên bản firmware/model/config/calibration;
+- ngày triển khai và người thực hiện;
+- nguồn điện, tình trạng vỏ/cáp;
+- kết quả kiểm tra ban đầu;
+- giới hạn sử dụng và người liên hệ vận hành.
+Sau di chuyển hoặc thay đổi giá đỡ phải đánh giá lại baseline và hiệu chuẩn.
+
+===============================================================================
+29. DATASET GOVERNANCE
+===============================================================================
+
+29.1 Mục tiêu
+Bảo đảm dataset có nguồn gốc, nhãn, chất lượng, quyền sử dụng và phiên bản rõ
+ràng. Chất lượng mô hình không thể vượt quá độ tin cậy của dữ liệu và nhãn.
+
+29.2 Metadata bắt buộc cho mỗi phiên thu thập
+- dataset_session_id, device_id, boot_id;
+- vị trí/địa điểm ở mức phù hợp với chính sách bảo mật;
+- thời gian bắt đầu/kết thúc và tình trạng TIME_UNSYNC;
+- loại đất, độ dốc, thời tiết và mô tả lắp đặt nếu biết;
+- sensor IDs, firmware/model/config/calibration versions;
+- tần số lấy mẫu, đơn vị, schema dữ liệu;
+- tình trạng thiếu mẫu, lỗi sensor, lỗi SD và các lần bảo trì;
+- nguồn tham chiếu độc lập và độ tin cậy nếu có;
+- người/nhóm thu thập và ghi chú hiện trường.
+
+29.3 Chính sách nhãn
+- Định nghĩa label/target trước khi gán nhãn.
+- Với regression, target phải là đại lượng đo được hoặc score có quy tắc tạo rõ
+  ràng; ghi đơn vị/miền giá trị và horizon nếu dự báo tương lai.
+- Ghi nguồn nhãn, phương pháp đo, người duyệt và mức độ chắc chắn.
+- Không suy diễn nhãn “sạt lở” từ cảm biến đơn lẻ hoặc ngưỡng provisional mà
+  không ghi rõ đó là nhãn heuristic.
+- Nhãn không chắc chắn cần đánh dấu unknown/uncertain hoặc loại khỏi tập đánh giá
+  chính theo policy; không ép mọi mẫu vào nhãn chắc chắn.
+- Sự kiện quan trọng cần đối chiếu với hồ sơ/thiết bị tham chiếu nếu có.
+
+29.4 Chất lượng và lọc dữ liệu
+Kiểm tra tối thiểu:
+- timestamp/uptime, sequence gaps, duplicate records;
+- giá trị ngoài dải, NaN/Inf, đơn vị không đồng nhất;
+- sensor fault, calibration version thiếu;
+- lệch thời gian giữa cảm biến;
+- file bị cắt, CSV sai cột hoặc mất header;
+- phân bố target và các điều kiện môi trường;
+- mẫu trùng lặp hoặc gần trùng lặp giữa các tập.
+Không xóa bản ghi gốc. Mọi bước làm sạch phải tạo dataset mới, lưu script/version
+và thống kê số mẫu bị giữ/loại cùng lý do.
+
+29.5 Chia train/validation/test
+- Ưu tiên chia theo sự kiện, phiên thu thập, thời gian hoặc địa điểm để giảm
+  leakage từ cửa sổ gần nhau.
+- Không để cửa sổ chồng lấn từ cùng một chuỗi rơi vào cả train và test.
+- Dùng validation để chọn cấu hình/ngưỡng; giữ test độc lập đến đánh giá cuối.
+- Ghi seed, cách chia, số mẫu và phân bố target cho từng split.
+- Nếu dataset quá nhỏ, ghi rõ giới hạn và không diễn giải chỉ số như bằng chứng
+  tổng quát hóa ngoài dữ liệu quan sát.
+
+29.6 Versioning và lineage
+Mỗi dataset release cần:
+- dataset_version và schema_version;
+- danh sách session/source file;
+- script xử lý và phiên bản;
+- policy lọc/nhãn;
+- split manifest;
+- checksum;
+- model(s) được huấn luyện từ release đó;
+- báo cáo đánh giá và known limitations.
+Không chỉnh sửa dataset đã phát hành tại chỗ; tạo phiên bản mới và ghi quan hệ
+supersedes/derived-from.
+
+29.7 Quản lý quyền và bảo vệ
+- Chỉ thu thập dữ liệu cần thiết cho mục tiêu thử nghiệm.
+- Hạn chế thông tin vị trí chính xác nếu không cần chia sẻ.
+- Ghi rõ quyền sử dụng dữ liệu từ bên thứ ba hoặc đối tác.
+- Quy định ai có thể đọc, sửa, gán nhãn và phát hành dataset.
+- Ghi lịch sử thay đổi nhãn và quyết định loại dữ liệu.
+- Sao lưu và kiểm tra khôi phục theo Data Retention Policy.
+
+29.8 Phê duyệt dataset trước khi huấn luyện
+Checklist:
+[ ] Metadata phiên thu thập đầy đủ.
+[ ] Đơn vị/schema nhất quán.
+[ ] Sensor faults và calibration versions được xử lý.
+[ ] Label/target có định nghĩa và nguồn gốc.
+[ ] Leakage được kiểm tra.
+[ ] Train/validation/test split có manifest.
+[ ] Quy tắc làm sạch có script và thống kê.
+[ ] Dataset version/checksum được ghi.
+[ ] Người chịu trách nhiệm duyệt dataset đã xác nhận.
+Nếu chưa đạt, chỉ dùng để khám phá nội bộ; không coi kết quả model là bằng chứng
+đủ cho triển khai hiện trường.
+
+===============================================================================
+PHỤ LỤC D. CHECKLIST BỔ SUNG CHO SRS / RTOS / FMEA / PHÁT HÀNH
+===============================================================================
+
+SRS VÀ TRUY VẾT
+[ ] Mỗi FR/NFR có ID, mức ưu tiên, test case và bằng chứng.
+[ ] Các mục TBD có owner và hạn chốt.
+[ ] Không đánh dấu PASS nếu thiếu bằng chứng.
+
+RTOS VÀ WATCHDOG
+[ ] Danh sách task, priority, stack và giao tiếp đã được ghi.
+[ ] Queue size, overflow policy và mutex ownership đã được kiểm tra.
+[ ] Heartbeat biểu thị tiến triển thực, không phải chỉ task còn chạy.
+[ ] Watchdog fault injection và reset recovery đã được kiểm thử.
+
+STATE/SEQUENCE
+[ ] State machine được ánh xạ với code và test.
+[ ] Các guard, event và hành động khi chuyển trạng thái được định nghĩa.
+[ ] Sequence diagram khớp với kiến trúc triển khai thực tế.
+
+FMEA
+[ ] Các lỗi Severity cao có biện pháp và người chịu trách nhiệm.
+[ ] RPN được review; không dùng RPN thấp để bỏ qua lỗi nghiêm trọng.
+[ ] FMEA được cập nhật sau thử nghiệm.
+
+DATA RETENTION / DATASET
+[ ] Chính sách lưu/xóa được owner phê duyệt.
+[ ] Dung lượng log/ngày được đo.
+[ ] Backup có kiểm tra checksum và khả năng khôi phục.
+[ ] Dataset có metadata, label policy, split manifest và version.
+
+OTA / CONFIG
+[ ] OTA được xác định là in-scope hay out-of-scope.
+[ ] Nếu OTA: image verification, partition, interrupted update và rollback được thử.
+[ ] Risk config có schema/version/hash và quy trình review.
+[ ] Mỗi log/session liên kết firmware, model, risk config và calibration version.
+
+DEPLOYMENT
+[ ] Có deployment record cho từng thiết bị.
+[ ] Đã ghi vị trí, hướng trục, cách lắp và baseline.
+[ ] Đã kiểm tra offline runtime.
+[ ] Có quy trình trích xuất log, bảo trì và phục hồi.
+
+===============================================================================
+KẾT LUẬN BẢN 1.2
+===============================================================================
+
+Bản 1.2 bổ sung các lớp đặc tả và quản trị còn thiếu: SRS với FR/NFR có ID;
+kiến trúc tác vụ FreeRTOS; watchdog dựa trên health/progress; state machine và
+sequence diagrams; FMEA sơ bộ; chính sách lưu trữ; chiến lược OTA có điều kiện;
+versioning cấu hình rủi ro; kiến trúc triển khai; và quản trị dataset.
+
+Các cấu hình cụ thể như task priority/stack, watchdog timeout, ngưỡng rủi ro,
+thời hạn retention chính thức, OTA partition và điểm FMEA vẫn cần được xác minh
+trên board, cảm biến, dữ liệu và quy trình thực tế. Không xem các giá trị đề xuất
+trong tài liệu là thông số đã được nghiệm thu.
+
+
+
+================================================================================
+30. SAFETY CASE VÀ SAFETY ASSUMPTIONS
+================================================================================
+
+30.1 Phạm vi an toàn
+Hệ thống Mức B là hệ thống thử nghiệm/giám sát hỗ trợ quyết định. Hệ thống KHÔNG
+được xem là thiết bị bảo vệ sinh mạng, không được dùng làm căn cứ duy nhất để
+cho phép người đi vào vùng nguy hiểm hoặc thay thế kiểm tra địa chất, cảnh báo
+chính quyền và quy trình sơ tán. Mất nguồn, mất cảm biến, lỗi mô hình hoặc lỗi
+truyền thông phải được xem là trạng thái không đủ thông tin, không phải trạng
+thái an toàn.
+
+30.2 Safety Case sơ bộ (Claim–Argument–Evidence)
+G0 — Hệ thống cung cấp cảnh báo thử nghiệm có thể kiểm tra được trong điều kiện
+đã định nghĩa; không tuyên bố dự báo chắc chắn sạt lở.
+  C1 — Đường đo lường có thể phát hiện phần lớn lỗi vận hành đã xác định.
+      A1 — Mỗi mẫu có timestamp/sequence, quality flags và trạng thái cảm biến.
+      E1 — Báo cáo kiểm thử cảm biến, fault-injection và log lỗi.
+  C2 — Kết quả inference không được sử dụng khi đầu vào không hợp lệ.
+      A2 — Kiểm tra missing/stale/out-of-range trước inference; invalid result
+           được chuyển thành trạng thái UNKNOWN/FAULT, không phải NORMAL.
+      E2 — Unit test cho feature validation và test với dữ liệu lỗi.
+  C3 — Cấu hình rủi ro được nhận diện và truy nguyên.
+      A3 — Manifest chứa config ID/version/hash; thay đổi ngưỡng cần review.
+      E3 — Manifest phát hành, hash và hồ sơ phê duyệt.
+  C4 — Lỗi firmware hoặc tác vụ có thể được nhận biết và phục hồi có kiểm soát.
+      A4 — Watchdog, heartbeat, reset reason và startup self-check được bật.
+      E4 — Kết quả kiểm thử watchdog/reset và log khởi động.
+  C5 — Người vận hành được thông báo rõ về giới hạn và trạng thái lỗi.
+      A5 — Giao diện/đèn/còi phân biệt ALARM, DEGRADED, FAULT và UNKNOWN.
+      E5 — Kiểm tra giao diện và thử nghiệm vận hành.
+
+Các bằng chứng E1–E5 là artefact cần tạo trong kiểm thử; không được hiểu là đã
+có chỉ vì tài liệu này định nghĩa chúng. Safety Case phải được cập nhật khi
+thay đổi cảm biến, vỏ hộp, nguồn, model, ngưỡng hoặc cách triển khai.
+
+30.3 Safety Assumptions
+SA-01: Vị trí lắp đặt và cách ghim cảm biến đại diện cho khu vực được giám sát.
+SA-02: Cảm biến được lắp đúng hướng, hiệu chuẩn và bảo vệ khỏi nước/bùn trong
+       giới hạn thiết kế.
+SA-03: Độ ẩm đất/IMU/mưa/áp suất (nếu dùng) là tín hiệu gián tiếp; không một
+       phép đo đơn lẻ nào xác nhận chắc chắn sạt lở.
+SA-04: Có người chịu trách nhiệm kiểm tra định kỳ và phản ứng khi cảnh báo.
+SA-05: Cảnh báo cục bộ có nguồn và cơ cấu đầu ra còn hoạt động; nếu không, phải
+       có quy trình kiểm tra độc lập.
+SA-06: Dải đo, độ chính xác và tốc độ lấy mẫu đã được xác minh trên phần cứng
+       thực tế.
+SA-07: Dataset đại diện cho các điều kiện môi trường mục tiêu và có nhãn được
+       người có chuyên môn xem xét.
+SA-08: Mạng/Internet có thể không tồn tại; chức năng an toàn cơ bản không phụ
+       thuộc cloud.
+SA-09: Không có bảo đảm chống phá hoại vật lý hoặc chống giả mạo nâng cao nếu
+       chưa triển khai và kiểm thử cơ chế tương ứng.
+SA-10: Thiết bị không được triển khai như hệ thống cảnh báo chính thức trước
+       khi có đánh giá rủi ro, kiểm thử hiện trường và phê duyệt của đơn vị có
+       thẩm quyền.
+
+30.4 Điều kiện chuyển trạng thái
+Nếu phát hiện dữ liệu stale, sensor fault, model/config không tương thích, hoặc
+health metric vượt ngưỡng, hệ thống phải gắn cờ DEGRADED/FAULT/UNKNOWN và ghi
+event. Không tự hạ mức cảnh báo chỉ vì một cảm biến hỏng hoặc dữ liệu mất.
+Ngưỡng và hành vi cuối cùng phải được phê duyệt qua hazard review.
+
+================================================================================
+31. RAM BUDGET
+================================================================================
+
+31.1 Nguyên tắc
+ESP32-S3 có các cấu hình bộ nhớ khác nhau theo module/board; không lấy con số
+danh nghĩa của chip làm dung lượng khả dụng của ứng dụng. RAM khả dụng phải đo
+trên board và firmware release thực tế. Dưới đây là ngân sách khởi điểm để
+định hướng, không phải kết quả đo hay cam kết.
+
+31.2 Ngân sách sơ bộ
+Hạng mục                                      Mục tiêu dự kiến
+- FreeRTOS task stacks + TCB                  24–48 KiB
+- Queue/ring buffers và sample windows        16–40 KiB
+- Feature buffer/normalization                8–24 KiB
+- Edge Impulse model arena/tensor/intermediate 64–160 KiB
+- Logging/serialization buffers               8–24 KiB
+- Driver, network/OTA nếu bật                 24–80 KiB
+- Heap dự phòng cho cấp phát/fragmentation     >= 20% heap ứng dụng còn lại
+
+Các dải trên không cộng thành một cam kết tổng vì phụ thuộc model, driver, PSRAM,
+OTA, logging và cách cấp phát. Model arena phải lấy từ profiling/build thực tế.
+Nếu model cần PSRAM, xác minh kernel/allocator và latency; không giả định mọi
+buffer DMA hoặc thư viện đều chấp nhận PSRAM.
+
+31.3 Tiêu chí nghiệm thu RAM
+- Ghi lại internal free heap, minimum-ever free heap và largest free block.
+- Ghi riêng PSRAM free/low-water mark nếu board có PSRAM.
+- Đo stack high-water mark cho từng task trong tải cực đại.
+- Thử 72 giờ, burst logging, lỗi SD và reconnect/retry; không có tăng trưởng heap
+  không giới hạn, stack overflow hoặc allocation failure.
+- Đặt cảnh báo khi low-water mark thấp hơn ngưỡng đã xác minh; ngưỡng release
+  phải được điền sau khi đo, không để giá trị placeholder.
+- Kiểm tra fragmentation bằng largest free block, không chỉ tổng free heap.
+
+31.4 Artefact bắt buộc
+Báo cáo RAM phải ghi board/module/revision, ESP-IDF/Arduino core version,
+PlatformIO environment, model version/hash, compile flags, cấu hình PSRAM,
+heap trước/sau inference, peak stack theo task và log 72 giờ.
+
+================================================================================
+32. FLASH BUDGET
+================================================================================
+
+32.1 Nguyên tắc
+Flash budget phụ thuộc flash vật lý của board, partition table, kích thước
+firmware, model, NVS, filesystem và OTA. Không hard-code kích thước partition
+trước khi xác định đúng board/module và chiến lược cập nhật.
+
+32.2 Bảng ngân sách cần đo
+Thành phần                                  Giá trị cần ghi
+- Flash vật lý                              [đo/xác minh theo module]
+- Bootloader + partition table              [từ build]
+- Firmware app image                        [từ build]
+- Edge Impulse model/weights                 [đo từ binary/map]
+- NVS config + calibration                   [dung lượng dành riêng]
+- Filesystem log/config                      [dung lượng partition]
+- OTA slot A/B (nếu dùng)                   [theo image lớn nhất + dự phòng]
+- Khoảng trống cho tăng trưởng               [do dự án quy định]
+
+32.3 Quy tắc phát hành
+- CI/build report phải lưu kích thước app binary, flash usage và map file.
+- Kích thước firmware release phải nhỏ hơn partition app với khoảng dự phòng
+  được phê duyệt; build vượt ngưỡng phải fail.
+- Nếu OTA A/B không vừa flash thực tế, không tuyên bố hỗ trợ OTA an toàn; dùng
+  nạp USB/Serial hoặc thiết kế lại partition sau khi đánh giá.
+- Không xóa log/config/calibration chỉ để giải phóng flash nếu chưa có chính
+  sách lưu trữ và khôi phục.
+- Ghi rõ model được nhúng trong firmware hay lưu ở partition riêng; hai cách
+  có ảnh hưởng khác nhau tới cập nhật, hash và rollback.
+
+================================================================================
+33. CHUẨN HÓA EVENT ID
+================================================================================
+
+33.1 Format
+Event ID dạng chuỗi: EVT-<DOMAIN>-<NNNN>
+Ví dụ: EVT-SENS-0001, EVT-MOD-0002, EVT-SYS-0003.
+Mã số là định danh ổn định, không tái sử dụng cho ý nghĩa khác. Không dùng
+timestamp làm Event ID vì đồng hồ có thể chưa đồng bộ hoặc bị reset.
+
+33.2 Danh mục Event ID ban đầu
+EVT-SYS-0001 BOOT_STARTED
+EVT-SYS-0002 BOOT_COMPLETED
+EVT-SYS-0003 RESET_DETECTED
+EVT-SYS-0004 WATCHDOG_TIMEOUT
+EVT-SYS-0005 TASK_HEARTBEAT_MISSED
+EVT-SENS-0001 SENSOR_INIT_FAILED
+EVT-SENS-0002 SENSOR_READ_FAILED
+EVT-SENS-0003 SENSOR_VALUE_OUT_OF_RANGE
+EVT-SENS-0004 SENSOR_DATA_STALE
+EVT-SENS-0005 SENSOR_RECOVERED
+EVT-DQ-0001 INPUT_QUALITY_DEGRADED
+EVT-DQ-0002 FEATURE_WINDOW_INVALID
+EVT-MOD-0001 INFERENCE_STARTED
+EVT-MOD-0002 INFERENCE_COMPLETED
+EVT-MOD-0003 INFERENCE_FAILED
+EVT-MOD-0004 MODEL_MANIFEST_MISMATCH
+EVT-RISK-0001 RISK_STATE_CHANGED
+EVT-RISK-0002 ALARM_ACTIVATED
+EVT-RISK-0003 ALARM_CLEARED
+EVT-CFG-0001 CONFIG_LOADED
+EVT-CFG-0002 CONFIG_VALIDATION_FAILED
+EVT-CFG-0003 CONFIG_VERSION_CHANGED
+EVT-LOG-0001 LOG_WRITE_FAILED
+EVT-LOG-0002 STORAGE_NEAR_FULL
+EVT-LOG-0003 LOG_ROTATED
+EVT-OTA-0001 UPDATE_STARTED
+EVT-OTA-0002 UPDATE_VERIFIED
+EVT-OTA-0003 UPDATE_FAILED
+EVT-OTA-0004 ROLLBACK_COMPLETED
+EVT-HEALTH-0001 HEALTH_DEGRADED
+EVT-HEALTH-0002 HEALTH_RECOVERED
+EVT-REPLAY-0001 REPLAY_STARTED
+EVT-REPLAY-0002 REPLAY_FINISHED
+EVT-REPLAY-0003 REPLAY_MISMATCH
+
+33.3 Event record schema
+event_id, event_name, severity, timestamp_ms, boot_id, sequence_no,
+source_task, sensor_id, config_version, model_version, state_before,
+state_after, error_code, value, unit, message, record_crc.
+Trường không áp dụng có thể để null; schema/version phải được ghi trong header
+của log. Không ghi secret, Wi-Fi password hoặc token vào event.
+
+33.4 Severity
+DEBUG, INFO, NOTICE, WARN, ERROR, CRITICAL. Mỗi Event ID có severity mặc định;
+sự kiện cùng ID không được dùng để diễn tả nhiều ý nghĩa không liên quan.
+Event catalogue phải có owner, mô tả, điều kiện phát sinh, mức độ, hành động
+khuyến nghị và phiên bản schema.
+
+================================================================================
+34. CONFIGURATION MANIFEST
+================================================================================
+
+34.1 Mục tiêu
+Mỗi lần chạy phải xác định chính xác firmware, model, cấu hình rủi ro, hiệu
+chuẩn cảm biến và schema dữ liệu để tái hiện kết quả.
+
+34.2 Manifest tối thiểu
+manifest_schema_version
+product_id
+device_id (mã giả danh, không phải thông tin cá nhân)
+hardware_board, hardware_revision, sensor_bom_revision
+firmware_version, firmware_git_commit, firmware_sha256
+build_environment, compiler_version, framework_version
+model_name, model_version, model_sha256, model_input_schema
+ei_project/deployment identifier (nếu có và không chứa secret)
+feature_schema_version, sampling_rate_hz, window_length, stride
+sensor_calibration_version, calibration_sha256
+risk_config_id, risk_config_version, risk_config_sha256
+threshold_profile, alarm_policy_version
+event_schema_version, csv_schema_version
+dataset_id, dataset_version, training_code_version (nếu biết)
+created_utc, approval_status, approved_by_role, approval_timestamp
+signature_algorithm, signature (nếu triển khai ký số)
+
+34.3 Quy tắc xác thực
+- Manifest phải được kiểm tra trước khi bật inference.
+- Model hash, input schema, feature schema và risk config phải tương thích.
+- Nếu manifest thiếu trường bắt buộc hoặc hash không khớp: không dùng kết quả
+  inference để đưa ra trạng thái NORMAL; ghi event và vào FAULT/UNKNOWN.
+- Không đưa credential vào manifest. Hash không thay thế chữ ký số: nếu threat
+  model yêu cầu chống sửa đổi có chủ đích, cần chữ ký và quản lý khóa riêng.
+- Lưu bản manifest nguyên gốc cùng log, và ghi manifest ID/hash vào mỗi file log.
+- Cấu hình đang hoạt động và cấu hình được phê duyệt phải phân biệt rõ; mọi
+  thay đổi ngưỡng phải tạo phiên bản mới, có lý do và review.
+
+34.4 Ví dụ manifest JSON (minh họa; giá trị cần thay bằng giá trị release)
+{
+  "manifest_schema_version": "1.0",
+  "product_id": "landslide-monitor-mb",
+  "hardware_board": "ESP32-S3",
+  "firmware_version": "0.0.0-dev",
+  "model_name": "ei_regression_model",
+  "model_version": "unreleased",
+  "feature_schema_version": "1.0",
+  "risk_config_id": "risk-default",
+  "risk_config_version": "0.1.0-dev",
+  "event_schema_version": "1.0",
+  "approval_status": "NOT_APPROVED"
+}
+
+================================================================================
+35. REPLAY FRAMEWORK
+================================================================================
+
+35.1 Mục tiêu
+Replay cho phép chạy lại dữ liệu cảm biến đã ghi qua pipeline feature, inference
+và risk manager để so sánh firmware/model/config, điều tra cảnh báo và tái hiện
+bug. Replay trên PC là công cụ kiểm thử offline, không phải runtime dependency
+của ESP32.
+
+35.2 Kiến trúc
+Recorded CSV/Event log -> Validator -> Sample normalizer -> Feature-window
+builder -> Inference adapter (model cùng phiên bản) -> Risk state machine ->
+Expected-vs-actual comparator -> Report.
+Adapter phải tách phần tính toán thuần khỏi driver phần cứng để có thể dùng
+cùng thuật toán feature/risk trên host và firmware. Nếu không thể dùng cùng mã
+nguồn, cần test vector chung để đo sai khác.
+
+35.3 Định dạng đầu vào
+Mỗi record phải có sequence_no, timestamp_ms tương đối trong boot, sensor values,
+unit, quality flags, calibration/config/model manifest ID. Ghi rõ sample rate,
+window size, stride, missing-data policy và cách quy đổi đơn vị. Replay phải
+phát hiện sample thiếu, timestamp đảo ngược, duplicate và file bị cắt.
+
+35.4 Chế độ
+- Deterministic replay: cùng input + firmware logic + model + config phải cho
+  kết quả giống nhau trong tolerance đã định.
+- Model comparison: cùng dataset chạy hai model đã version hóa.
+- Config comparison: giữ nguyên model/input, so sánh hai risk config.
+- Fault replay: chèn sensor stale, NaN, out-of-range, log gap hoặc reset.
+- Golden test: bộ dữ liệu nhỏ đã review, expected features/output/state được
+  lưu cùng phiên bản test.
+
+35.5 Tiêu chí
+- Lưu hash của input dataset, manifest, model và config.
+- So sánh numerical output bằng tolerance xác định theo model/quantization; so
+  sánh event/state transition phải chính xác.
+- Báo cáo mismatch gồm sample index, timestamp, feature vector, output dự kiến/
+  thực tế, state trước/sau và các hash phiên bản.
+- Không dùng replay trên dữ liệu đã dùng để tune ngưỡng rồi tuyên bố đó là đánh
+  giá độc lập; tách test set và ghi rõ lineage.
+- Replay không tự động ghi đè cấu hình thiết bị hoặc phát còi/relay vật lý.
+
+35.6 Lệnh CLI đề xuất
+landslide-replay --input session.csv --manifest manifest.json
+  --model model_bundle/ --config risk_config.json --report replay-report.json
+Tên lệnh minh họa; cần triển khai công cụ host tương ứng trước khi dùng.
+
+================================================================================
+36. HEALTH METRICS
+================================================================================
+
+36.1 Metrics bắt buộc
+Nhóm                 Metric                          Mục đích
+Runtime              uptime_ms, reset_reason         Phát hiện reboot bất thường
+Memory               heap_free, heap_min, largest_block, stack_high_water_by_task
+                                                     Phát hiện cạn bộ nhớ/stack
+Timing               sensor_read_ms, inference_ms, loop_period_ms, deadline_miss_count
+                                                     Phát hiện trễ thời gian
+Sensors              last_sample_age_ms, read_error_count, out_of_range_count
+                                                     Đánh giá tính hợp lệ
+Inference            inference_count, inference_error_count, output_nan_count
+                                                     Đánh giá pipeline model
+Risk                  current_state, transition_count, alarm_duration_ms
+                                                     Truy nguyên cảnh báo
+Storage              log_write_failures, bytes_free, rotation_count
+                                                     Đánh giá khả năng ghi log
+Tasks                heartbeat_age_ms_by_task, task_restart_count
+                                                     Đánh giá tiến trình task
+Configuration        active_manifest_hash, config_validation_status
+                                                     Xác nhận cấu hình
+Power (nếu có đo)    supply_voltage_mv, brownout_count
+                                                     Chẩn đoán nguồn
+
+36.2 Quy tắc cập nhật
+- Metric thời gian thực dùng counter/gauge; log event khi vượt ngưỡng hoặc đổi
+  trạng thái để tránh ghi flash quá dày.
+- Định nghĩa đơn vị, kiểu dữ liệu, chu kỳ cập nhật, ngưỡng warn/critical và
+  hành động tương ứng cho từng metric trước release.
+- Không dùng giá trị 0 thay cho "không biết"; dùng validity flag hoặc null.
+- Không để metric/diagnostic làm block tác vụ lấy mẫu hoặc inference.
+- Tính rolling statistics (min/max/mean/p95 nếu cần) trong cửa sổ hữu hạn.
+
+36.3 Health state
+HEALTHY: tất cả điều kiện bắt buộc hợp lệ.
+DEGRADED: một phần chức năng suy giảm nhưng vẫn có thể ghi nhận dữ liệu an toàn.
+FAULT: lỗi nghiêm trọng khiến không thể tin cậy pipeline hoặc cảnh báo.
+UNKNOWN: chưa đủ dữ liệu để kết luận, ví dụ ngay sau boot hoặc sensor stale.
+Health state không thay thế Risk state; hai trạng thái phải được ghi riêng.
+Một Risk state NORMAL cùng Health state FAULT/UNKNOWN tuyệt đối không được hiển
+thị như "mọi thứ bình thường".
+
+================================================================================
+37. UML BỔ SUNG: CLASS, COMPONENT VÀ DEPLOYMENT DIAGRAMS
+================================================================================
+
+37.1 Class Diagram (Mermaid)
+```mermaid
+classDiagram
+    class SensorManager {
+      +init()
+      +readAll() SensorFrame
+      +getHealth() SensorHealth
+    }
+    class SensorFrame {
+      +timestamp_ms
+      +sequence_no
+      +imu_xyz
+      +soil_moisture
+      +rain_value
+      +pressure_value
+      +quality_flags
+    }
+    class FeaturePipeline {
+      +validate(frame)
+      +append(frame)
+      +buildWindow() FeatureVector
+    }
+    class InferenceEngine {
+      +loadModel(manifest)
+      +run(features) ModelOutput
+    }
+    class RiskManager {
+      +update(output, health, config) RiskState
+      +getState() RiskState
+    }
+    class ConfigManager {
+      +loadManifest()
+      +validate()
+      +getRiskConfig()
+    }
+    class EventLogger {
+      +emit(event)
+      +writeSample(frame)
+      +rotate()
+    }
+    class HealthMonitor {
+      +updateMetric()
+      +evaluate() HealthState
+    }
+    SensorManager --> SensorFrame
+    SensorFrame --> FeaturePipeline
+    FeaturePipeline --> InferenceEngine
+    InferenceEngine --> RiskManager
+    ConfigManager --> InferenceEngine
+    ConfigManager --> RiskManager
+    HealthMonitor --> RiskManager
+    RiskManager --> EventLogger
+    SensorManager --> EventLogger
+    InferenceEngine --> EventLogger
+```
+Class names and methods are logical interfaces; adapt to actual source files and
+types. Keep sensor drivers, platform-specific code and pure logic separated.
+
+37.2 Component Diagram (Mermaid)
+```mermaid
+flowchart LR
+    subgraph Device["ESP32-S3 device"]
+      Drivers["Sensor drivers"]
+      Acquire["Acquisition task"]
+      Features["Validation / feature pipeline"]
+      EI["Edge Impulse inference"]
+      Risk["Risk state manager"]
+      Health["Health monitor / watchdog"]
+      Logger["Event + sample logger"]
+      Store[("SD / local storage")]
+      Output["LED / buzzer / relay"]
+      Drivers --> Acquire --> Features --> EI --> Risk
+      Health --> Risk
+      Risk --> Output
+      Acquire --> Logger
+      Features --> Logger
+      EI --> Logger
+      Risk --> Logger
+      Health --> Logger
+      Logger --> Store
+    end
+    Workstation["Development workstation"] -. "USB/Serial: flash, diagnostics, export" .-> Device
+    Dataset["Governed dataset / model release"] -. "reviewed release artifact" .-> Workstation
+```
+Sơ đồ biểu diễn phụ thuộc logic, không hàm ý rằng thiết bị cần workstation/cloud
+khi chạy bình thường.
+
+37.3 Deployment Diagram (Mermaid)
+```mermaid
+flowchart TB
+    subgraph Field["Hiện trường — vận hành offline"]
+      ESP["ESP32-S3 + firmware + model + risk config"]
+      SENS["IMU / moisture / rain / optional pressure"]
+      ALERT["LED / buzzer / relay"]
+      LOCAL[("SD / local flash")]
+      SENS --> ESP
+      ESP --> ALERT
+      ESP --> LOCAL
+    end
+    subgraph Engineering["Khu vực kỹ thuật — ngoài runtime"]
+      IDE["VS Code + PlatformIO"]
+      BUILD["Build + map/budget report"]
+      MODEL["Edge Impulse model export"]
+      DATA["Dataset + training/evaluation"]
+      REPLAY["Replay + regression test"]
+      IDE --> BUILD
+      MODEL --> BUILD
+      DATA --> MODEL
+      DATA --> REPLAY
+      BUILD -->|"USB/Serial release"| ESP
+      LOCAL -->|"manual export"| REPLAY
+    end
+```
+Deployment view phân biệt rõ runtime tại hiện trường và engineering pipeline.
+Các mũi tên nạp/export là thao tác bảo trì, không phải đường truyền bắt buộc
+trong vận hành offline.
+
+================================================================================
+38. ADR-001: LỰA CHỌN REGRESSION HAY CLASSIFICATION
+================================================================================
+
+Trạng thái: PROPOSED — cần xác nhận theo định nghĩa target và dataset.
+Quyết định hiện tại: tiếp tục Regression cho prototype nếu target là một đại
+lượng liên tục có ý nghĩa và có nhãn đo/ước lượng đáng tin cậy. Không chọn
+Regression chỉ vì Edge Impulse hỗ trợ; cũng không diễn giải trực tiếp output
+regression thành xác suất sạt lở nếu chưa hiệu chuẩn.
+
+38.1 Context
+Hệ thống dùng tín hiệu IMU, độ ẩm đất, mưa và có thể có áp suất/biến khác để
+đánh giá nguy cơ. Cần xác định target mà model dự đoán: (a) đại lượng liên tục
+như displacement/velocity/soil movement index; (b) mức nguy cơ có thứ tự; hay
+(c) lớp hành động như NORMAL/WATCH/WARNING/ALARM. Các target này không tương
+đương nhau và cần chiến lược gán nhãn khác nhau.
+
+38.2 Options
+A. Regression
+Ưu điểm:
+- Dự đoán đại lượng liên tục, giữ được độ lớn/thay đổi giữa các mẫu.
+- Có thể hỗ trợ xu hướng nếu target có định nghĩa vật lý/đo lường nhất quán.
+Hạn chế:
+- Cần nhãn liên tục đủ tin cậy; nhãn do chuyên gia gán theo cảm tính dễ tạo
+  sai số không rõ nghĩa.
+- Sai số số học nhỏ không đảm bảo phân biệt đúng vùng nguy hiểm.
+- Cần xác định scale, unit, clipping và cách ánh xạ output sang risk state.
+- Output không tự động là probability hoặc xác suất sạt lở.
+
+B. Classification
+Ưu điểm:
+- Trực tiếp dự đoán các lớp hành động nếu nhãn được định nghĩa rõ.
+- Dễ đánh giá confusion matrix, recall/false negative theo lớp nguy hiểm.
+Hạn chế:
+- Ranh giới lớp có thể tùy ý; mất thông tin về độ lớn liên tục.
+- Mất cân bằng lớp và thiếu mẫu sự kiện hiếm có thể làm kết quả gây hiểu nhầm.
+- Confidence score không nhất thiết là xác suất đã được calibration.
+- Lớp nguy cơ vẫn cần chính sách quyết định và cơ chế fail-safe riêng.
+
+C. Hai giai đoạn (model + rule-based risk manager)
+Dùng model để dự đoán đại lượng hoặc lớp nền; Risk Manager độc lập áp dụng
+quality gates, persistence/hysteresis, sensor fault và quy tắc cảnh báo. Đây là
+kiến trúc đề xuất để tránh để một output ML đơn lẻ trực tiếp điều khiển còi.
+
+38.3 Decision criteria
+- Nếu có ground truth liên tục (ví dụ displacement được đo bằng thiết bị tham
+  chiếu), đủ độ phân giải và được đồng bộ thời gian: Regression có cơ sở.
+- Nếu nhãn đáng tin cậy chỉ là các mức hành động/rủi ro đã được chuyên gia
+  định nghĩa: Classification có thể phù hợp hơn.
+- Nếu chưa có ground truth hoặc nhãn nhất quán: chưa đủ căn cứ chọn model cho
+  cảnh báo; cần xây dựng protocol thu thập/label trước.
+- Với hệ thống cảnh báo, đánh giá false negative, time-to-detection, false
+  alarm rate và độ bền qua các địa điểm/đợt mưa quan trọng hơn một metric tổng
+  hợp duy nhất.
+- Chia train/validation/test theo phiên đo, thời gian hoặc địa điểm; không chia
+  ngẫu nhiên từng cửa sổ chồng lấn vì có thể rò rỉ dữ liệu.
+
+38.4 Consequences
+- Regression: ghi model output, target unit, scaling/version, error metrics và
+  quy tắc ánh xạ sang Risk State.
+- Classification: ghi class ontology, class order, threshold/policy, confusion
+  matrix, per-class recall và calibration nếu có.
+- Cả hai: chất lượng dữ liệu, phân bố điều kiện môi trường, drift, missing data
+  và sensor fault phải được đánh giá; model không được tự quyết định rằng cảm
+  biến lỗi là nguy cơ thấp.
+- Không tuyên bố mô hình dự đoán sạt lở thực tế cho đến khi được đánh giá trên
+  dữ liệu độc lập, có đối chiếu ground truth và kiểm tra hiện trường.
+
+38.5 Acceptance / follow-up
+ADR này chỉ được chấp thuận khi nhóm dự án ghi rõ:
+1) target/label chính xác và đơn vị hoặc định nghĩa lớp;
+2) nguồn ground truth, người gán nhãn và độ tin cậy;
+3) số phiên đo, địa điểm, điều kiện và phân bố nhãn;
+4) metric chấp nhận, đặc biệt false negative/false alarm và time-to-detection;
+5) kết quả so sánh Regression và Classification trên cùng split độc lập;
+6) người review/phê duyệt và ngày quyết định.
+Cho đến khi hoàn thành, Regression là lựa chọn prototype có điều kiện, không
+phải kết luận rằng nó tốt hơn Classification cho bài toán sạt lở.
+
+================================================================================
+PHỤ LỤC E. CHECKLIST BỔ SUNG CHO SAFETY / RESOURCE / REPLAY
+================================================================================
+
+[ ] Safety Case có claim, argument và evidence thực tế; các assumption được
+    chủ sở hữu hệ thống xác nhận.
+[ ] Hazard review xác định hậu quả của false negative, false alarm, mất nguồn,
+    lỗi cảm biến, lỗi model và cảnh báo không phát ra.
+[ ] RAM report từ board release: heap low-water, largest block, stack high-water.
+[ ] Flash report từ build release: partition table, binary/map, model, filesystem,
+    OTA slot và khoảng dự phòng.
+[ ] Event catalogue có owner, severity, schema version và test cho từng event.
+[ ] Manifest được lưu cùng log và hash model/config/firmware được xác minh.
+[ ] Replay golden tests chạy trong CI hoặc quy trình release; mismatch được xử lý.
+[ ] Health metrics có đơn vị, chu kỳ, ngưỡng, hành động và validity flag.
+[ ] Class/Component/Deployment diagrams được đối chiếu với mã nguồn và wiring.
+[ ] ADR-001 được phê duyệt sau khi so sánh trên dataset độc lập.
+[ ] Các ngưỡng/budget chưa đo không còn placeholder trước khi phát hành.
+
+KẾT LUẬN BỔ SUNG V1.3
+Phiên bản này định nghĩa cấu trúc quản trị an toàn, ngân sách tài nguyên, định
+danh sự kiện, manifest cấu hình, replay, health metrics, UML và ADR lựa chọn mô
+hình. Các bảng RAM/Flash là mục tiêu khởi điểm, không phải benchmark. Không có
+bằng chứng nào trong tài liệu này tự chứng minh thiết bị an toàn; cần kiểm thử
+trên phần cứng thực, đánh giá độc lập, review hazard và phê duyệt trước triển
+khai ngoài phạm vi thử nghiệm.
+
+
+
+================================================================================
+39. DATA DICTIONARY CHÍNH THỨC
+================================================================================
+
+39.1 Quy tắc chung
+Data Dictionary này là hợp đồng dữ liệu logic cho firmware, log, replay và
+công cụ phân tích. Trước release, kiểu logic phải ánh xạ sang kiểu C/C++ cố
+định độ rộng (stdint.h) và schema serialization cụ thể. Không ghi trực tiếp
+raw struct C++ vào flash làm định dạng lưu trữ xuyên phiên bản.
+- Tên field dùng snake_case; enum dùng UPPER_SNAKE_CASE.
+- Mọi đại lượng vật lý phải có đơn vị; giá trị không hợp lệ phải có validity/
+  quality flag, không giả lập bằng 0.
+- timestamp_ms là thời gian monotonic từ boot; UTC timestamp là field riêng.
+- Thay đổi tên, đơn vị, thứ tự hoặc ý nghĩa field phải version hóa schema.
+- Dải hợp lệ cuối cùng phải dựa trên datasheet, hiệu chuẩn và phép đo thực tế.
+
+39.2 Metadata dùng chung
+Field | Kiểu logic | Đơn vị/miền | Bắt buộc | Ý nghĩa
+schema_version | string | MAJOR.MINOR | Có | Phiên bản schema record
+device_id | string | ID không chứa thông tin cá nhân | Có | Mã thiết bị
+boot_id | uint32/uint64 | định danh boot | Có | Phân biệt lần khởi động
+sequence_no | uint32/uint64 | tăng trong boot | Có | Phát hiện record thiếu/đúp
+timestamp_ms | uint64 | ms monotonic | Có | Thời gian từ boot
+utc_timestamp | string/null | ISO-8601 UTC | Không | Chỉ dùng khi đã đồng bộ
+manifest_id | string | ID/hash | Có | Manifest đang hoạt động
+firmware_version | string | version | Có | Phiên bản firmware
+model_version | string | version/hash | Có | Phiên bản model
+risk_config_version | string | version | Có | Cấu hình quyết định rủi ro
+quality_flags | uint32 bitmask | bitmask | Có | Các cờ chất lượng
+
+39.3 SensorFrame
+Field | Kiểu logic | Đơn vị | Điều kiện/ý nghĩa
+imu_ax_raw, imu_ay_raw, imu_az_raw | int16/int32 | LSB | Gia tốc kế thô
+imu_gx_raw, imu_gy_raw, imu_gz_raw | int16/int32 | LSB | Nếu IMU có gyro
+accel_x_g, accel_y_g, accel_z_g | float32 | g | Gia tốc đã quy đổi
+gyro_x_dps, gyro_y_dps, gyro_z_dps | float32 | degree/s | Gyro đã quy đổi nếu có
+soil_moisture_raw | int32 | count/ADC unit | Giá trị cảm biến thô
+soil_moisture_pct | float32 | % theo hiệu chuẩn | Không tự hiểu là % thể tích
+rain_raw | int32/float32 | đơn vị driver | Giá trị thô của cảm biến mưa
+rain_rate_mm_h | float32 | mm/h | Chỉ khi cảm biến/hiệu chuẩn hỗ trợ
+pressure_raw | int32 | count/ADC unit | Giá trị thô nếu có
+pressure_kpa | float32 | kPa | Chỉ khi phần tử đo thực sự là áp suất
+sensor_status_bits | uint32 | bitmask | Trạng thái các cảm biến
+sample_period_ms | uint32 | ms | Chu kỳ mẫu dự kiến/đo được
+valid_mask | uint32 | bitmask | Field hợp lệ
+quality_flags | uint32 | bitmask | STALE, OUT_OF_RANGE, BUS_ERROR...
+
+Lưu ý: HX710B là ADC/interface; đại lượng đo phụ thuộc cảm biến được nối vào.
+Không gán tên pressure_kpa nếu phần cứng thực tế đo đại lượng khác.
+
+39.4 FeatureVector
+feature_schema_version:string; window_start_ms:uint64; window_end_ms:uint64;
+window_sample_count:uint16/uint32; feature_values:float32[];
+feature_valid_mask:bitmask; feature_names_hash:string.
+Thứ tự feature, scale/normalization, missing-data policy và số chiều phải
+version hóa cùng model; không tự sắp xếp feature theo tên khi inference.
+
+39.5 ModelOutput
+inference_id:uint64; inference_start_ms:uint64; inference_duration_ms:uint32;
+model_output_raw:float32[]; prediction_value:float32/null;
+prediction_valid:bool; inference_status:OK/INVALID_INPUT/MODEL_ERROR/
+NONFINITE_OUTPUT; model_version:string.
+Với Regression, prediction_value phải có target, đơn vị và scaling đã định
+nghĩa. Với Classification, cần class_id/class_label và score theo model
+contract; không gọi score là xác suất nếu chưa calibration.
+
+39.6 RiskAssessment
+risk_state: NORMAL/WATCH/WARNING/ALARM/UNKNOWN;
+health_state: HEALTHY/DEGRADED/FAULT/UNKNOWN;
+risk_score:float32/null (chỉ khi scale được định nghĩa);
+decision_reason_code:string/uint16; state_enter_ms:uint64;
+persistence_ms:uint32; alarm_output_state:OFF/ON/FAILED/NOT_PRESENT;
+active_config_hash:string.
+Risk state và health state là hai trục riêng; NORMAL + FAULT không được trình
+bày như thiết bị hoạt động bình thường.
+
+39.7 EventRecord
+ event_id:string EVT-*; severity:DEBUG/INFO/NOTICE/WARN/ERROR/CRITICAL;
+event_sequence_no:uint32/uint64; source_task:string; error_code:string/null;
+state_before:string/null; state_after:string/null; value:number/string/null;
+unit:string/null; message:string; record_crc:uint32/null.
+Event ID mô tả sự kiện; Error Code mô tả lỗi xử lý/API. Hai loại mã không thay
+thế nhau.
+
+39.8 HealthSnapshot
+uptime_ms:uint64; reset_reason:enum/string; heap_free_bytes:uint32;
+heap_min_free_bytes:uint32; largest_free_block_bytes:uint32;
+task_stack_high_water_words:map/task records; sensor_read_error_count:uint64;
+inference_error_count:uint64; deadline_miss_count:uint64;
+log_write_failure_count:uint64; health_state:HEALTHY/DEGRADED/FAULT/UNKNOWN.
+
+39.9 Serialization và tương thích
+- CSV phải có header, schema_version và manifest_id; đơn vị field được định
+  nghĩa ở đây, không suy đoán từ tên cột.
+- NaN/Inf không được ghi như giá trị hợp lệ; đánh dấu invalid và ghi lý do.
+- timestamp monotonic chỉ so sánh trực tiếp trong cùng boot_id.
+- Binary format phải quy định endian, integer width, alignment và version.
+- Parser gặp schema không hỗ trợ phải từ chối an toàn hoặc dùng converter có
+  version, không tự đoán cách diễn giải.
+
+================================================================================
+40. API CONTRACT NỘI BỘ
+================================================================================
+
+40.1 Quy ước
+Đây là interface logic giữa các module firmware, không phải API cloud. API phải
+quy định timeout, ownership, thread safety, lỗi và khả năng block. Trạng thái
+chuẩn: OK, INVALID_ARGUMENT, NOT_INITIALIZED, TIMEOUT, IO_ERROR, DATA_INVALID,
+STALE_DATA, BUFFER_FULL, NOT_SUPPORTED, VERSION_MISMATCH, RESOURCE_EXHAUSTED,
+INTERNAL_ERROR, BUSY.
+
+40.2 SensorManager
+- Status init(const SensorConfig& config)
+- Status readLatest(SensorFrame& out, uint32_t timeout_ms)
+- Status readBatch(SensorFrame* out, size_t capacity, size_t& count,
+                   uint32_t timeout_ms)
+- SensorHealth getHealth() const
+- Status resetSensor(SensorId id)
+Contract: không trả OK nếu field bắt buộc invalid mà không gắn valid_mask/
+quality_flags; timeout không tạo mẫu giả; caller sở hữu buffer out; reset phải
+ghi nhận lỗi và không xóa lịch sử lỗi.
+
+40.3 FeaturePipeline
+- Status validateFrame(const SensorFrame&, ValidationReport&)
+- Status pushFrame(const SensorFrame&)
+- Status buildWindow(FeatureVector&)
+- Status resetWindow(ResetReason)
+Contract: trả DATA_INVALID nếu thiếu mẫu/stale/schema sai; thứ tự và normalization
+cố định theo feature_schema_version; không cấp phát heap không giới hạn mỗi mẫu.
+
+40.4 InferenceEngine
+- Status init(const ModelManifest&)
+- Status run(const FeatureVector&, ModelOutput&)
+- ModelStatus getStatus() const
+- Status deinit()
+Contract: kiểm tra số chiều/schema trước inference; output chỉ hợp lệ nếu status
+OK, prediction_valid=true và mọi output hữu hạn; không chạy đồng thời cùng
+instance nếu runtime không bảo đảm thread-safe; không đổi lỗi thành score 0.
+
+40.5 RiskManager
+- Status init(const RiskConfig&)
+- Status update(const ModelOutput&, const HealthSnapshot&, uint64_t now_ms,
+                RiskAssessment&)
+- RiskAssessment getCurrent() const
+- Status applyConfig(const RiskConfig&, const ConfigApproval&)
+Contract: output invalid hoặc health FAULT/UNKNOWN phải theo policy đã phê duyệt,
+không tự quy về NORMAL; persistence/hysteresis/debounce phải version hóa;
+config chỉ đổi tại điểm đồng bộ an toàn và ghi lại version trước/sau.
+
+40.6 ConfigManager / Manifest
+- Status loadManifest(Manifest&)
+- Status validateManifest(const Manifest&, ValidationReport&)
+- Status getActiveRiskConfig(RiskConfig&)
+- Status verifyArtifactHash(ArtifactId)
+Contract: không trả OK khi hash/schema/tương thích sai; cấu hình đã phê duyệt
+không sửa tại chỗ; không ghi credential vào manifest/log.
+
+40.7 EventLogger / Storage
+- Status emitEvent(const EventRecord&)
+- Status appendSample(const SensorFrame&)
+- Status appendHealth(const HealthSnapshot&)
+- Status flush(uint32_t timeout_ms)
+- StorageStatus getStorageStatus() const
+Contract: không block vô hạn task thời gian thực; queue/buffer full phải theo
+policy và tăng counter; định nghĩa copy/transfer ownership; chỉ tuyên bố dữ liệu
+bền vững khi semantics flush/filesystem đã được kiểm chứng.
+
+40.8 HealthMonitor / WatchdogSupervisor
+- Status reportTaskProgress(TaskId, uint64_t now_ms)
+- Status evaluateHealth(HealthSnapshot&)
+- Status requestControlledRestart(RestartReason)
+Contract: heartbeat chỉ cập nhật khi task thực sự tiến triển; feed watchdog chỉ
+khi các task bắt buộc đạt policy; reset có kiểm soát ghi reason nếu có thể.
+
+40.9 OutputController
+- Status setAlarm(AlarmCommand)
+- Status readback(AlarmOutputState&)
+- Status selfTest()
+Contract: phân biệt lệnh bật với feedback vật lý; nếu không có feedback thì
+không giả lập xác nhận đầu ra đã hoạt động. Lỗi output phải cập nhật health và
+phát event nếu có thể.
+
+40.10 FreeRTOS / đồng bộ
+Mỗi queue phải định nghĩa owner, item type, depth, overflow policy và timeout.
+Không giữ mutex khi gọi inference/SD có latency không giới hạn nếu có thể tránh.
+API ISR phải được đánh dấu riêng và chỉ dùng hàm ISR-safe; không gọi API blocking
+trong ISR. Callback phải định nghĩa context, lifetime dữ liệu và lỗi.
+
+40.11 Caller/callee dự kiến
+TaskSensorAcq -> SensorManager -> SensorFrame queue
+TaskDataQualityFeature -> FeaturePipeline -> FeatureVector queue
+TaskInference -> InferenceEngine -> ModelOutput queue
+TaskRiskManager -> RiskManager + ConfigManager -> RiskAssessment queue
+TaskLogger -> EventLogger/Storage; TaskDiagnostics -> HealthMonitor;
+TaskWatchdogSupervisor -> HealthMonitor + watchdog; output driver -> OutputController.
+Đây là phân tách logic; nếu code thực tế dùng API đồng bộ, cập nhật contract và
+xác minh deadline/thread safety.
+
+================================================================================
+41. ERROR CODE CATALOG
+================================================================================
+
+41.1 Quy tắc
+Error Code xác định lỗi xử lý/API; Event ID xác định sự kiện được log. Một
+Event có thể tham chiếu Error Code. Không tái sử dụng mã với nghĩa khác. Mỗi mã
+cần severity, recovery action, clear policy và test case trước release.
+
+41.2 Dải mã
+0x0000–0x00FF Common/API; 0x0100–0x01FF Sensor/driver;
+0x0200–0x02FF Data quality/feature; 0x0300–0x03FF Model/inference;
+0x0400–0x04FF Risk/config/manifest; 0x0500–0x05FF Storage/logging;
+0x0600–0x06FF RTOS/task/watchdog; 0x0700–0x07FF Alarm/output;
+0x0800–0x08FF OTA; 0x0900–0x09FF Replay/diagnostics.
+
+41.3 Catalog khởi điểm
+Code   Symbol                       Severity   Ý nghĩa / phản ứng
+0x0000 ERR_OK                       INFO       Thành công; không dùng làm error_code
+0x0001 ERR_INVALID_ARGUMENT         ERROR      Caller sửa tham số
+0x0002 ERR_NOT_INITIALIZED          ERROR      Kiểm tra thứ tự init
+0x0003 ERR_TIMEOUT                  WARN       Retry hữu hạn, cập nhật health
+0x0004 ERR_NOT_SUPPORTED            ERROR      Tính năng không hỗ trợ
+0x0005 ERR_RESOURCE_EXHAUSTED       ERROR      Cạn resource; giảm tải/FAULT
+0x0006 ERR_VERSION_MISMATCH         CRITICAL   Schema/model/config không tương thích
+0x0007 ERR_INTERNAL                 ERROR      Lỗi nội bộ, log context an toàn
+0x0008 ERR_BUSY                     WARN       Retry có backoff
+0x0100 ERR_SENSOR_INIT              CRITICAL   Sensor init fail
+0x0101 ERR_SENSOR_READ              ERROR      Đọc sensor fail
+0x0102 ERR_SENSOR_STALE             ERROR      Dữ liệu quá cũ; không dùng như bình thường
+0x0103 ERR_SENSOR_OUT_OF_RANGE      ERROR      Đánh dấu field invalid
+0x0104 ERR_SENSOR_CALIBRATION       ERROR      Calibration thiếu/sai
+0x0105 ERR_SENSOR_BUS               ERROR      Lỗi I2C/SPI/UART/bus
+0x0106 ERR_SENSOR_DISCONNECTED      CRITICAL   Sensor mất kết nối
+0x0107 ERR_SENSOR_DATA_FORMAT       ERROR      Raw data/packet sai định dạng
+0x0200 ERR_FRAME_INVALID            ERROR      Frame thiếu field bắt buộc
+0x0201 ERR_WINDOW_INCOMPLETE        WARN       Chưa đủ mẫu
+0x0202 ERR_FEATURE_INVALID          ERROR      Feature invalid/NaN/Inf
+0x0203 ERR_FEATURE_SCHEMA           CRITICAL   Feature order/schema mismatch
+0x0204 ERR_SAMPLE_GAP               WARN       Thiếu sequence/sample
+0x0205 ERR_TIMESTAMP_ORDER          ERROR      Timestamp đảo ngược
+0x0300 ERR_MODEL_INIT               CRITICAL   Model init fail
+0x0301 ERR_MODEL_INPUT_DIM          CRITICAL   Sai số chiều input
+0x0302 ERR_MODEL_INFERENCE           ERROR      Runtime inference failure
+0x0303 ERR_MODEL_OUTPUT_NONFINITE    CRITICAL   Loại output NaN/Inf
+0x0304 ERR_MODEL_HASH                CRITICAL   Model hash sai
+0x0305 ERR_MODEL_SCHEMA              CRITICAL   Model/feature schema sai
+0x0306 ERR_MODEL_TIMEOUT             ERROR      Inference quá deadline
+0x0400 ERR_CONFIG_LOAD               CRITICAL   Không đọc được config
+0x0401 ERR_CONFIG_PARSE              CRITICAL   Config sai định dạng
+0x0402 ERR_CONFIG_RANGE              CRITICAL   Tham số ngoài miền
+0x0403 ERR_CONFIG_HASH               CRITICAL   Config hash sai
+0x0404 ERR_CONFIG_NOT_APPROVED       CRITICAL   Config chưa phê duyệt
+0x0405 ERR_MANIFEST_INVALID          CRITICAL   Manifest thiếu/sai schema
+0x0406 ERR_MANIFEST_SIGNATURE        CRITICAL   Chữ ký sai nếu có dùng
+0x0407 ERR_RISK_POLICY               CRITICAL   Risk policy không hợp lệ
+0x0500 ERR_STORAGE_INIT              ERROR      Storage init fail
+0x0501 ERR_STORAGE_FULL              ERROR      Hết dung lượng
+0x0502 ERR_LOG_WRITE                 ERROR      Ghi log thất bại
+0x0503 ERR_LOG_FLUSH_TIMEOUT         WARN       Flush quá hạn
+0x0504 ERR_LOG_CORRUPT               ERROR      File/record hỏng
+0x0505 ERR_LOG_SCHEMA                ERROR      Schema log không hỗ trợ
+0x0506 ERR_STORAGE_MOUNT             ERROR      Mount filesystem fail
+0x0507 ERR_STORAGE_READ_ONLY         ERROR      Storage chỉ đọc
+0x0600 ERR_TASK_CREATE               CRITICAL   Tạo task fail
+0x0601 ERR_TASK_HEARTBEAT            CRITICAL   Task không tiến triển
+0x0602 ERR_TASK_DEADLINE              ERROR      Lỡ deadline
+0x0603 ERR_WATCHDOG_TIMEOUT          CRITICAL   Watchdog timeout/reset
+0x0604 ERR_STACK_OVERFLOW            CRITICAL   Stack overflow
+0x0605 ERR_MUTEX_TIMEOUT             ERROR      Mutex timeout
+0x0606 ERR_QUEUE_FULL                WARN       Queue đầy; áp dụng overflow policy
+0x0607 ERR_HEAP_LOW                  CRITICAL   Heap dưới ngưỡng đo/xác minh
+0x0700 ERR_ALARM_COMMAND             ERROR      Lệnh output thất bại
+0x0701 ERR_ALARM_FEEDBACK            CRITICAL   Feedback không khớp lệnh
+0x0702 ERR_ALARM_SELFTEST            CRITICAL   Self-test output fail
+0x0703 ERR_ALARM_UNVERIFIABLE        WARN       Không có feedback vật lý
+0x0800 ERR_OTA_BEGIN                 ERROR      Không bắt đầu update
+0x0801 ERR_OTA_WRITE                 ERROR      Ghi image fail
+0x0802 ERR_OTA_HASH                  CRITICAL   Hash image sai
+0x0803 ERR_OTA_SIGNATURE             CRITICAL   Chữ ký image sai nếu áp dụng
+0x0804 ERR_OTA_ROLLBACK              ERROR      Rollback fail
+0x0805 ERR_OTA_PARTITION             ERROR      Partition không phù hợp
+0x0900 ERR_REPLAY_INPUT              ERROR      Dataset replay không đọc được
+0x0901 ERR_REPLAY_SCHEMA             ERROR      Schema không tương thích
+0x0902 ERR_REPLAY_MISMATCH           ERROR      Kết quả khác golden/expected
+0x0903 ERR_REPLAY_MANIFEST           ERROR      Manifest/model/config không khớp
+0x0904 ERR_DIAGNOSTIC_EXPORT         WARN       Export chẩn đoán thất bại
+
+41.4 Quy tắc xử lý lỗi
+Mọi API status phải ánh xạ vào catalog này. Mã mới dùng slot chưa cấp trong dải
+đúng và cập nhật version. Retry hữu hạn, có backoff, không làm nghẽn acquisition.
+Lỗi CRITICAL cập nhật health/risk theo safety policy và phát Event ID nếu còn
+khả năng. error_code để null khi không có lỗi; không dùng ERR_OK làm lỗi. Phân
+biệt lỗi tạm thời với lỗi cấu hình/model không khắc phục bằng retry. Software
+state ALARM không tự chứng minh còi/relay đã hoạt động.
+
+================================================================================
+PHỤ LỤC F. CHECKLIST DATA CONTRACT
+================================================================================
+[ ] Mỗi field có type, unit, validity, range và schema version.
+[ ] CSV/JSON/binary schema đóng băng và parser có test.
+[ ] Feature order, scaling và input dimension được kiểm tra khi boot.
+[ ] Mỗi API có timeout, ownership, thread safety và hành vi lỗi.
+[ ] Event ID và Error Code được phân biệt rõ.
+[ ] Mỗi Error Code có severity, recovery, clear policy và test case.
+[ ] Replay golden tests dùng đúng schema/manifest/model/config.
+[ ] Log không chứa credential hoặc thông tin nhạy cảm.
+[ ] Contract được đối chiếu với header/source code trước release.
+
+KẾT LUẬN BỔ SUNG V1.4
+Data Dictionary, API Contract và Error Code Catalog là baseline chuẩn hóa,
+chưa phải contract đã đồng bộ với code cho đến khi được ánh xạ vào header C++,
+enum, schema log, test tự động và code review.
+
+
+ĐẶC TẢ KỸ THUẬT v1.5 — CHANGE NOTE MPU9250/I2C (2026-10-29)
+================================================
+Decision status: SELECTED — IMU model = MPU9250; host interface = I2C.
+This decision supersedes any earlier wording that described the MPU9250 interface as “I2C/SPI TBD” or “I2C or SPI”.
+
+Normative requirements:
+1. The MPU9250 shall be accessed through the ESP32-S3 I2C controller and a dedicated MPU9250 driver; it shall not be read as an analog voltage through the ESP32-S3 ADC.
+2. The driver shall perform bounded bus transactions, device/identity validation where supported by the module, register configuration, sample acquisition, and explicit status/error reporting. No infinite waits and no fabricated zero samples are permitted.
+3. Keep raw register/count values separate from converted physical values. Acceleration scale/unit, gyro usage and scale, axis orientation, mounting transform, output data rate (ODR), digital low-pass filter, sample period, bus clock, SDA/SCL GPIO, I2C address, pull-ups/electrical details, and calibration coefficients remain TBD until confirmed from the actual board/module, datasheet, schematic and bench test. Do not infer these values from the sensor name alone.
+4. Timestamp and sequence each sample; expose per-channel validity and freshness. Detect I2C timeout/bus error, invalid device identity if applicable, stale/missing samples, and recovery attempts. A failed read must not be represented as a valid measurement.
+5. The downstream SensorFrame, dataset raw record, calibrated channels and Edge Impulse input contract must preserve unit, coordinate-frame, calibration/version and quality metadata. This change does not approve any feature as a model input or freeze sampling/window/model semantics.
+6. Verify the exact breakout/module voltage compatibility and I2C pull-up arrangement before connecting it to ESP32-S3. The chosen I2C bus pins and clock rate are board configuration items and remain TBD.
+
+Acceptance evidence required before hardware baseline freeze:
+- Confirmed BOM/module and datasheet revision; schematic/pin map; I2C address and electrical-level review.
+- Cold/warm initialization and repeated read test; device identity/configuration check where supported.
+- Bench test of all three acceleration axes and sign/orientation; scale/unit comparison against a suitable reference; gyro checks if gyro channels are used.
+- Fault injection or test fixture for disconnected sensor, timeout, bus error, stale data and recovery.
+- Captured test report and versioned driver/configuration.
+
+Status remains DRAFT. No GPIO, I2C clock, range, ODR, filter, unit conversion, calibration, or model input value is approved by this change note unless separately verified.

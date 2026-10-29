@@ -1,0 +1,435 @@
+DATASET OPERATIONS & GOVERNANCE PLAN (DOP)
+
+Hệ thống giám sát nguy cơ sạt lở đất — ESP32-S3 + Edge Impulse
+==============================================================
+Mã tài liệu: DOP-LANDSLIDE-ESP32S3-001
+Phiên bản: 1.0
+Trạng thái: DRAFT — quy trình đề xuất, cần phê duyệt
+Ngày: 2026-10-28
+Tài liệu liên quan: DSD v1.0, FSS v1.0, ICD v1.1, LLD v1.1/v1.2 (confirm baseline at release)
+
+0. Quy ước
+==========
+MUST/MUST NOT/SHOULD/MAY là từ khóa yêu cầu. Các giá trị ngưỡng chưa đo/duyệt là TBD. Mọi giá trị KPI định lượng trong bản này nếu chưa có baseline được ghi là proposed, không phải tiêu chí nghiệm thu chính thức. Tài liệu này không chứng nhận hệ thống cảnh báo an toàn sinh mạng.
+
+1. Phạm vi
+==========
+DOP định nghĩa quy trình vận hành dataset: SOP gán nhãn, ground truth, chiến dịch thu thập, coverage, quality KPI, freeze, experiment tracking, model selection và risk register. DOP không tự chốt target hồi quy, feature input, risk thresholds hay thông số cảm biến.
+
+2. Quy trình tổng thể và gates
+==============================
+G0 — Instrument readiness: xác định sensor/board, units, calibration, timestamp and quality.
+G1 — Protocol readiness: phê duyệt target contract, Ground Truth Protocol, Labeling SOP, safety and data handling.
+G2 — Pilot collection: bench/dry-run thu dữ liệu, kiểm tra timestamp, loss, storage, sensor behavior.
+G3 — Campaign collection: thu theo các strata/coverage dimensions đã định nghĩa, lưu provenance.
+G4 — Annotation and QC: gán nhãn, review độc lập, adjudicate conflicts.
+G5 — Dataset candidate: chạy schema validation, KPI, leakage audit, split audit.
+G6 — Freeze candidate: tạo manifest/hash, khóa split/test set, phê duyệt freeze checklist.
+G7 — Training/evaluation: experiment tracking, selection protocol, final test evaluation.
+G8 — Release decision: Model Card, known limitations, risk review, signed release manifest.
+Không được bỏ qua gate bằng cách đổi tên trạng thái. G0/G1/G2 là prerequisite để tuyên bố campaign/model-ready.
+
+3. Labeling SOP
+===============
+
+3.1 Preconditions
+=================
+Trước khi gán nhãn phải có:
+target contract được phê duyệt: target name, unit, physical/observational meaning, range, temporal alignment/horizon;
+Ground Truth Protocol đang hiệu lực;
+annotation schema/version và controlled vocabulary;
+hướng dẫn xử lý ambiguous, conflicting, missing và uncertain labels;
+annotator training và reviewer assignment;
+ID cho site/session/event và nguồn evidence.
+Nếu target contract chưa phê duyệt, dữ liệu chỉ được đánh dấu UNLABELED/PENDING_PROTOCOL; không tự gán score.
+
+3.2 Annotation workflow
+=======================
+Nạp raw record cùng manifest; xác minh file hash và schema.
+Kiểm tra site/session/boot/time validity và sensor quality; không sửa raw.
+Gắn đoạn thời gian/event theo quy tắc Ground Truth Protocol.
+Ghi target value/unit hoặc label status; lưu evidence reference, method version, annotator, timestamp và uncertainty.
+Annotator tự kiểm tra completeness và temporal alignment.
+Reviewer thứ hai kiểm tra mẫu theo tỷ lệ được duyệt và toàn bộ event/label bất thường.
+Xung đột được đặt CONFLICT/NEEDS_ADJUDICATION; không chọn trung bình hay đa số theo mặc định.
+Adjudicator ghi quyết định, lý do và evidence; giữ lại lịch sử annotation cũ.
+Chạy schema/range/temporal QC và phát hành annotation version.
+Liên kết annotation với annotation_id, event_id, session_id, boot_id, interval, target contract version.
+
+3.3 Controlled label status
+===========================
+Đề xuất status: UNLABELED, PENDING_REVIEW, ACCEPTED, UNCERTAIN, CONFLICT, REJECTED, NOT_APPLICABLE. Status không được dùng thay cho target value. Mỗi target có numeric value/unit hoặc status rõ ràng; không dùng sentinel số 0 để biểu thị thiếu.
+
+3.4 Reviewer rules
+==================
+Reviewer không nên chỉ là người gán nhãn ban đầu khi có nguồn lực cho review độc lập.
+Tất cả nhãn liên quan sự kiện hiếm/đặc biệt và mọi conflict phải được review.
+Ghi agreement statistic phù hợp với kiểu target (continuous: absolute difference/ICC nếu đủ điều kiện; categorical: agreement/Kappa nếu dùng label phân loại). Không ép metric agreement không phù hợp.
+Ngưỡng review agreement là TBD; phải chọn sau pilot trên dữ liệu representative.
+Mọi thay đổi nhãn sau freeze phải tạo annotation revision mới và đánh giá lại ảnh hưởng tới split/model.
+
+4. Ground Truth Protocol (GTP)
+==============================
+
+4.1 Nguyên tắc
+==============
+Ground truth phải độc lập nhất có thể với cảm biến đầu vào và model output. Model prediction, threshold do chính model dùng, hoặc cảm biến đang được đưa vào model không được tự coi là ground truth của nguy cơ sạt lở.
+
+4.2 Ground truth hierarchy
+==========================
+Chọn nguồn theo target đã duyệt, ví dụ:
+Reference instrument có hiệu chuẩn và uncertainty được biết, khi target là đại lượng vật lý đo được.
+Independent site observation / surveyed event record có quy trình, timestamp và reviewer, khi target là hiện tượng quan sát.
+Controlled bench/physical experiment với điều kiện và giới hạn rõ ràng, dùng cho kiểm thử kỹ thuật; không đại diện mặc nhiên cho hiện trường.
+Simulation/synthetic data dùng cho unit/integration/robustness test; không được trộn lẫn không nhãn với field ground truth.
+Thứ bậc cuối cùng phụ thuộc target; đây là phân loại nguồn, không phải khẳng định một nguồn luôn đủ cho mọi mục tiêu.
+
+4.3 Required evidence record
+============================
+Mỗi ground-truth record SHOULD include:
+gt_id, target_contract_version, site_id, session_id, event_id;
+start/end time and clock quality; source device/instrument and serial/revision where applicable;
+method/procedure version, calibration certificate/record and measurement uncertainty;
+observed value, unit, reference range and evidence URI/path/hash;
+observer/annotator, reviewer, review date, confidence/uncertainty and limitations;
+whether evidence is independent of model input and how independence was established.
+
+4.4 Time alignment and causal leakage
+=====================================
+Define if target is contemporaneous, interval aggregate, or future outcome over horizon H.
+If future outcome, record prediction time t0, outcome interval [t0, t0+H], and ensure no input features use data after t0.
+Do not let post-event sensor data leak into a pre-event prediction window.
+Clock uncertainty must be less than the approved alignment tolerance; otherwise label time alignment invalid/uncertain.
+If time source is monotonic per boot, never align across reboot using timestamp_ms alone.
+
+4.5 Safety and ethics
+=====================
+No hazardous slope failure, uncontrolled wetting, or destructive test should be intentionally induced solely to collect data without a site-specific safety plan, authorization, and qualified supervision. Use safe bench tests and approved controlled experiments. No operational alarm should be disabled based on experimental labels.
+
+5. Dataset Collection Campaign Plan (DCCP)
+==========================================
+
+5.1 Campaign phases
+===================
+
+Phase | Goal | Required outputs | Exit criteria
+C0 Protocol/design | Freeze sensors, schema, target and safety plan | Campaign ID, protocol, BOM, risk review | G0/G1 approvals
+C1 Bench characterization | Sensor range, noise, response, timing, calibration | Calibration reports, raw logs, test notes | Channels and data-quality behavior understood
+C2 Pilot logging | Validate firmware/logging/storage/clock | Pilot dataset, loss report, parser results | No unresolved critical logging/schema defects
+C3 Controlled variation | Collect safe, labeled variations | Session manifests, conditions, references | Coverage gaps documented and safety approved
+C4 Field observation (if authorized) | Observe natural conditions only under approved plan | Site logs, weather/condition context, event evidence | Site authorization and GT protocol met
+C5 Repeatability | Repeat selected conditions across sessions/devices | Repeatability report | Variation quantified
+C6 Closeout | Audit completeness, quality, labels and files | Campaign report, candidate dataset manifest | KPI and freeze gates passed
+
+
+5.2 Per-session checklist
+=========================
+☐ Unique campaign/site/device/sensor_set/session/boot IDs assigned.
+☐ Sensor model/revision, mounting, depth/location description and calibration IDs recorded.
+☐ Firmware, configuration, schema and toolchain versions recorded.
+☐ Start/end timestamps and clock quality recorded.
+☐ Environmental/experimental condition recorded only if measured/observed.
+☐ Reference instrument and ground truth operator logged when applicable.
+☐ Dropouts, resets, manual interventions, sensor replacements and anomalies logged as events.
+☐ Raw files finalized, record counts and hashes computed.
+☐ Session marked `COMPLETE`, `PARTIAL`, `INVALID` or `QUARANTINED` with reason.
+
+5.3 Sampling plan
+=================
+Sample rate, window length and stride remain TBD until actual sensors and Edge Impulse input contract are confirmed. The campaign plan MUST specify them per channel, plus synchronization and anti-alias/filter policy where relevant. Do not pick a rate merely to satisfy a guessed feature count. Include startup, steady state, sensor disconnect/reconnect, saturation, reset and storage pressure tests.
+
+5.4 Replication
+===============
+Independent repetitions should span distinct sessions and, where feasible, devices/sites/conditions. Repeated windows from one long session are not equivalent to independent events. Exact sample/session/event counts are TBD and must be justified by expected variability and intended claim.
+
+6. Dataset Coverage Matrix (DCM)
+================================
+
+6.1 Coverage dimensions
+=======================
+Track coverage by:
+site/terrain class (only when characterized);
+sensor device/revision and calibration version;
+mounting orientation/placement/depth;
+soil type/moisture condition if measured or characterized;
+wet/dry state and rain-related condition only with defined observation/reference;
+static tilt/orientation and controlled motion/vibration;
+normal operation, startup, stale/missing, gap, out-of-order, saturation and sensor faults;
+bench, controlled experiment, natural field observation, simulation/synthetic;
+event/non-event/uncertain/unknown label status;
+split group and dataset split.
+
+6.2 Matrix template
+===================
+
+Dimension | Level/stratum | Planned sessions | Actual sessions | Independent events/groups | Valid duration | Labelled duration | Quality pass % | Status/gap
+Acquisition origin | Bench | TBD | 0 | 0 | 0 | 0 | TBD | Not started
+Acquisition origin | Controlled safe test | TBD | 0 | 0 | 0 | 0 | TBD | Protocol approval required
+Acquisition origin | Natural field observation | TBD | 0 | 0 | 0 | 0 | TBD | Site authorization required
+IMU mounting | Approved orientation(s) | TBD | 0 | 0 | 0 | 0 | TBD | IMU/frame TBD
+Soil condition | Defined strata | TBD | 0 | 0 | 0 | 0 | TBD | Measurement protocol TBD
+Rain/wet condition | Reference-defined strata | TBD | 0 | 0 | 0 | 0 | TBD | YL-83 is not calibrated rainfall
+Sensor faults | Missing/stale/gap/saturation | TBD | 0 | n/a | n/a | n/a | TBD | Inject only in safe tests
+Labels | Accepted/uncertain/conflict/unlabeled | TBD | 0 | 0 | n/a | n/a | TBD | Target contract TBD
+
+
+6.3 Coverage interpretation
+===========================
+Coverage counts must distinguish rows, windows, sessions and independent events. A million correlated windows from one session does not satisfy a requirement for independent sites/events. Empty strata are visible gaps, not zeros that imply no risk. Never fabricate event examples to balance a matrix.
+
+7. Dataset Quality KPIs
+=======================
+
+7.1 KPI definitions
+===================
+Thresholds are proposed gates pending pilot baseline and approval; the DSD's stale-after 5000 ms and 3-miss examples are not universal sensor settings.
+
+KPI | Definition | Initial proposed gate | Notes
+Schema parse success | Parsed valid records / records attempted | 100% for released files | Invalid rows quarantined and counted
+Required-field completeness | Records with all required fields / parsed records | 100% for release partition | Optional fields governed by schema
+Hash integrity | Files matching manifest SHA-256 / files checked | 100% | Any mismatch blocks freeze
+Timestamp monotonicity | In-order records / records in a stream segment | 100% after excluding explicitly flagged out-of-order records | Preserve original evidence
+Sensor-valid fraction | Valid samples / attempted samples, per channel | Report, threshold TBD by sensor | Do not use a global average to hide one failed channel
+Missing/stale fraction | Missing or stale samples / expected samples, per channel | Report; limit TBD | Include consecutive-miss distribution
+Calibration coverage | Eligible samples with valid calibration / eligible physical samples | 100% for calibrated feature use | Raw diagnostic data may remain uncalibrated
+Annotation completeness | Required labels with approved status / records requiring labels | 100% for labelled release subset | Unlabelled subset may be retained separately
+Annotation agreement | Agreement per target-appropriate method | TBD after pilot | Do not force a metric incompatible with target
+Label evidence coverage | Accepted labels with resolvable evidence / accepted labels | 100% | Evidence hash/reference required
+Split leakage violations | Shared forbidden group across splits | 0 | Includes event and overlapping-window leakage
+Feature replay agreement | Values within approved tolerances / compared values | 100% of golden vectors | Tolerances per feature
+Model input compatibility | Actual input dimension/order/hash contract match | 100% exact contract match | Any mismatch blocks inference/release
+Dataset coverage completion | Required approved strata achieved / required strata | TBD in campaign plan | Counts independent sessions/events
+Storage loss rate | Missing records/files vs expected acquisition | TBD after pilot | All loss must be measured and explained
+
+
+7.2 KPI reporting
+=================
+Report per-channel and per-stratum metrics, sample counts and denominators. Every KPI report includes date, pipeline version, manifest hash, exclusions and reason codes. Do not present only an overall average when it masks a failed sensor/site/condition.
+
+8. Dataset Freeze Process
+=========================
+
+8.1 States
+==========
+WORKING → QC_PENDING → CANDIDATE → FREEZE_REVIEW → FROZEN → RELEASED
+Exception states: QUARANTINED, REJECTED, SUPERSEDED.
+
+8.2 Freeze procedure
+====================
+Stop/close ingestion for the candidate snapshot; record cutoff and source sessions.
+Copy/assemble immutable raw files; never edit raw files in place.
+Validate schemas, encodings, row counts, duplicate IDs, timestamp/gap statistics and sensor-quality distribution.
+Validate calibration references and target/annotation schema.
+Run annotation QC and resolve/relabel conflicts or explicitly exclude with reason.
+Generate split group map; audit overlapping windows, sessions, events and sites against leakage policy.
+Generate coverage matrix and KPI report.
+Generate file SHA-256, record counts, byte sizes, schema versions and complete dataset_manifest.json.
+Run independent reviewer checklist and capture approvals.
+Mark snapshot FROZEN; any subsequent change creates a new dataset version and manifest.
+Only after frozen dataset passes model-selection/release gates may it be designated a model release dataset.
+
+8.3 Freeze invariants
+=====================
+Frozen bytes never change; hash mismatch means freeze invalid.
+Test split and split map cannot be silently changed after evaluation.
+Corrections create new version; retain parent manifest and change reason.
+Freeze does not imply the data is representative or labels are correct; it means the snapshot is immutable and auditable.
+A frozen dataset can be rejected for model release if evidence or coverage is insufficient.
+
+9. Experiment Tracking Contract (ETC)
+=====================================
+
+9.1 Required experiment identity
+================================
+Each run must have immutable experiment_id, run_id, UTC timestamp if trusted (otherwise monotonic/session metadata), owner, purpose and status.
+
+9.2 Required run manifest
+=========================
+{
+  "experiment_schema_version": "1.0",
+  "experiment_id": "exp_<id>",
+  "run_id": "run_<id>",
+  "status": "PLANNED",
+  "owner": "TBD",
+  "created_utc": null,
+  "time_status": "UNSYNCED",
+  "dataset_manifest_sha256": null,
+  "dataset_version": "TBD",
+  "split_manifest_sha256": null,
+  "target_contract_version": "TBD",
+  "feature_schema_sha256": null,
+  "preprocessing_code_revision": "TBD",
+  "training_code_revision": "TBD",
+  "edge_impulse_project_id": null,
+  "edge_impulse_impulse_version": null,
+  "model_artifact_sha256": null,
+  "random_seed": null,
+  "hyperparameters": {},
+  "training_environment": {},
+  "metrics": {},
+  "evaluation_report_sha256": null,
+  "notes": [],
+  "reviewer": null
+}
+
+9.3 Rules
+=========
+One run corresponds to one fixed dataset manifest, split manifest, target contract, feature schema and code revision.
+Record failed, aborted and exploratory runs; do not log only successful runs.
+Hyperparameters, preprocessing, seed, SDK/tool versions, hardware/runtime and metrics must be stored.
+Never overwrite a run record. Corrections create a new run/version with parent reference.
+Metrics must include units, split, denominator, grouping, exclusions and confidence/uncertainty where appropriate.
+Test set access/tuning events must be recorded.
+Store model artifact and deployment export hashes separately if they are different artifacts.
+
+10. Model Selection Protocol (MSP)
+==================================
+
+10.1 Preconditions
+==================
+No model selection before target contract, feature schema, split policy, evaluation metrics and minimum data-quality gates are approved. If the target remains undefined, only pipeline/firmware tests are allowed; no claim of real-world landslide-risk prediction.
+
+10.2 Selection sequence
+=======================
+Validate dataset and leakage audit.
+Establish a simple baseline (e.g., constant/mean predictor or physically justified baseline) using training data only.
+Define candidate models and search space before inspecting final test results.
+Train candidates on training split; use validation split for selection and hyperparameter tuning.
+Compare target-appropriate metrics and error slices by site/event/condition/quality.
+Review dangerous-case failures and latency/memory/flash/runtime constraints on ESP32-S3.
+Freeze selected candidate and configuration.
+Evaluate once on locked test set; record every metric and limitation.
+Verify export parity/golden vectors on host and ESP32-S3.
+Produce Model Card, risk review and release recommendation.
+
+10.3 Regression metrics and constraints
+=======================================
+Primary metrics: MAE and RMSE in the target's approved unit; report sample/group counts and residual slices. Add other metrics only if justified by target distribution and intended use. Do not interpret regression output as probability unless calibrated and validated as such. A model with good average error can still miss rare hazardous events.
+
+10.4 Tie-breakers
+=================
+Among candidates meeting the pre-approved quality criteria, prefer in order:
+better independent-site/event generalization;
+lower severe-case error and acceptable false-negative behavior where ground truth permits;
+stable output under expected sensor noise and data-quality degradation;
+acceptable worst-case latency, RAM, flash and power;
+simpler model/easier maintenance if performance is statistically/practically indistinguishable.
+No single numeric threshold is prescribed before the target and intended operational claim are defined. Selection criteria must be documented before final test evaluation.
+
+10.5 Stop conditions
+====================
+Reject/defer release if: leakage exists; target labels are unreliable; schema/model input mismatch; golden parity fails; critical data-quality cases produce unsafe-looking outputs; memory/timing exceeds budget; test data is not independent; or the intended claim exceeds evidence.
+
+11. Dataset Risk Register
+=========================
+Risk scoring method: likelihood (L) and impact (I) each 1–5; score = L × I. Scores are qualitative triage only and must be reviewed by the project owner. Initial ratings are provisional.
+
+ID | Risk | L | I | Score | Mitigation / control | Owner | Status
+DR-01 | Regression target has no validated physical/observational meaning | 5 | 5 | 25 | Approve target contract and ground truth before training; block model release | ML/system owner | OPEN
+DR-02 | IMU model/frame/units unknown; tilt feature sign or scale wrong | 4 | 4 | 16 | Identify sensor, bench tilt sweep, reference inclinometer, golden vectors | Sensor owner | OPEN
+DR-03 | YL-83 raw output mislabeled as rainfall | 4 | 4 | 16 | Keep raw diagnostic channel; calibrate against reference if rainfall is intended | Sensor owner | OPEN
+DR-04 | HX710B transducer/quantity unknown | 4 | 4 | 16 | Identify transducer, zero/span calibration; block physical feature until verified | Hardware owner | OPEN
+DR-05 | Overlapping windows leak across splits | 4 | 5 | 20 | Group split by event/session/site; automated leakage audit | ML/data owner | OPEN
+DR-06 | Labels use same sensor/model output as ground truth | 3 | 5 | 15 | Independent evidence protocol and reviewer audit | GT owner | OPEN
+DR-07 | Field dataset lacks rare/critical events | 5 | 5 | 25 | Coverage matrix, disclose unobserved strata, avoid unsupported safety claims | Data/system owner | OPEN
+DR-08 | Invalid/stale samples silently imputed as zero or last value | 3 | 5 | 15 | Propagate quality, reject windows by default, tests for invalid cases | Firmware/ML owner | OPEN
+DR-09 | Clock reset/timezone mismatch misaligns labels | 3 | 4 | 12 | boot_id + monotonic time; UTC only when trusted; alignment QC | Firmware/data owner | OPEN
+DR-10 | Dataset or model artifact changed after evaluation | 3 | 4 | 12 | Freeze immutable artifacts, SHA-256 manifests, versioned revisions | Data owner | OPEN
+DR-11 | Calibration drift or sensor placement changes cause shift | 4 | 4 | 16 | Calibration/version tracking, repeatability checks, slice-based evaluation | Sensor owner | OPEN
+DR-12 | Bench/synthetic data mistaken for field evidence | 3 | 5 | 15 | data_origin field, separate evaluation, explicit Model Card limitations | ML/system owner | OPEN
+DR-13 | Too few independent sites/events; misleading metrics | 4 | 5 | 20 | Count independent groups, group-wise test, report uncertainty and limitations | ML/data owner | OPEN
+DR-14 | Edge Impulse export differs from host preprocessing | 3 | 5 | 15 | Export metadata contract, host/target golden vectors and parity tests | Firmware/ML owner | OPEN
+DR-15 | Uncontrolled slope/wetting experiment creates physical hazard | 2 | 5 | 10 | Site-specific safety plan, authorization, qualified supervision, safe bench-first approach | Campaign lead | OPEN
+DR-16 | Storage drops records without detection | 3 | 4 | 12 | Expected-vs-written counters, file hashes, closeout integrity checks | Firmware owner | OPEN
+
+
+12. RACI / approvals
+====================
+
+Decision / artifact | Responsible | Accountable | Consulted / reviewer
+Sensor units/calibration | Sensor owner | System owner | Firmware, data
+Target and ground truth | ML/GT owner | System owner | Independent reviewer
+Label SOP | Data/ML owner | Data owner | GT reviewer
+Campaign safety and protocol | Campaign lead | Site/system owner | Qualified safety reviewer
+Feature schema | ML + firmware | System owner | Sensor owner
+Split and evaluation | ML owner | ML/system owner | Independent reviewer
+Dataset freeze | Data owner | Data owner | Firmware + ML reviewer
+Model selection/release | ML owner | System/release owner | Independent reviewer
+
+
+13. Operational templates
+=========================
+
+13.1 Campaign session manifest
+==============================
+{
+  "campaign_id": "camp_<id>",
+  "session_id": "sess_<id>",
+  "site_id": "site_<id>",
+  "device_id": "dev_<id>",
+  "sensor_set_id": "sensor_set_<id>",
+  "boot_id": "<boot-id>",
+  "data_origin": "BENCH|CONTROLLED|FIELD|SIMULATED",
+  "firmware_version": "TBD",
+  "config_version": "TBD",
+  "calibration_ids": [],
+  "schema_hash": null,
+  "start_timestamp_ms": 0,
+  "end_timestamp_ms": null,
+  "clock_status": "UNSYNCED",
+  "reference_instrument_ids": [],
+  "condition_observations": [],
+  "anomalies": [],
+  "record_count_expected": null,
+  "record_count_written": null,
+  "files": [],
+  "status": "PARTIAL",
+  "status_reason": "TBD"
+}
+
+13.2 Freeze approval record
+===========================
+{
+  "freeze_id": "freeze_<id>",
+  "dataset_id": "ds_<id>",
+  "dataset_manifest_sha256": null,
+  "split_manifest_sha256": null,
+  "kpi_report_sha256": null,
+  "coverage_report_sha256": null,
+  "leakage_audit_sha256": null,
+  "schema_validation": "PENDING",
+  "annotation_review": "PENDING",
+  "approvals": [],
+  "decision": "PENDING",
+  "decision_reason": "TBD"
+}
+
+14. Release checklist
+=====================
+☐ DSD/FSS/ICD/LLD revisions and compatibility confirmed.
+☐ Target contract and ground-truth protocol approved.
+☐ Labeling SOP and reviewer rules active.
+☐ Sensor calibration and quality policy approved per channel.
+☐ Campaign sessions carry complete provenance.
+☐ Coverage matrix and KPI report generated with denominators.
+☐ Dataset manifest, hashes and record counts validated.
+☐ Split leakage audit passes; test split locked.
+☐ Experiment manifests and model artifacts are traceable.
+☐ Model selection protocol followed and test-set reuse disclosed.
+☐ Golden vectors/export parity and ESP32-S3 constraints pass.
+☐ Risk register reviewed and residual risks accepted in writing.
+☐ Model Card states intended use, limitations and non-certified prototype status.
+
+15. Outstanding decisions
+=========================
+Actual board/IMU/soil sensor/module revisions and units.
+HX710B transducer and physical quantity.
+Sampling rates, window, stride, synchronization and filters.
+Regression target, unit/range, temporal alignment and evidence.
+Required coverage strata and independent session/event counts.
+KPI acceptance thresholds after pilot.
+Split strategy based on actual site/event inventory.
+Edge Impulse input mode/shape, export metadata and schema hash.
+Storage/retention/backup policy.
+Intended model claim and release acceptance thresholds.
+END OF DOP v1.0

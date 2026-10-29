@@ -1,0 +1,525 @@
+GROUND TRUTH INSTRUMENT SPECIFICATION (GTIS)
+Hệ thống giám sát nguy cơ sạt lở đất — ESP32-S3 + Edge Impulse
+Document ID: GTIS-LANDSLIDE-ESP32S3-001
+Version: 1.0
+Status: DRAFT — reference instruments and target measurement method are not yet approved
+Date: 2026-10-29
+Related documents: TCS-LANDSLIDE-ESP32S3-001 v1.0; DSD-LANDSLIDE-ESP32S3-001 v1.1; DOP-LANDSLIDE-ESP32S3-001 v1.0; FSS-LANDSLIDE-ESP32S3-001 v1.0; ICD v1.1
+Platform under development: ESP32-S3, Arduino/FreeRTOS, PlatformIO + VS Code, Edge Impulse Regression
+
+======================================================================
+0. DOCUMENT CONVENTIONS AND SAFETY BOUNDARY
+======================================================================
+
+MUST / MUST NOT: mandatory requirement / prohibition.
+SHOULD / SHOULD NOT: recommended unless an approved rationale says otherwise.
+MAY: optional.
+TBD: unresolved; not an approved value.
+DRAFT: not approved for final dataset/model release.
+
+This document defines the specification and governance requirements for instruments, reference methods, and evidence used to establish ground-truth labels. It does not assert that a specific instrument has already been selected, calibrated, or validated for this project.
+
+Safety boundary:
+- The project is a prototype monitoring system, not a certified landslide early-warning system.
+- Instrument readings are evidence for a defined target; they are not automatically evidence of landslide probability or failure.
+- The target contract must define what is measured, why it is relevant, the time alignment, units, valid range, uncertainty, and allowed claims.
+- Ground-truth measurements and labels MUST NOT be generated from the model output being evaluated.
+- A model output MUST NOT be the sole safety mechanism or sole basis for high-consequence decisions.
+
+======================================================================
+1. PURPOSE
+======================================================================
+
+GTIS defines how to specify, select, identify, calibrate, operate, validate, and maintain reference instruments and observation methods used to create target labels for training and evaluating the Edge Impulse regression model.
+
+The goals are to:
+1. Ensure every ground-truth label can be traced to an instrument, method, calibration record, operator, and timestamp.
+2. Define minimum instrument metadata and measurement-quality records.
+3. Prevent uncalibrated sensor values or undocumented proxies from being treated as ground truth.
+4. Define how uncertainty, missing readings, instrument faults, and conflicting evidence are handled.
+5. Keep reference measurement semantics separate from prototype sensor inputs.
+6. Provide release gates for model-ready ground-truth data.
+
+GTIS is a companion specification to TCS. TCS owns target meaning and label semantics. GTIS owns the reference instrument/method requirements and evidence of measurement validity.
+
+======================================================================
+2. SCOPE AND NON-GOALS
+======================================================================
+
+In scope:
+- Instruments used as reference/ground-truth sources.
+- Manual observation protocols where a physical instrument is not appropriate.
+- Instrument identity, calibration, operating conditions, uncertainty, traceability, and data records.
+- Measurement synchronization and alignment to model input windows.
+- Quality checks, failures, exclusions, and acceptance evidence.
+
+Out of scope:
+- Selecting a scientifically valid landslide target without domain review.
+- Replacing a geotechnical engineer or an applicable standard.
+- Certifying a device for life-safety use.
+- Treating candidate prototype sensors as calibrated references by default.
+- Defining the final numerical acceptance thresholds before target and instrument specifications are approved.
+
+======================================================================
+3. AUTHORITY AND DOCUMENT RELATIONSHIPS
+======================================================================
+
+TCS — Target Contract Specification:
+- Defines target meaning, unit, valid range, temporal relationship, target transformation, and evaluation intent.
+- GTIS MUST NOT redefine or silently change these.
+
+GTIS — Ground Truth Instrument Specification:
+- Defines instrument/method identity, calibration, uncertainty, traceability, measurement procedure, and quality evidence.
+- Owns instrument registry and per-instrument calibration/verification records.
+
+DOP — Dataset Operations & Governance Plan:
+- Defines campaign workflow, operator instructions, annotation and review process, quality KPIs, dataset freeze, and experiment records.
+
+DSD — Dataset Specification:
+- Defines dataset records, label schema linkage, provenance, splits, and manifests.
+
+FSS — Feature Schema Specification:
+- Defines model input features. A reference instrument is not automatically a model input.
+
+ICD — Interface Control Document:
+- Defines firmware data quality/status semantics and runtime interface behavior.
+
+If there is a conflict, stop the affected data/model release and create a tracked change. Do not silently reconcile differences in field code or analysis scripts.
+
+======================================================================
+4. GROUND-TRUTH SOURCE CLASSES
+======================================================================
+
+Each label MUST declare one approved evidence class:
+
+GT1 — Traceable reference instrument:
+A measurement from an identified instrument with a current calibration or documented verification appropriate to the measurement.
+
+GT2 — Independent field observation:
+A structured observation made using an approved protocol, timestamp, evidence record, and independent reviewer where required.
+
+GT3 — Expert annotation:
+A label assigned using a controlled rubric by qualified reviewers, with disagreements and adjudication recorded.
+
+GT4 — Derived reference quantity:
+A quantity calculated from approved reference measurements using a versioned formula, with source records and propagated uncertainty documented where feasible.
+
+GT5 — Synthetic, simulated, heuristic, or proxy label:
+A value generated from assumptions, simulation, or a proxy rule rather than an independent observation of the target. It MUST be identified as such and MUST NOT be represented as real-world ground truth.
+
+Evidence class does not alone guarantee quality. The target contract MUST state which classes are permitted for training, validation, and final testing. If GT5 is used, reports MUST restrict claims to the generated proxy/score and disclose the limitation.
+
+======================================================================
+5. INSTRUMENT REGISTRY
+======================================================================
+
+Every reference instrument or controlled observation method MUST have a registry entry before use.
+
+Required fields:
+- instrument_id: stable unique identifier.
+- instrument_name and manufacturer.
+- model, part number, and serial number or controlled asset identifier.
+- instrument_type and measured quantity.
+- measurement principle.
+- measurement range and units.
+- resolution/display increment.
+- stated accuracy and uncertainty specification, including source document/version.
+- sampling/readout capability and response time where relevant.
+- environmental operating limits.
+- calibration/verification method and interval.
+- calibration provider/laboratory and traceability statement, where applicable.
+- calibration certificate/report ID, date, expiry/review date, and file hash.
+- firmware/software version and configuration, if applicable.
+- probe, transducer, fixture, mounting, and accessories.
+- known limitations, interferences, and failure modes.
+- owner/custodian and storage location.
+- status: PROPOSED, APPROVED, ACTIVE, OUT_OF_CALIBRATION, QUARANTINED, RETIRED.
+- approval record and effective date.
+
+An instrument MUST NOT be marked ACTIVE for ground truth if its identity is ambiguous, required calibration evidence is missing, it has failed a verification check, or it is outside approved operating conditions.
+
+======================================================================
+6. TARGET-TO-INSTRUMENT MAPPING
+======================================================================
+
+Before collecting model-ready data, create a mapping record with:
+- target_contract_id/version/hash;
+- target_id and target unit;
+- instrument_id or observation_method_id;
+- reference quantity and native unit;
+- conversion formula and version, if needed;
+- calibration record ID;
+- measurement location and mounting/geometry;
+- sampling/readout method;
+- measurement time definition;
+- target aggregation rule;
+- expected uncertainty and acceptance criterion;
+- evidence class;
+- known biases and interferences;
+- owner and reviewer approval.
+
+The mapping MUST show that the instrument measures the target as defined by TCS. A sensor that measures a related quantity is not equivalent without a validated relationship.
+
+Examples of non-equivalence:
+- An accelerometer-derived tilt estimate is not direct measurement of slope displacement.
+- Soil-moisture sensor output is not automatically volumetric water content without calibration against an appropriate reference.
+- YL-83 board output is not rainfall measurement unless the complete sensor setup and reference method establish that interpretation.
+- HX710B raw counts are not a physical quantity without identification and calibration of the connected transducer.
+- A rainfall, moisture, pressure, or tilt measurement alone does not establish that a landslide occurred.
+
+These examples are safeguards, not claims that any one quantity is the project's chosen target.
+
+======================================================================
+7. CALIBRATION AND VERIFICATION REQUIREMENTS
+======================================================================
+
+7.1 Calibration status
+
+Each measurement record MUST reference the calibration/verification state applicable at measurement time. Calibration status values SHOULD include:
+- VALID
+- VERIFICATION_ONLY
+- EXPIRED
+- FAILED
+- NOT_REQUIRED_WITH_RATIONALE
+- UNKNOWN
+
+UNKNOWN, EXPIRED, or FAILED status MUST make the measurement ineligible for high-confidence ground truth unless the approved target contract explicitly permits an exception with documented review.
+
+7.2 Calibration evidence
+
+Store:
+- calibration procedure ID/version;
+- date/time and location;
+- provider/operator;
+- reference standards and their traceability;
+- calibration points spanning the intended operating range;
+- raw and corrected readings;
+- fit/offset/gain or conversion parameters;
+- residuals and uncertainty;
+- environmental conditions;
+- pass/fail criteria;
+- certificate/report reference and hash;
+- next due date or review trigger;
+- approver.
+
+7.3 Verification checks
+
+A verification check is not necessarily a full calibration. It MUST be labeled as verification and MUST NOT be represented as a calibration certificate. The procedure must define check points, tolerance, frequency, and action on failure.
+
+7.4 Out-of-calibration events
+
+If an instrument is later found to be out of calibration:
+- identify the potentially affected time interval;
+- quarantine affected records;
+- assess whether retrospective correction is supported by evidence;
+- preserve original readings;
+- document any correction as a new derived dataset version;
+- re-run data quality and model evaluation where the impact is material;
+- never overwrite the original frozen records.
+
+7.5 Calibration interval
+
+The interval is TBD for each instrument and must be based on manufacturer guidance, applicable standards, usage, drift evidence, environmental exposure, and project risk. Do not invent a universal interval.
+
+======================================================================
+8. MEASUREMENT PROCEDURE AND FIELD CONTROL
+======================================================================
+
+Each approved instrument/method MUST have a work instruction that defines:
+1. Pre-use identity and status check.
+2. Calibration/verification status check.
+3. Installation, orientation, depth, contact, or geometry.
+4. Warm-up/stabilization time where relevant.
+5. Measurement sequence and repetition count.
+6. Sampling rate, integration/averaging, and response delay.
+7. Environmental and site conditions to record.
+8. Time synchronization and timestamp procedure.
+9. Handling of operator influence, disturbances, and unsafe conditions.
+10. Post-use verification, cleaning, storage, and fault reporting.
+11. Data transfer and checksum verification.
+12. Required photographs, notes, or supporting evidence.
+
+The procedure MUST define what constitutes a disturbed or invalid measurement. Operators MUST NOT adjust a measurement or its label simply to match expected model behavior.
+
+Field measurements MUST NOT be conducted in hazardous slope conditions without an appropriate site safety plan and qualified supervision. Do not approach an unstable slope to collect a label.
+
+======================================================================
+9. TIMESTAMP AND SYNCHRONIZATION CONTRACT
+======================================================================
+
+Every reference reading MUST include:
+- instrument_id;
+- measurement_id;
+- measurement start/end time or instant;
+- timestamp source and time zone/time base;
+- synchronization method and estimated clock error;
+- operator/session/site identifiers;
+- target alignment rule version.
+
+For device-generated timestamps, record whether time is monotonic, UTC, or local wall time. If the clock is unsynchronized, mark the limitation and do not fabricate precise UTC timestamps.
+
+For each target, TCS MUST define:
+- whether the target is instantaneous or aggregated over an interval;
+- whether the input window precedes, overlaps, or follows the measurement interval;
+- any forecast horizon or embargo;
+- maximum permitted time uncertainty;
+- policy for delayed/manual readings.
+
+The acceptable synchronization error is target-dependent and remains TBD until approved. If the error could change the label or violate the temporal contract, mark the record invalid or uncertain.
+
+======================================================================
+10. UNCERTAINTY AND RESOLUTION
+======================================================================
+
+For every reference measurement, record or reference:
+- instrument resolution;
+- stated accuracy;
+- calibration uncertainty;
+- repeatability/reproducibility where known;
+- environmental influence;
+- placement/mounting uncertainty;
+- timing uncertainty;
+- derived-quantity uncertainty, if applicable.
+
+Do not treat display resolution as measurement accuracy. Do not report more significant digits than the measurement process supports.
+
+If multiple readings are aggregated, define the aggregation formula and how uncertainty is handled. A mean, median, maximum, or slope are not interchangeable. Preserve raw readings so derived values can be reproduced.
+
+If uncertainty overlaps a target decision boundary, use the policy defined by TCS/labeling SOP: for example, mark ambiguous, obtain a higher-quality reference measurement, or send for adjudication. Do not choose the more convenient label.
+
+======================================================================
+11. DATA RECORD FORMAT
+======================================================================
+
+Illustrative record; field types and exact timestamp encoding MUST be finalized in a machine-readable schema before release.
+
+{
+  "gt_record_schema_version": "1.0",
+  "measurement_id": "stable-unique-id",
+  "instrument_id": "registered-instrument-id",
+  "target_contract_id": "TCS-LANDSLIDE-ESP32S3-001",
+  "target_contract_version": "approved-version",
+  "target_id": "approved-target-id",
+  "session_id": "stable-session-id",
+  "site_id": "controlled-site-id",
+  "operator_id": "controlled-operator-id",
+  "measurement_start_time": null,
+  "measurement_end_time": null,
+  "timestamp_basis": "TBD",
+  "clock_uncertainty_ms": null,
+  "raw_value": null,
+  "raw_unit": "TBD",
+  "corrected_value": null,
+  "target_unit": "TBD",
+  "calibration_record_id": null,
+  "calibration_status": "UNKNOWN",
+  "evidence_class": "GT1",
+  "uncertainty": null,
+  "environmental_conditions": {},
+  "measurement_quality_state": "NOT_REVIEWED",
+  "quality_flags": [],
+  "operator_notes": null,
+  "evidence_refs": [],
+  "evidence_sha256": null,
+  "reviewer_id": null,
+  "review_state": "PENDING"
+}
+
+This JSON is a template, not a finalized schema. The production schema MUST define required/optional fields, types, enumerations, nullability, timestamp encoding, units, escaping, and versioning. Unknown values MUST be explicit; they MUST NOT be silently replaced by zero or empty strings.
+
+======================================================================
+12. QUALITY STATES AND DISPOSITION
+======================================================================
+
+Recommended measurement quality states:
+- VALID: required instrument, calibration, timing, and procedure checks pass.
+- VALID_WITH_LIMITATION: usable only under a documented limitation permitted by TCS.
+- NOT_REVIEWED: collected but not yet quality checked.
+- INVALID_RANGE: outside the approved measurement range.
+- CALIBRATION_INVALID: calibration absent, expired, or failed.
+- TIMESTAMP_INVALID: time basis or alignment cannot be established.
+- SENSOR_OR_INSTRUMENT_FAULT: instrument reports a fault or fails verification.
+- DISTURBED: measurement procedure or site was disturbed.
+- NON_FINITE_OR_PARSE_ERROR: malformed, NaN, infinity, or unparsable value.
+- UNCERTAINTY_TOO_HIGH: uncertainty exceeds approved limit.
+- DISPUTED: conflicting readings/evidence not adjudicated.
+- EXCLUDED: rejected with reason and reviewer.
+
+Disposition:
+- VALID records may be eligible according to the target contract.
+- VALID_WITH_LIMITATION records require explicit policy approval and must retain flags.
+- NOT_REVIEWED records MUST NOT enter a frozen training/evaluation dataset.
+- Invalid, disputed, or excluded records MUST be retained in the audit trail but excluded from primary supervised evaluation unless an approved protocol says otherwise.
+- Exclusions MUST have a reason code, time, and responsible reviewer.
+
+======================================================================
+13. REDUNDANT MEASUREMENTS AND CONFLICT RESOLUTION
+======================================================================
+
+Where practical, collect replicate readings or independent reference checks for a subset of samples. The replication plan must specify frequency, selection, and analysis.
+
+If two instruments disagree:
+1. Preserve both raw records.
+2. Check identity, units, calibration, mounting, timestamp, and operating range.
+3. Determine whether both measured the same quantity at comparable locations and times.
+4. Apply a predefined adjudication procedure.
+5. Record the decision, evidence, reviewer, and uncertainty.
+6. If unresolved, mark DISPUTED and exclude from primary ground-truth labels.
+
+Do not average incompatible instruments solely to remove disagreement. A correction or sensor substitution requires a documented change record and, if target meaning changes, a TCS revision.
+
+======================================================================
+14. PROTOTYPE SENSOR SEPARATION
+======================================================================
+
+The following candidate components discussed in the project are not automatically ground-truth instruments:
+
+- IMU/accelerometer: can provide acceleration and possibly a derived tilt estimate. Exact model, range, frame, mounting, calibration, filtering, and static/dynamic limitations must be documented.
+- Soil moisture sensor: raw ADC output requires characterization; physical moisture content requires an appropriate reference calibration and defined soil conditions.
+- YL-83 board: raw output must remain diagnostic until the complete sensor setup is characterized against a suitable reference. Do not label it rainfall by assumption.
+- HX710B: ADC counts require the connected transducer identity, physical quantity, units, wiring, operating range, and calibration.
+- Any prototype output used as a target source must be assessed for circularity if the same value or a derivative is also fed as a model input.
+
+If the model is trained to estimate a calibrated value from another sensor, the target/reference channel must be sufficiently independent and the intended use must be explicit. If the target is simply the same sensor's reading, the task may be reconstruction or calibration rather than landslide prediction; the project must name it accurately.
+
+======================================================================
+15. SECURITY, TRACEABILITY, AND DATA INTEGRITY
+======================================================================
+
+- Every instrument and calibration record MUST have a stable ID.
+- Raw readings and original evidence MUST be immutable after dataset freeze.
+- Corrections must be stored as derived records with parent references, reason, author, timestamp, code/version, and checksum.
+- File evidence should be hashed with SHA-256 or an approved equivalent.
+- Access to change calibration/approval records should be controlled and auditable.
+- Personal information in operator records should be minimized; use controlled identifiers where possible.
+- Backup and retention policy is governed by DOP/DSD.
+- Any missing/corrupt evidence or checksum mismatch MUST block affected records from final ground-truth use until resolved.
+
+======================================================================
+16. REQUIRED TESTS AND VALIDATION
+======================================================================
+
+Before an instrument/method is approved, perform applicable tests:
+- identity and configuration verification;
+- range and unit verification;
+- calibration/verification status check;
+- repeatability at representative points;
+- response time and stabilization check;
+- clock/timestamp verification;
+- environmental suitability check;
+- comparison against reference standard or independent method;
+- missing/fault/out-of-range behavior;
+- data serialization and checksum round-trip;
+- operator procedure repeatability;
+- derived target formula and uncertainty verification;
+- alignment/replay test with corresponding ESP32-S3 input windows.
+
+Test plan and acceptance thresholds depend on the target and instrument. They are TBD until approved. A test result must include date, operator, setup, raw evidence, acceptance criteria, result, deviations, and reviewer.
+
+======================================================================
+17. RELEASE GATES
+======================================================================
+
+Instrument approval gate:
+[ ] Target and measurement quantity are defined by approved TCS.
+[ ] Instrument/method is registered and uniquely identified.
+[ ] Range, units, resolution, accuracy, response, and limitations documented.
+[ ] Calibration/verification evidence accepted.
+[ ] Field work instruction approved.
+[ ] Timestamp basis and synchronization method defined.
+[ ] Uncertainty and quality-state policy defined.
+[ ] Instrument-to-target mapping reviewed.
+[ ] Validation tests passed against pre-approved criteria.
+[ ] Owner and independent reviewer approval recorded.
+
+Ground-truth dataset gate:
+[ ] Every label links to a measurement/evidence record.
+[ ] Instrument and calibration status were valid at measurement time.
+[ ] Target and units match the approved TCS.
+[ ] Time alignment meets the target contract.
+[ ] Invalid/disputed/unreviewed records excluded from primary evaluation.
+[ ] Raw records, derived values, and evidence checksums verified.
+[ ] Annotation/ground-truth protocol version recorded.
+[ ] Label quality and uncertainty report reviewed.
+[ ] Dataset and manifest are frozen and hashed.
+[ ] Model claims are limited to the evidence actually collected.
+
+If any mandatory gate fails, affected records are NOT MODEL-READY. They may be retained for diagnostic/exploratory use with clear status.
+
+======================================================================
+18. OPEN ITEMS / TBD REGISTER
+======================================================================
+
+GTIS-TBD-01: Exact target and reference quantity.
+Evidence: approved TCS target decision.
+Owner: system/ML owner + domain reviewer.
+Blocks: instrument selection.
+
+GTIS-TBD-02: Reference instrument model(s), serial/asset IDs, and specifications.
+Evidence: instrument datasheet and registry.
+Owner: sensor/instrument owner.
+Blocks: instrument approval.
+
+GTIS-TBD-03: Calibration provider/method, range, uncertainty, and interval.
+Evidence: calibration plan/certificate or approved verification procedure.
+Owner: instrument owner.
+Blocks: trusted ground truth.
+
+GTIS-TBD-04: Measurement location, mounting, geometry, and sampling method.
+Evidence: work instruction and field setup record.
+Owner: field/instrument owner.
+Blocks: repeatable collection.
+
+GTIS-TBD-05: Timestamp source and maximum allowed synchronization error.
+Evidence: target alignment analysis and timing test.
+Owner: ML + firmware + field owner.
+Blocks: label alignment.
+
+GTIS-TBD-06: Ground-truth evidence classes allowed per split.
+Evidence: approved TCS/DOP policy.
+Owner: data owner + domain reviewer.
+Blocks: dataset release.
+
+GTIS-TBD-07: Uncertainty limits and ambiguous-label handling.
+Evidence: target-specific uncertainty budget and labeling SOP.
+Owner: target owner + reviewer.
+Blocks: label quality approval.
+
+GTIS-TBD-08: Required validation tests and numerical acceptance thresholds.
+Evidence: approved test plan.
+Owner: instrument owner + reviewer.
+Blocks: instrument activation.
+
+GTIS-TBD-09: Evidence storage, retention, access control, and checksum procedure.
+Evidence: DOP/DSD governance decision.
+Owner: data governance owner.
+Blocks: reproducible release.
+
+GTIS-TBD-10: Whether prototype sensors can serve as reference sources for any target.
+Evidence: independence/circularity assessment and calibration study.
+Owner: ML/system owner + domain reviewer.
+Blocks: use of candidate sensors as ground truth.
+
+======================================================================
+19. APPROVAL RECORD
+======================================================================
+
+Document: GTIS-LANDSLIDE-ESP32S3-001
+Version: 1.0
+Status: DRAFT — NOT APPROVED FOR FINAL GROUND-TRUTH RELEASE
+
+Target contract version: TBD
+Instrument registry version: TBD
+Ground-truth protocol version: TBD
+Instrument owner: TBD
+Data owner: TBD
+ML reviewer: TBD
+Domain/geotechnical reviewer: TBD
+Firmware reviewer (if applicable): TBD
+Approval date: TBD
+Decision: NOT APPROVED
+
+Change log:
+v1.0 — Initial draft defining reference instrument/method registration, calibration, traceability, uncertainty, timing, quality, record schema, validation, and release gates. No specific reference instrument or target has been assumed.
+
+END OF GTIS v1.0

@@ -1,0 +1,343 @@
+{
+  "schema_document": {
+    "document_id": "FSS-LANDSLIDE-ESP32S3-001",
+    "title": "Feature Schema Specification",
+    "version": "1.0",
+    "status": "DRAFT",
+    "created_date": "2026-10-28",
+    "system": "ESP32-S3 / Arduino-FreeRTOS / Edge Impulse",
+    "task_baseline": "Regression (provisional)",
+    "normative_note": "Candidate definitions only. No feature is approved for model use until sensor, units, calibration, sampling, preprocessing, model input metadata, and golden vectors are verified."
+  },
+  "compatibility": {
+    "dsd_revision": "1.0",
+    "icd_revision": "1.1",
+    "lld_revision": "1.1-or-1.2-confirm-at-release",
+    "feature_schema_hash": null,
+    "model_artifact_hash": null,
+    "edge_impulse_project_id": null,
+    "edge_impulse_deployment_version": null
+  },
+  "input_contract": {
+    "input_mode": "TBD: raw time-series vs engineered feature vector must match actual Edge Impulse export",
+    "sample_rate_hz": null,
+    "window_length_samples": null,
+    "window_duration_ms": null,
+    "stride_samples": null,
+    "preprocessing_pipeline_version": null,
+    "normalization": "TBD; fit only on training split and freeze parameters",
+    "time_base": "boot_id + monotonic timestamp_ms",
+    "invalid_data_policy": "Reject/invalidate window by default; no silent zero-fill, hold-last, or interpolation"
+  },
+  "features": [
+    {
+      "id": "accel_x_raw",
+      "index": null,
+      "name": "Accelerometer X raw channel",
+      "status": "CANDIDATE",
+      "source": {
+        "sensor_id": "IMU-01",
+        "sensor_model": "TBD",
+        "channel": "accelerometer_x"
+      },
+      "dtype": "TBD from driver/model contract",
+      "unit": "raw-count or physical unit TBD",
+      "formula": "Direct driver sample; no scaling unless explicitly defined by the sensor driver contract.",
+      "valid_range": {
+        "min": null,
+        "max": null,
+        "basis": "sensor datasheet + configured range + calibration evidence"
+      },
+      "quality_requirements": [
+        "VALID",
+        "fresh",
+        "finite",
+        "correct calibration/config"
+      ],
+      "missing_policy": "Invalidate affected window unless an approved schema-specific policy says otherwise",
+      "model_input_eligible": false,
+      "verification": [
+        "sensor datasheet",
+        "driver unit test",
+        "calibration/scale check",
+        "golden vector"
+      ]
+    },
+    {
+      "id": "accel_y_raw",
+      "index": null,
+      "name": "Accelerometer Y raw channel",
+      "status": "CANDIDATE",
+      "source": {
+        "sensor_id": "IMU-01",
+        "sensor_model": "TBD",
+        "channel": "accelerometer_y"
+      },
+      "dtype": "TBD from driver/model contract",
+      "unit": "raw-count or physical unit TBD",
+      "formula": "Direct driver sample; no scaling unless explicitly defined by the sensor driver contract.",
+      "valid_range": {
+        "min": null,
+        "max": null,
+        "basis": "sensor datasheet + configured range + calibration evidence"
+      },
+      "quality_requirements": [
+        "VALID",
+        "fresh",
+        "finite",
+        "correct calibration/config"
+      ],
+      "missing_policy": "Invalidate affected window unless an approved schema-specific policy says otherwise",
+      "model_input_eligible": false,
+      "verification": [
+        "sensor datasheet",
+        "driver unit test",
+        "calibration/scale check",
+        "golden vector"
+      ]
+    },
+    {
+      "id": "accel_z_raw",
+      "index": null,
+      "name": "Accelerometer Z raw channel",
+      "status": "CANDIDATE",
+      "source": {
+        "sensor_id": "IMU-01",
+        "sensor_model": "TBD",
+        "channel": "accelerometer_z"
+      },
+      "dtype": "TBD from driver/model contract",
+      "unit": "raw-count or physical unit TBD",
+      "formula": "Direct driver sample; no scaling unless explicitly defined by the sensor driver contract.",
+      "valid_range": {
+        "min": null,
+        "max": null,
+        "basis": "sensor datasheet + configured range + calibration evidence"
+      },
+      "quality_requirements": [
+        "VALID",
+        "fresh",
+        "finite",
+        "correct calibration/config"
+      ],
+      "missing_policy": "Invalidate affected window unless an approved schema-specific policy says otherwise",
+      "model_input_eligible": false,
+      "verification": [
+        "sensor datasheet",
+        "driver unit test",
+        "calibration/scale check",
+        "golden vector"
+      ]
+    },
+    {
+      "id": "accel_magnitude",
+      "index": null,
+      "name": "Accelerometer magnitude",
+      "status": "CONDITIONAL_CANDIDATE",
+      "source": {
+        "sensor_id": "IMU-01",
+        "channels": [
+          "accel_x",
+          "accel_y",
+          "accel_z"
+        ]
+      },
+      "dtype": "float32",
+      "unit": "m/s^2 only if all input channels are calibrated in m/s^2; otherwise TBD",
+      "formula": "sqrt(ax*ax + ay*ay + az*az), with finite/overflow checks",
+      "valid_range": {
+        "min": null,
+        "max": null,
+        "basis": "approved IMU full scale and calibration"
+      },
+      "quality_requirements": [
+        "all three source axes valid, fresh, finite, same frame and compatible timestamps"
+      ],
+      "missing_policy": "Output invalid if any required source axis is invalid",
+      "model_input_eligible": false,
+      "verification": [
+        "unit test with known vectors",
+        "numeric boundary test",
+        "host/target golden vector"
+      ]
+    },
+    {
+      "id": "tilt_x_deg",
+      "index": null,
+      "name": "Tilt estimate about X axis",
+      "status": "CONDITIONAL_CANDIDATE",
+      "source": {
+        "sensor_id": "IMU-01",
+        "channels": [
+          "accel_x",
+          "accel_y",
+          "accel_z"
+        ]
+      },
+      "dtype": "float32",
+      "unit": "degree",
+      "formula": "Candidate static-acceleration estimate: atan2(ay, sqrt(ax*ax + az*az)) * 180/pi; exact axis/sign convention must be verified against mounting frame.",
+      "valid_range": {
+        "min": -90,
+        "max": 90,
+        "basis": "formula convention only; physical eligibility requires approved mounting/frame and validity tests"
+      },
+      "quality_requirements": [
+        "all axes valid/fresh/finite",
+        "gravity-dominant assumption or documented filter",
+        "mounting orientation known"
+      ],
+      "missing_policy": "Output invalid if inputs invalid or dynamic acceleration makes the estimate unsuitable under the approved policy",
+      "model_input_eligible": false,
+      "verification": [
+        "bench tilt-angle sweep against reference inclinometer",
+        "axis/sign convention test",
+        "static and dynamic motion test",
+        "golden vectors"
+      ]
+    },
+    {
+      "id": "tilt_y_deg",
+      "index": null,
+      "name": "Tilt estimate about Y axis",
+      "status": "CONDITIONAL_CANDIDATE",
+      "source": {
+        "sensor_id": "IMU-01",
+        "channels": [
+          "accel_x",
+          "accel_y",
+          "accel_z"
+        ]
+      },
+      "dtype": "float32",
+      "unit": "degree",
+      "formula": "Candidate static-acceleration estimate: atan2(-ax, sqrt(ay*ay + az*az)) * 180/pi; exact axis/sign convention must be verified against mounting frame.",
+      "valid_range": {
+        "min": -90,
+        "max": 90,
+        "basis": "formula convention only; physical eligibility requires approved mounting/frame and validity tests"
+      },
+      "quality_requirements": [
+        "all axes valid/fresh/finite",
+        "gravity-dominant assumption or documented filter",
+        "mounting orientation known"
+      ],
+      "missing_policy": "Output invalid if inputs invalid or dynamic acceleration makes the estimate unsuitable under the approved policy",
+      "model_input_eligible": false,
+      "verification": [
+        "bench tilt-angle sweep against reference inclinometer",
+        "axis/sign convention test",
+        "static and dynamic motion test",
+        "golden vectors"
+      ]
+    },
+    {
+      "id": "soil_raw",
+      "index": null,
+      "name": "Soil sensor raw output",
+      "status": "DIAGNOSTIC_ONLY_PENDING_CALIBRATION",
+      "source": {
+        "sensor_id": "SOIL-01",
+        "sensor_model": "TBD",
+        "channel": "raw output"
+      },
+      "dtype": "TBD from driver",
+      "unit": "raw-count/ADC units TBD",
+      "formula": "Direct driver reading; preserve original value.",
+      "valid_range": {
+        "min": null,
+        "max": null,
+        "basis": "sensor electrical specification and ADC configuration"
+      },
+      "quality_requirements": [
+        "driver read successful",
+        "ADC configuration known",
+        "finite if converted to float"
+      ],
+      "missing_policy": "Invalid if read fails, stale, or outside approved electrical range",
+      "model_input_eligible": false,
+      "verification": [
+        "sensor model identification",
+        "reference moisture calibration",
+        "repeatability test"
+      ]
+    },
+    {
+      "id": "yl83_raw",
+      "index": null,
+      "name": "YL-83 module raw output",
+      "status": "DIAGNOSTIC_ONLY_PENDING_CHARACTERIZATION",
+      "source": {
+        "sensor_id": "RAIN-01",
+        "sensor_model": "YL-83 module revision TBD",
+        "channel": "electrical output"
+      },
+      "dtype": "TBD from driver/ADC",
+      "unit": "raw-count/ADC units TBD",
+      "formula": "Direct driver reading; do not map to rainfall or rain rate without a validated reference calibration.",
+      "valid_range": {
+        "min": null,
+        "max": null,
+        "basis": "module electrical characteristics and ADC configuration"
+      },
+      "quality_requirements": [
+        "driver read successful",
+        "ADC configuration known",
+        "corrosion/wetting state and installation documented"
+      ],
+      "missing_policy": "Invalid if read fails, stale, or outside approved electrical range",
+      "model_input_eligible": false,
+      "verification": [
+        "module/revision identification",
+        "repeatable wet/dry characterization",
+        "reference-method comparison if rainfall is intended"
+      ]
+    },
+    {
+      "id": "hx710b_raw",
+      "index": null,
+      "name": "HX710B raw ADC output",
+      "status": "DIAGNOSTIC_ONLY_PENDING_TRANSDUCER",
+      "source": {
+        "sensor_id": "HX710B-01",
+        "adc": "HX710B",
+        "transducer_model": "TBD"
+      },
+      "dtype": "integer type per driver contract",
+      "unit": "raw ADC counts",
+      "formula": "Direct signed/raw conversion according to the selected HX710B driver and datasheet; preserve raw count and sign semantics.",
+      "valid_range": {
+        "min": null,
+        "max": null,
+        "basis": "ADC datasheet, driver representation, saturation behavior"
+      },
+      "quality_requirements": [
+        "conversion ready",
+        "timeout not exceeded",
+        "not saturated",
+        "transducer wiring/config documented"
+      ],
+      "missing_policy": "Invalid on timeout, saturation, conversion error, or missing transducer configuration",
+      "model_input_eligible": false,
+      "verification": [
+        "HX710B driver test",
+        "transducer identification",
+        "zero/span calibration",
+        "repeatability and saturation tests"
+      ]
+    }
+  ],
+  "approval_gates": [
+    "Confirm actual sensor model/revision and driver units",
+    "Approve calibration and channel quality policies",
+    "Approve input mode, sampling rate, window length, stride and preprocessing",
+    "Approve target/label contract and time alignment",
+    "Export actual Edge Impulse model metadata and match exact input dimensions/order",
+    "Assign stable feature indexes only after canonical input schema is frozen",
+    "Generate schema SHA-256 and version it",
+    "Pass host and ESP32-S3 golden vectors within approved per-feature tolerances",
+    "Review and sign release manifest"
+  ],
+  "document_version": "1.1",
+  "change_note": "MPU9250 selected; I2C selected; pins, address, clock, range, ODR, filter, calibration and model input contract remain TBD pending verification."
+}

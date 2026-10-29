@@ -1,0 +1,619 @@
+TARGET CONTRACT SPECIFICATION (TCS)
+Hệ thống giám sát nguy cơ sạt lở đất — ESP32-S3 + Edge Impulse
+Document ID: TCS-LANDSLIDE-ESP32S3-001
+Version: 1.0
+Status: DRAFT — target semantics and ground-truth method require approval
+Date: 2026-10-29
+Related documents: DSD-LANDSLIDE-ESP32S3-001 v1.1; FSS-LANDSLIDE-ESP32S3-001 v1.0; DOP-LANDSLIDE-ESP32S3-001 v1.0; ICD v1.1; LLD baseline to be confirmed
+Platform: ESP32-S3, Arduino/FreeRTOS, PlatformIO + VS Code, Edge Impulse Regression (provisional baseline)
+
+======================================================================
+0. DOCUMENT CONVENTIONS
+======================================================================
+
+MUST / MUST NOT: mandatory requirement / prohibition.
+SHOULD / SHOULD NOT: recommended unless an approved rationale says otherwise.
+MAY: optional.
+TBD: unresolved; it is not an approved constant or assumption.
+DRAFT: not approved for model release.
+
+This document defines what a regression target means, how a target value is produced, aligned to a sensor observation, validated, versioned, and consumed during training/evaluation/inference. It does not choose a scientifically valid landslide predictor without evidence.
+
+Safety boundary:
+- This is a prototype-level monitoring system, not a certified landslide early-warning system.
+- A regression output is not a probability of landslide unless a separately validated probabilistic method and calibration evidence explicitly support that claim.
+- Model output MUST NOT be the sole safety mechanism or the sole basis for evacuation, emergency response, or other high-consequence decisions.
+- A sensor reading, a model score, an observed condition, and an actual landslide event are distinct concepts.
+
+======================================================================
+1. PURPOSE AND SCOPE
+======================================================================
+
+TCS establishes the canonical contract for:
+1. Target meaning and intended use.
+2. Target type, unit, range, direction, and encoding.
+3. Ground-truth evidence and annotation responsibility.
+4. Temporal alignment between input window and target.
+5. Label quality, uncertainty, missingness, and exclusion.
+6. Dataset splitting and leakage prevention as applied to targets.
+7. Training, evaluation, deployment, and runtime interpretation.
+8. Versioning, traceability, acceptance gates, and unresolved decisions.
+
+TCS owns target semantics. DSD owns dataset lifecycle, records, splits, manifests, and provenance. DOP owns operational collection, labeling workflow, ground-truth procedure, quality KPIs, and freeze governance. FSS owns feature definitions and model-input compatibility. ICD owns firmware interface and data-quality semantics. LLD owns runtime implementation design.
+
+If these documents conflict:
+1. Approved TCS owns target meaning and target encoding.
+2. Approved FSS plus actual Edge Impulse deployment metadata owns model-input contract.
+3. DSD owns dataset representation, split, and provenance conventions.
+4. ICD owns firmware interface/status semantics.
+5. A conflict MUST be recorded and resolved through controlled revision; implementers MUST NOT silently infer a resolution.
+
+======================================================================
+2. CURRENT PROJECT CONTEXT AND KNOWN LIMITS
+======================================================================
+
+Known project context:
+- Runtime target: ESP32-S3, offline inference.
+- Software stack: Arduino/FreeRTOS and PlatformIO + VS Code.
+- ML approach: Edge Impulse Regression is a provisional baseline.
+- Candidate sensors discussed: IMU/accelerometer, soil-moisture sensor, YL-83 board, and HX710B ADC with an as-yet-unidentified transducer.
+- Actual sensor models, mounting, calibration, sample rate, window length, stride, and exported model metadata are not yet fully approved.
+
+Important limits:
+- FSS v1.0 lists candidate channels, not a frozen feature schema.
+- YL-83 output MUST NOT be called rainfall without a validated calibration and a defined reference method.
+- HX710B raw counts have no physical interpretation until the attached transducer, wiring, measurement quantity, range, and calibration are known.
+- IMU tilt estimates depend on axis frame, mounting, gravity-dominant assumptions, sign convention, and calibration.
+- A target cannot be selected merely because it correlates with available sensor channels or is convenient to train.
+- A target defined from the model's own output is circular and MUST NOT be used as independent ground truth.
+
+No numerical target range, label threshold, forecast horizon, sample rate, window length, or acceptance metric is approved by this document. Those remain TBD until evidence and owner approval are recorded.
+
+======================================================================
+3. TARGET CONTRACT SUMMARY
+======================================================================
+
+Every released dataset/model MUST reference one immutable target_contract_id and target_contract_version.
+
+The target contract MUST specify at least:
+- target_id
+- target_contract_version
+- target_name
+- intended_use
+- physical_or_observed_meaning
+- target_type and data_type
+- unit
+- valid_min and valid_max, or an explicit unbounded/unknown rule
+- directionality and interpretation
+- measurement/annotation method
+- ground-truth source and evidence requirements
+- temporal reference and alignment policy
+- target aggregation rule, if any
+- uncertainty/confidence representation
+- missing/invalid/ambiguous label policy
+- inclusion/exclusion rules
+- labeler and reviewer roles
+- target transformation/scaling, if any
+- training encoding and inverse transform
+- evaluation metrics and acceptance gates
+- known limitations and prohibited claims
+- schema/document hash and approval record
+
+A target contract is not complete while any field that changes target meaning, units, label assignment, time alignment, or acceptance remains TBD.
+
+======================================================================
+4. TARGET SELECTION PRINCIPLES
+======================================================================
+
+4.1 Select a measurable target, not a vague concept
+
+The phrase “landslide risk” is too broad to serve as a regression target unless it is operationally defined and backed by an appropriate reference process. A target MUST be observable or reproducibly derived from documented independent evidence.
+
+4.2 Distinguish target families
+
+Possible target families include:
+A. Directly measured physical quantity, e.g. calibrated displacement, tilt, pore-water pressure, or soil moisture.
+B. A future measured change over a defined horizon, e.g. displacement over the next H minutes.
+C. A human- or expert-assigned ordinal condition score, provided the scale, evidence, inter-rater agreement, and limits are specified.
+D. A derived engineering index with a documented formula and validated reference inputs.
+E. A binary event outcome encoded numerically. This is usually a classification problem; using regression is allowed only with an explicit rationale and must not be described as probability by default.
+
+These are alternatives, not simultaneous targets. The project owner and ML/system reviewer MUST select one target family and approve the evidence supporting it.
+
+4.3 Target independence
+
+The target MUST NOT be a deterministic restatement of the same input feature vector unless the intended task is explicitly feature reconstruction. For predictive claims, the target should be measured independently or at a future time, and the temporal protocol must prevent information leakage.
+
+4.4 No unsupported risk claims
+
+A model trained on synthetic labels, heuristic scores, or unverified sensor proxies may only claim to estimate that synthetic score/proxy. It MUST NOT claim to predict real landslides or estimate landslide probability without suitable independent ground truth and validation.
+
+======================================================================
+5. TARGET DEFINITION TEMPLATE
+======================================================================
+
+The following record MUST be completed and approved before model-ready data collection.
+
+target_contract_id: TCS-LANDSLIDE-ESP32S3-001
+target_contract_version: 1.0-draft
+target_id: TBD
+target_name: TBD
+target_family: TBD
+intended_use: TBD
+physical_or_observed_meaning: TBD
+data_type: float32 | float64 | integer | categorical-encoded (select one)
+unit: TBD
+valid_min: TBD
+valid_max: TBD
+directionality: higher_means_what / lower_means_what / non-monotonic (TBD)
+reference_method: TBD
+ground_truth_source: TBD
+ground_truth_instrument_or_authority: TBD
+calibration_procedure_and_version: TBD
+annotation_sop_version: TBD
+target_timestamp_definition: TBD
+input_window_start_rule: TBD
+input_window_end_rule: TBD
+prediction_horizon: TBD (use NONE only for contemporaneous estimation)
+target_aggregation: NONE / mean / median / max / min / delta / slope / other (TBD)
+target_formula_version: TBD
+uncertainty_method: TBD
+label_quality_states: TBD
+missing_label_policy: EXCLUDE_FROM_SUPERVISED_TRAINING unless approved alternative
+outlier_policy: TBD; do not silently clip
+training_transform: NONE / documented transform (TBD)
+transform_parameters_source: training split only
+inverse_transform_required: true if transformed
+primary_metric: TBD
+secondary_metrics: TBD
+acceptance_thresholds: TBD
+known_biases_and_limits: TBD
+owner: TBD
+reviewer: TBD
+approval_date: TBD
+contract_sha256: generated at approval/freeze
+
+The contract record SHOULD be machine-readable (JSON or YAML) and committed with the dataset manifest. The human-readable TCS and machine-readable contract MUST agree. A hash mismatch blocks release.
+
+======================================================================
+6. TARGET OPTIONS AND DECISION GATE
+======================================================================
+
+The following options are candidate directions only. This section does not select one.
+
+Option A — Calibrated physical quantity
+Example: estimate calibrated tilt angle, soil moisture, or displacement.
+Advantages: clear units and measurable reference.
+Risks: sensor-specific calibration, limited relationship to actual slope failure, and possible target/input circularity if the same sensor supplies both target and features.
+
+Option B — Future change over a defined horizon
+Example: predict change in calibrated tilt or displacement over a fixed future horizon H.
+Advantages: defines a predictive task with a temporal target.
+Risks: requires reliable timestamps, horizon definition, adequate independent episodes, and leakage-safe window construction.
+
+Option C — Expert-assigned condition/instability index
+Advantages: may combine several observations.
+Risks: subjective scale, labeler disagreement, possible circularity, and no automatic interpretation as probability. Requires a written rubric, independent reviewers, and agreement analysis.
+
+Option D — Engineering index from a validated physical model
+Advantages: reproducible formula if inputs and assumptions are valid.
+Risks: outputs inherit model assumptions and must not be called ground truth for real-world landslide outcomes without validation.
+
+Option E — Event outcome
+Example: whether a defined event occurred within horizon H.
+This is naturally a classification target in many cases. If regression is retained, the project MUST document why, define numeric encoding, evaluate appropriately, and explicitly prohibit interpreting the raw regression output as calibrated probability.
+
+Decision record MUST contain:
+- selected option and rationale;
+- rejected alternatives and reasons;
+- intended user/action and non-use;
+- supporting studies, measurements, or field evidence;
+- ground-truth feasibility and risk;
+- reviewer approval.
+
+Until this decision is approved, model training may be exploratory only and any resulting model MUST be marked NOT FOR OPERATIONAL USE.
+
+======================================================================
+7. GROUND-TRUTH EVIDENCE REQUIREMENTS
+======================================================================
+
+7.1 Evidence hierarchy
+
+For each label, record which evidence class applies:
+- G1: traceable instrument/reference measurement with documented calibration and timestamps.
+- G2: independently verified field observation with evidence, method, and reviewer.
+- G3: expert annotation under an approved rubric with reviewer and disagreement handling.
+- G4: derived value from a documented formula and approved source measurements.
+- G5: synthetic, heuristic, or proxy label.
+
+The hierarchy is descriptive, not a guarantee of quality. G5 labels MUST NOT be presented as observed real-world outcomes. The approved target contract MUST state which evidence classes are allowed for training and evaluation. The final test set SHOULD use the strongest feasible independent evidence for the target.
+
+7.2 Minimum evidence record
+
+Every labeled record/window MUST reference:
+- label_id and target_contract_version;
+- source session and raw data identifiers;
+- target value and unit;
+- event/measurement timestamp or interval;
+- evidence class;
+- reference instrument or observation method;
+- calibration identifier where relevant;
+- annotator/reviewer identifiers or controlled pseudonymous IDs;
+- annotation timestamp;
+- quality state and uncertainty;
+- evidence file/reference and checksum where applicable;
+- rationale for exclusions or adjudication.
+
+7.3 Independent evidence
+
+Ground truth MUST NOT be generated from the model output being evaluated. If a proxy derived from an input sensor is used as the target, the dataset documentation MUST state that limitation, and claims MUST be limited to estimating the proxy.
+
+7.4 Uncertainty and disagreements
+
+If a reference measurement has uncertainty, record it or reference the uncertainty specification. If annotators disagree beyond the approved tolerance, mark the label DISPUTED and route it to adjudication. Do not silently average categorical judgments or replace disagreement with a guessed numeric value.
+
+======================================================================
+8. TEMPORAL ALIGNMENT CONTRACT
+======================================================================
+
+8.1 Required timestamps
+
+Use a documented time base. Store monotonic device time for ordering and elapsed durations; store wall-clock/UTC time only when a trustworthy clock is available. Record synchronization quality. Do not treat an unset or unsynchronized wall clock as accurate.
+
+Each input window MUST identify:
+- session_id;
+- window_id;
+- start timestamp;
+- end timestamp;
+- sampling/window configuration version;
+- gap/dropout status;
+- feature generation version.
+
+Each target MUST identify:
+- target measurement time or interval;
+- whether it is contemporaneous, retrospective, or future;
+- prediction horizon, if any;
+- alignment rule version.
+
+8.2 Contemporaneous estimation
+
+For a target measured over interval [t0, t1], the contract MUST define whether the input window ends at t1, precedes t0 by a gap, or uses another justified relationship. The window MUST NOT contain measurements collected after the target time if the task is intended to estimate the target before it was known.
+
+8.3 Forecasting
+
+For a future target, define:
+- prediction origin t;
+- horizon H;
+- target interval [t+H_start, t+H_end] or exact target time;
+- any embargo/gap between input window and target interval;
+- rule for overlapping horizons.
+
+The exact horizon and embargo are TBD until approved. They MUST NOT be inferred from convenience or chosen after examining test performance.
+
+8.4 Missing or irregular samples
+
+Windows with gaps, stale channels, out-of-order timestamps, invalid calibration, or excessive missingness MUST be handled according to the approved data-quality policy. Missing target values MUST NOT be filled with zero. Interpolation is permitted only if scientifically justified, versioned, and approved for the target; the original missingness and imputation mask must be retained.
+
+8.5 Window overlap and leakage
+
+Overlapping windows from one event/session/site MUST remain in the same data split unless a documented group-aware design proves independence. Adjacent windows MUST NOT be randomly scattered across train, validation, and test. Apply any embargo required by the target horizon and temporal correlation.
+
+======================================================================
+9. LABEL STATES AND ELIGIBILITY
+======================================================================
+
+Recommended canonical target-label states:
+- VALID: evidence satisfies contract and target is within the approved domain.
+- MISSING: no target evidence available.
+- INVALID_FORMAT: target cannot be parsed in the declared type.
+- NON_FINITE: NaN or infinity.
+- INVALID_RANGE: value outside approved range and not accepted by a documented exception.
+- CALIBRATION_INVALID: required calibration absent, expired, or failed.
+- STALE: target evidence is older than allowed for the defined alignment.
+- DISPUTED: unresolved annotator/reference disagreement.
+- LOW_CONFIDENCE: evidence exists but does not meet the primary training/evaluation threshold.
+- SYNTHETIC: generated by simulation, heuristic, or proxy method.
+- EXCLUDED: deliberately excluded with a reason.
+- NOT_APPLICABLE: target is not defined for this sample under the contract.
+
+Only VALID labels are eligible for the primary supervised training/evaluation set unless the approved contract explicitly defines additional states and their treatment. SYNTHETIC or LOW_CONFIDENCE labels MUST be separated or explicitly tagged and analyzed; they MUST NOT silently mix with high-quality ground truth. Invalid labels MUST NOT be converted to a numeric default.
+
+Each exclusion MUST have a reason code and be counted in quality reports.
+
+======================================================================
+10. NUMERIC AND ENCODING RULES
+======================================================================
+
+- The stored label type MUST match the machine-readable target contract.
+- Unit conversion MUST be explicit and versioned; values with different units MUST NOT be mixed.
+- Float serialization MUST use a documented locale-independent representation.
+- NaN and infinity MUST be rejected from the canonical training target.
+- Clipping out-of-range labels is prohibited unless the contract defines it, provides rationale, and preserves the pre-clipped value and flag.
+- Normalization/scaling parameters MUST be fitted on the training split only, then frozen and applied unchanged to validation/test/runtime.
+- If the target is transformed for training, the transformation formula, parameters, version, and inverse transform MUST be stored.
+- Evaluation metrics MUST be reported in the original target unit as well as transformed space when relevant.
+- Numeric rounding MUST NOT erase meaningful changes; precision requirements are TBD per target.
+- Categorical encodings MUST not be used as ordinal numeric values unless their order and distances are explicitly meaningful and approved.
+
+======================================================================
+11. DATASET RECORD AND MANIFEST FIELDS
+======================================================================
+
+The dataset MUST retain raw evidence separately from derived labels. Suggested label record fields:
+
+{
+  "label_schema_version": "1.0",
+  "label_id": "stable-unique-id",
+  "target_contract_id": "TCS-LANDSLIDE-ESP32S3-001",
+  "target_contract_version": "approved-version",
+  "target_id": "approved-target-id",
+  "session_id": "stable-session-id",
+  "window_id": "stable-window-id",
+  "target_value": null,
+  "target_unit": "TBD-until-approved",
+  "label_state": "MISSING",
+  "evidence_class": "TBD",
+  "measurement_start_time": null,
+  "measurement_end_time": null,
+  "prediction_origin_time": null,
+  "prediction_horizon_seconds": null,
+  "reference_method_id": null,
+  "calibration_id": null,
+  "annotator_id": null,
+  "reviewer_id": null,
+  "uncertainty": null,
+  "quality_flags": [],
+  "evidence_ref": null,
+  "evidence_sha256": null,
+  "exclusion_reason": null
+}
+
+This is an illustrative schema, not a final schema. Before implementation, define whether timestamps are integer epoch, monotonic microseconds, ISO 8601, or another representation; define nullability and field types; then version and hash the schema. The target value above is null because no project target has been approved yet.
+
+Dataset manifest MUST include:
+- target contract ID/version/hash;
+- label schema version/hash;
+- annotation SOP and ground-truth protocol versions;
+- raw dataset manifest and checksum;
+- calibration and sensor configuration references;
+- feature schema ID/version/hash;
+- window/sampling/preprocessing configuration;
+- split manifest and group identifiers;
+- code commit/build identifiers;
+- Edge Impulse project/deployment/model metadata;
+- quality report and approval records.
+
+======================================================================
+12. TRAINING AND EVALUATION RULES
+======================================================================
+
+12.1 Training eligibility
+
+Training pipeline MUST validate the target contract and dataset manifest before accepting data. It MUST fail closed if required versions, units, target values, or hashes are missing/mismatched.
+
+12.2 Baselines
+
+Report at least a simple baseline appropriate to the target, such as training-set median/mean for a continuous target or a justified persistence baseline for time-series prediction. Baseline selection must not leak validation/test information.
+
+12.3 Metrics
+
+Metric choice depends on the approved target:
+- Continuous target candidates: MAE, RMSE, bias/mean error, and residual analysis.
+- Ordinal score: ordinal-aware metrics and per-level error analysis may be required.
+- Event-coded target: compare regression against a classification baseline; do not use regression merely to obtain a continuous-looking score.
+- Physical forecast: report error versus horizon, operating conditions, and independent site/event groups.
+
+These are candidates, not pre-approved metrics. The approved TCS and experiment plan MUST name primary/secondary metrics and thresholds. Thresholds MUST be selected before final test evaluation, not tuned to make a test result pass.
+
+12.4 Evaluation splits
+
+Use group-aware splits by site, event, deployment episode, or another independence unit appropriate to the data-generating process. Split policy MUST be documented before model selection. If data is too limited for an independent test, report that limitation and do not imply generalization.
+
+12.5 Test-set integrity
+
+The final test set MUST be frozen and used only for final evaluation, except for a documented test protocol revision. Repeatedly tuning model/hyperparameters against test results invalidates the test as an unbiased final estimate. Any re-use must be logged.
+
+12.6 Reporting
+
+Reports MUST include:
+- target contract version and interpretation;
+- data split IDs and hashes;
+- counts by label state and evidence class;
+- missing/excluded/disputed-label rates;
+- performance overall and by site/event/condition where sample size allows;
+- baseline results;
+- uncertainty and known limitations;
+- model artifact hash and inference metadata;
+- explicit statement of what the model does and does not establish.
+
+======================================================================
+13. RUNTIME INFERENCE CONTRACT
+======================================================================
+
+Runtime firmware MUST treat the regression output as model_value/model_score until the approved target contract gives it a specific physical meaning and unit.
+
+Runtime output record SHOULD include:
+- model_value;
+- target_contract_version;
+- model_id/model_version;
+- feature_schema_version/hash;
+- inference timestamp;
+- input window start/end;
+- input quality status;
+- model execution status;
+- output validity status;
+- calibration/configuration identifiers where applicable.
+
+The firmware MUST NOT:
+- label raw regression output as “probability of landslide” by default;
+- convert model_value to alarm levels using undocumented thresholds;
+- treat missing/stale/invalid sensor data as zero or “safe”;
+- issue a valid target estimate when the input window violates required quality gates;
+- silently use a model with mismatched target or feature schema.
+
+If the target contract defines thresholds, their units, boundaries, inclusivity, hysteresis, debounce, reset behavior, and fault precedence MUST be defined in the appropriate alarm/interface contract. A threshold is not approved merely because it produces plausible demonstration behavior.
+
+Invalid inference should produce a documented invalid/fault status, not a fabricated target value. Alarm/fault semantics remain governed by ICD and the approved alarm contract.
+
+======================================================================
+14. SAFETY, BIAS, AND CLAIMS CONTROL
+======================================================================
+
+Risks to assess:
+- proxy labels incorrectly presented as ground truth;
+- target leakage from input features or future samples;
+- labeler inconsistency;
+- reference instrument calibration error;
+- missing severe-event examples;
+- class/condition imbalance;
+- site, geology, weather, mounting, or sensor-specific bias;
+- synthetic labels dominating the dataset;
+- model extrapolation beyond observed conditions;
+- distribution shift after installation;
+- alarm thresholds chosen from test data;
+- confusing a condition score with probability or causal prediction.
+
+Required controls:
+- maintain an explicit target risk register;
+- record evidence class and provenance for each label;
+- keep test data independent by site/event/session as feasible;
+- analyze performance by conditions and groups;
+- report limitations and out-of-domain behavior;
+- establish a monitoring/revalidation plan for any field trial;
+- do not deploy as the sole safety control.
+
+No claim of actual landslide prediction, calibrated risk probability, or safety certification is permitted solely on the basis of low regression error against a proxy score.
+
+======================================================================
+15. VERSIONING AND CHANGE CONTROL
+======================================================================
+
+Increment the target contract version whenever a change affects:
+- target meaning or intended use;
+- target family, unit, range, direction, or numeric encoding;
+- reference method or evidence classes;
+- labeling rubric or adjudication policy;
+- time alignment, prediction horizon, aggregation, or embargo;
+- label validity/exclusion policy;
+- transformation or inverse transform;
+- primary metric or acceptance threshold;
+- runtime interpretation or threshold mapping.
+
+A change to target meaning requires a new target contract version and normally a new dataset/model release lineage. Do not edit frozen labels or experiment records in place. Create a new version, preserve the old artifacts, and document migration/relabeling rules.
+
+Each released contract MUST have:
+- immutable version identifier;
+- SHA-256 hash;
+- change log;
+- owner and reviewer;
+- approval date;
+- linked DSD/DOP/FSS/ICD/model versions;
+- explicit compatibility statement.
+
+======================================================================
+16. ACCEPTANCE GATES
+======================================================================
+
+TCS approval gate:
+[ ] One target family selected and rationale recorded.
+[ ] Target name, meaning, intended use, unit, range, and direction approved.
+[ ] Independent ground-truth/reference method defined.
+[ ] Annotation SOP and ground-truth protocol approved.
+[ ] Time alignment and prediction horizon specified.
+[ ] Label states, uncertainty, missingness, and exclusions defined.
+[ ] Encoding/transforms and inverse transform specified.
+[ ] Primary/secondary metrics and acceptance thresholds approved in advance.
+[ ] Dataset split and leakage controls defined.
+[ ] Runtime interpretation and prohibited claims documented.
+[ ] Machine-readable target contract validates against this document.
+[ ] Owner/reviewer approval and contract hash recorded.
+
+Dataset/model release gate:
+[ ] All target-related TBDs closed or explicitly excluded from release scope.
+[ ] Target labels have traceable evidence and acceptable quality.
+[ ] No silent imputation, default-zero labels, or undocumented clipping.
+[ ] Train/validation/test separation and group independence audited.
+[ ] Frozen dataset and manifest hashes verified.
+[ ] Experiment record references exact target contract and dataset hashes.
+[ ] Model input/output metadata matches approved contracts.
+[ ] Golden/replay tests pass.
+[ ] Performance is compared to an appropriate baseline.
+[ ] Limitations and intended/non-intended use are included in release notes.
+
+If any mandatory gate fails, release status MUST be BLOCKED or LIMITED TO DIAGNOSTIC/EXPLORATORY USE.
+
+======================================================================
+17. OPEN ITEMS / TBD REGISTER
+======================================================================
+
+TCS-TBD-01: Target family and exact target meaning.
+Required evidence: approved target decision record and domain rationale.
+Owner: ML/system owner + domain reviewer.
+Blocks: model-ready dataset and operational model release.
+
+TCS-TBD-02: Ground-truth source, reference instrument/method, and calibration.
+Required evidence: ground-truth protocol, instrument specs, calibration evidence.
+Owner: sensor/domain owner.
+Blocks: trusted labels.
+
+TCS-TBD-03: Labeling SOP, rubric, adjudication, and inter-rater agreement requirements.
+Required evidence: approved DOP labeling SOP and pilot annotation report.
+Owner: data/annotation owner.
+Blocks: final labels.
+
+TCS-TBD-04: Temporal alignment, prediction horizon, window length, stride, and embargo.
+Required evidence: approved temporal contract and actual sampling/model metadata.
+Owner: ML + firmware.
+Blocks: leakage-safe dataset and forecasting claims.
+
+TCS-TBD-05: Target range, precision, unit conversion, and transformation.
+Required evidence: target reference specification and numeric tests.
+Owner: target owner + ML.
+Blocks: canonical serialization/training.
+
+TCS-TBD-06: Allowed evidence classes and label quality thresholds.
+Required evidence: approved evidence policy and quality report.
+Owner: domain reviewer + data owner.
+Blocks: final evaluation.
+
+TCS-TBD-07: Primary/secondary metrics and acceptance thresholds.
+Required evidence: pre-registered experiment plan and risk review.
+Owner: ML/system reviewer.
+Blocks: model selection/release.
+
+TCS-TBD-08: Runtime interpretation and any alarm thresholds.
+Required evidence: approved target semantics and ICD/alarm contract update.
+Owner: system/safety owner.
+Blocks: operational alarms.
+
+TCS-TBD-09: Actual Edge Impulse model output shape, quantization, and metadata.
+Required evidence: export/deployment metadata and golden vectors.
+Owner: ML/firmware.
+Blocks: runtime compatibility.
+
+TCS-TBD-10: Field-validation scope and criteria for claims about real landslide outcomes.
+Required evidence: independent field study design and domain approval.
+Owner: project owner/domain expert.
+Blocks: real-world predictive claims.
+
+======================================================================
+18. APPROVAL RECORD
+======================================================================
+
+Document: TCS-LANDSLIDE-ESP32S3-001
+Version: 1.0
+Status: DRAFT
+
+Target owner: TBD
+ML reviewer: TBD
+Domain/geotechnical reviewer: TBD
+Firmware reviewer: TBD
+Approval date: TBD
+Approved target_contract_id/version: TBD
+Contract SHA-256: TBD
+Decision: NOT APPROVED FOR OPERATIONAL MODEL RELEASE
+
+Change log:
+v1.0 — Initial draft. Defines target semantics, ground-truth evidence, temporal alignment, label quality, training/evaluation rules, runtime interpretation, release gates, and open decisions. Does not select a target without project evidence.
+
+END OF TCS v1.0

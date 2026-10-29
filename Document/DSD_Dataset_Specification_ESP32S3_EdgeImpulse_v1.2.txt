@@ -1,0 +1,597 @@
+DATASET SPECIFICATION (DSD)
+
+Hệ thống giám sát nguy cơ sạt lở đất — ESP32-S3 + Edge Impulse
+==============================================================
+Mã tài liệu: DSD-LANDSLIDE-ESP32S3-001
+Phiên bản: 1.2
+Trạng thái: DRAFT — cần phê duyệt trước khi dùng để đóng băng dataset/model
+Ngày: 2026-10-29
+Nền tảng: ESP32-S3, Arduino/FreeRTOS, PlatformIO + VS Code, Edge Impulse Regression (baseline tạm thời)
+---
+
+0. Quy ước và cách đọc
+======================
+Các từ MUST, MUST NOT, SHOULD, SHOULD NOT, MAY được hiểu lần lượt là bắt buộc, cấm, nên, không nên và tùy chọn.
+Normative: quy tắc cần tuân thủ khi tạo dataset, huấn luyện, đánh giá hoặc đóng gói model.
+Proposed: đề xuất để triển khai; cần owner phê duyệt.
+TBD: chưa có bằng chứng/giá trị được phê duyệt; không được coi là hằng số chính thức.
+Một dòng dữ liệu có giá trị đo không đồng nghĩa với dữ liệu hợp lệ. Phải xét valid, quality_flags, calibration và freshness.
+DSD này mô tả dataset cho prototype mức B. Không phải chứng nhận an toàn, không chứng minh dự báo sạt lở thực tế và không được dùng làm cơ chế an toàn duy nhất.
+
+1. Mục đích
+===========
+DSD định nghĩa quy tắc thu thập, mô tả, kiểm tra chất lượng, gán nhãn, chia tập, biến đổi, lưu trữ, truy vết và phát hành dữ liệu cho hệ thống giám sát nguy cơ sạt lở chạy offline trên ESP32-S3.
+Mục tiêu:
+Tạo dataset có nguồn gốc và chất lượng truy vết được.
+Giữ nhất quán giữa dữ liệu cảm biến, SensorFrame, FeatureVector, ModelOutput, RiskAssessment, EventRecord và model Edge Impulse.
+Ngăn data leakage giữa train/validation/test, đặc biệt khi tạo các cửa sổ chồng lấp.
+Định nghĩa nhãn hồi quy có ý nghĩa vật lý/quan sát rõ ràng, không nhầm model output với xác suất sạt lở.
+Cho phép replay dữ liệu và tái tạo feature/model evaluation từ manifest, schema, calibration và phiên bản mã nguồn.
+Không biến dữ liệu thiếu, lỗi, stale, ngoài dải hoặc không hiệu chuẩn thành số 0 hay trạng thái an toàn.
+
+2. Phạm vi và ngoài phạm vi
+===========================
+
+2.1 Trong phạm vi
+=================
+Thu thập raw sensor samples và metadata môi trường/thí nghiệm.
+Hiệu chuẩn/đổi đơn vị theo hồ sơ đã xác minh.
+Gắn chất lượng cho từng kênh và từng record.
+Quản lý annotation/label, sự kiện tham chiếu và độ tin cậy nhãn.
+Xây dựng feature windows, xuất dataset cho Edge Impulse, chia tập độc lập.
+Kiểm thử golden vectors, replay và đánh giá model.
+Versioning, hash, lineage, retention và quy trình phát hành dataset.
+
+2.2 Ngoài phạm vi
+=================
+Chốt ngưỡng cảnh báo vận hành hoặc định nghĩa pháp lý của “nguy cơ sạt lở”.
+Chứng minh model đủ độ tin cậy cho cảnh báo sinh mạng.
+Tự suy ra lượng mưa từ cảm biến YL-83 chưa được hiệu chuẩn.
+Tự suy ra đại lượng vật lý từ HX710B khi chưa xác định đầu đo/transducer.
+Xác nhận model Edge Impulse cụ thể khi chưa có model export, metadata và Model Card thực tế.
+
+3. Tài liệu nền và thứ tự ưu tiên
+=================================
+DSD này phải được quản lý cùng các tài liệu:
+Đặc tả kỹ thuật hệ thống giám sát sạt lở ESP32-S3, baseline dự án v1.2/v1.4 (xác nhận revision được phê duyệt tại release).
+LLD_Giam_sat_sat_lo_ESP32S3_EdgeImpulse_v1.1 và/hoặc v1.2 nếu v1.2 được baseline chính thức.
+ICD_Giam_sat_sat_lo_ESP32S3_EdgeImpulse_v1.1.
+feature_schema.json và SHA-256 đã phê duyệt.
+Model Card, Edge Impulse export metadata, calibration records, RiskConfig và release manifest.
+Quy tắc giải quyết xung đột:
+Hợp đồng giao tiếp/kiểu dữ liệu/timestamp/quality của ICD là chuẩn cho interface firmware.
+Feature mapping/model input phải khớp chính xác feature_schema.json và metadata model thực tế.
+DSD định nghĩa provenance, label, dataset split và evaluation; không được tự thay đổi ý nghĩa field đã định nghĩa ở ICD.
+Nếu tài liệu mâu thuẫn, ghi issue/change request; không tự âm thầm chọn một giá trị.
+
+4. Trạng thái quyết định hiện tại
+=================================
+
+Hạng mục | Baseline / trạng thái | Điều kiện đóng
+MCU/runtime | ESP32-S3, Arduino/FreeRTOS | Xác nhận board/module, revision, flash/PSRAM
+Build | PlatformIO + VS Code | Khóa toolchain/SDK trong manifest
+ML task | Regression là baseline tạm thời | ADR/model validation phê duyệt target và nhãn
+IMU | MPU9250 đã chọn, giao tiếp I2C | Module/revision, range, ODR, đơn vị, frame, hướng lắp, SDA/SCL, address và clock TBD
+Soil sensor | Có cảm biến độ ẩm đất | Model, raw semantics, calibration, unit/range TBD
+Rain sensor | YL-83 được đề cập | Chưa được gọi là rainfall/rain rate nếu chưa có calibration; feature eligibility TBD
+HX710B | ADC/interface đọc đầu đo | Transducer, đại lượng, unit, zero/span/range TBD; không dùng làm feature vật lý trước khi chốt
+Sampling/window/stride | TBD | Được đóng băng cùng model metadata và feature schema
+Feature count/order/scaling | TBD | Canonical feature_schema.json + hash + golden vectors
+Regression target | TBD | Tên, ý nghĩa, unit, range, nhãn và quy trình xác minh
+UTC | Chỉ khi có đồng hồ UTC đáng tin | Nếu không, dùng boot_id + monotonic timestamp_ms
+Risk thresholds | Không thuộc DSD để tự quyết định | RiskConfig được review riêng
+
+Release blocker: không được phát hành dataset/model để inference hiện trường nếu feature schema, target semantics, model metadata, đơn vị/hiệu chuẩn hoặc tương thích schema chưa được xác nhận.
+
+5. Đơn vị dữ liệu và mô hình record
+===================================
+
+5.1 Các lớp dữ liệu
+===================
+Raw acquisition record: giá trị đọc trực tiếp từ driver, kèm trạng thái đọc.
+Calibrated sample: giá trị vật lý sau calibration đã xác minh; raw vẫn phải được giữ.
+Quality-annotated sample: calibrated/raw values cùng quality per-channel.
+Window record: tập mẫu liên tục dùng để tạo một feature window.
+Feature record: vector có thứ tự chính xác theo model_index.
+Label/annotation record: nhãn mục tiêu và nguồn bằng chứng, gắn với event/window/time interval.
+Evaluation record: dự đoán model, ground truth, sai số, trạng thái chất lượng và context.
+Dataset manifest: định danh, hash, lineage, split, schema, calibration và quy trình tạo.
+
+5.2 Khóa và liên kết
+====================
+Mỗi sample tối thiểu phải liên kết được với:
+dataset_id, site_id, device_id, sensor_set_id, session_id;
+boot_id, sequence_no, timestamp_ms;
+event_id hoặc annotation_id khi thuộc một sự kiện;
+calibration_id, config_version, firmware_version;
+schema_id, schema_version, schema_hash khi đã tạo feature;
+split_group_id và split_name sau khi split.
+Không dùng timestamp đơn lẻ làm khóa duy nhất. timestamp_ms là monotonic milliseconds từ boot, không phải UTC.
+
+6. Sensor channels và data dictionary
+=====================================
+
+6.1 Nguyên tắc
+==============
+Tên kênh ổn định dạng ASCII snake_case.
+Giá trị raw phải được giữ nguyên theo biểu diễn driver có tài liệu; không ghi đè bằng giá trị đã hiệu chuẩn.
+Mỗi physical value phải có unit, calibration version và validity.
+Không tuyên bố một unit/range chưa được datasheet hoặc calibration report xác nhận.
+Kênh chưa xác minh vẫn có thể được ghi dưới dạng diagnostic raw channel, nhưng không đủ điều kiện đưa vào model features.
+
+6.2 Kênh dự kiến
+================
+
+Channel ID | Tên canonical đề xuất | Raw field | Physical field | Unit physical | Trạng thái
+IMU-ACC-X | accel_x | accel_x_raw | accel_x_mps2 hoặc tên theo model đã chốt | m/s² nếu driver/calibration xác nhận | MPU9250 selected; I2C; frame, range, scale, ODR and module config TBD
+IMU-ACC-Y | accel_y | accel_y_raw | accel_y_mps2 hoặc tên theo model đã chốt | m/s² nếu xác nhận | TBD
+IMU-ACC-Z | accel_z | accel_z_raw | accel_z_mps2 hoặc tên theo model đã chốt | m/s² nếu xác nhận | TBD
+SOIL-01 | soil_moisture | soil_raw | soil_moisture_pct chỉ khi calibration định nghĩa % | TBD | Chưa chốt model, calibration và semantics
+RAIN-01 | yl83_output | yl83_raw | Không đặt rainfall_mm/rain_rate khi chưa hiệu chuẩn | TBD | Tín hiệu wetness/output chưa chứng minh là lượng mưa
+HX710B-01 | hx710b_raw | hx710b_raw | Tên physical channel theo transducer thực tế | TBD | Cấm gán unit/đại lượng trước khi xác định transducer
+
+Bảng này là danh sách kênh dự kiến, không phải feature schema đã đóng băng. Tên/unit cuối cùng phải thống nhất giữa driver, ICD data dictionary, dataset exporter và model input.
+
+6.3 Metadata cho từng channel
+=============================
+Mỗi channel descriptor MUST có:
+channel_id, name, sensor_model, sensor_revision;
+raw_type, raw_unit (hoặc raw_encoding nếu không phải đại lượng vật lý);
+physical_type, physical_unit khi có thể xác định;
+valid_min, valid_max sau khi được phê duyệt;
+sample_period_ms hoặc sampling policy;
+calibration_id, calibration_method, calibration_date, calibration_owner;
+mounting_orientation/coordinate frame nếu áp dụng;
+freshness_limit_ms, max_consecutive_misses;
+quality_policy_version, feature_eligible;
+reference đến datasheet và calibration evidence.
+
+7. Timestamp, ordering và đồng bộ
+=================================
+timestamp_ms: uint64, monotonic ms kể từ boot; dùng cho duration, freshness, window boundaries.
+boot_id: định danh boot/session; timestamp monotonic chỉ có nghĩa trong cùng boot.
+sequence_no: uint32, tăng đơn điệu trong boot theo quy tắc đã định nghĩa.
+utc_time: RFC 3339 UTC Z chỉ khi clock được xác nhận đồng bộ; nếu chưa có thì null/absent cùng time_status="UNSYNCED".
+Không tự chuyển local time thành UTC hoặc suy ra timezone.
+Mỗi sample phải có thời gian đo/thu nhận theo semantics được ghi trong schema; không trộn thời gian đọc driver với thời điểm physical measurement nếu hai thời điểm khác nhau.
+Dữ liệu out-of-order phải được gắn quality OUT_OF_ORDER; không tự sắp xếp lại rồi xóa mất bằng chứng gốc.
+Khi ghép sensor streams có chu kỳ khác nhau, phải ghi rõ chính sách đồng bộ/resampling. Không nội suy hoặc giữ giá trị cũ (hold-last) trừ khi policy được phê duyệt và feature schema nêu rõ.
+Gap, reset, calibration change hoặc schema change phải đánh dấu ranh giới và không được tạo window vượt qua ranh giới đó.
+
+8. Schema raw dataset
+=====================
+
+8.1 Format
+==========
+CSV UTF-8 là format trao đổi mặc định; JSONL có thể dùng cho event/annotation hoặc record lồng nhau. Không serialize raw bytes của C/C++ struct.
+Quy tắc CSV:
+delimiter ,, quote ", record terminator LF;
+field có comma, quote, CR hoặc LF phải quote; quote nội bộ được nhân đôi;
+decimal separator là dấu chấm;
+field số không hợp lệ không được ghi NaN, Inf, Infinity; dùng field rỗng kèm validity/quality;
+row bị cắt/truncated phải được đánh dấu lỗi, không được chấp nhận như record đầy đủ;
+schema thay đổi phải tăng dataset_schema_version.
+
+8.2 Raw sample CSV — trường lõi đề xuất
+=======================================
+Thứ tự trường phải được cố định theo raw_sample_schema_version.
+dataset_id,site_id,device_id,sensor_set_id,session_id,boot_id,sequence_no,timestamp_ms,utc_time,time_status,firmware_version,config_version,calibration_id,sensor_status_bits,accel_x_raw,accel_y_raw,accel_z_raw,soil_raw,yl83_raw,hx710b_raw,accel_x_valid,accel_y_valid,accel_z_valid,soil_valid,yl83_valid,hx710b_valid,accel_x_quality,accel_y_quality,accel_z_quality,soil_quality,yl83_quality,hx710b_quality,valid_mask,quality_flags,event_id,annotation_id
+Đây là schema đề xuất, không khẳng định mọi channel đã có phần cứng. Nếu kênh không tồn tại, schema của thiết bị/dataset phải ghi channel absent rõ ràng; không điền số 0 để giả lập sensor.
+
+8.3 Raw và calibrated values
+============================
+Có thể lưu calibrated values trong file riêng hoặc thêm cột *_physical sau khi unit/calibration được phê duyệt. Không trộn raw và physical values trong cùng tên cột. Mỗi calibrated dataset phải tham chiếu calibration_id và phiên bản transform.
+
+8.4 Record completeness
+=======================
+Một row hợp lệ phải có đủ các trường bắt buộc của schema. Missing field, parse error, duplicate key hoặc invalid encoding phải được reject hoặc đưa vào quarantine với lý do; không được lặng lẽ sửa.
+
+9. Data quality và eligibility
+==============================
+DSD dùng cùng khái niệm quality của ICD. Các status có thể gồm:
+VALID, INVALID_RANGE, INVALID_FORMAT, SENSOR_ERROR, STALE, MISSING, OUT_OF_ORDER, CALIBRATION_INVALID, NON_FINITE, SATURATED, GAP_DETECTED, NOT_READY.
+
+9.1 Quy tắc bắt buộc
+====================
+valid=true chỉ khi range, finite check, freshness, calibration và format đều đạt policy của channel.
+Giá trị không hữu hạn phải được đánh dấu NON_FINITE; không được đưa vào inference.
+Sample stale/missing/out-of-order/calibration-invalid không được coi là zero hoặc normal.
+Không impute bằng 0, giá trị cuối cùng hoặc interpolation theo mặc định.
+stale_after_ms=5000 và max_consecutive_misses=3 chỉ là giá trị khởi đầu đề xuất từ ICD, không phải giá trị được phê duyệt cho tất cả cảm biến.
+Mọi threshold/range phải gắn với quality_policy_version; không suy ra range chỉ từ kiểu dữ liệu.
+Chất lượng phải lan truyền từ sample → window → feature → prediction/evaluation.
+Window chứa gap/invalid sample chỉ được dùng nếu feature schema định nghĩa một policy cụ thể và đã được kiểm chứng; mặc định là reject/invalidate window.
+Phân tích offline có thể giữ record lỗi để điều tra, nhưng không được đưa chúng vào training như dữ liệu hợp lệ nếu không có policy và lý do rõ ràng.
+
+9.2 Eligibility
+===============
+Mỗi record/window phải có dataset_eligible hoặc trạng thái tương đương cùng eligibility_reason. Tách biệt:
+eligible_for_training;
+eligible_for_validation;
+eligible_for_test;
+eligible_for_replay;
+eligible_for_safety_analysis.
+Không mặc định một record bị loại khỏi training cũng bị xóa khỏi kho dữ liệu gốc.
+
+10. Annotation và nhãn Regression
+=================================
+
+10.1 Target contract — release blocker
+======================================
+Regression là baseline tạm thời; output không mặc định là xác suất sạt lở. Trước khi tạo nhãn, phải phê duyệt:
+target_name;
+định nghĩa vật lý/quan sát có thể tái lập;
+target_unit;
+target_min, target_max;
+thời điểm hoặc khoảng thời gian mà nhãn đại diện;
+phương pháp đo/quan sát độc lập;
+người/nguồn xác nhận, độ tin cậy và bất định;
+thuật toán ánh xạ annotation thành target số;
+chính sách cho sự kiện không chắc chắn, thiếu nhãn và nhãn mâu thuẫn.
+Không tự đặt RiskScore 0–1, “xác suất sạt lở”, hoặc nhãn SAFE/WATCH/DANGER nếu chưa có đặc tả và bằng chứng. Nếu mục tiêu thực sự là phân lớp trạng thái SAFE/WATCH/DANGER, phải xem xét ADR thay thế và mô hình classification; không giả vờ rằng output regression là class probability.
+
+10.2 Annotation record schema đề xuất
+=====================================
+{
+  "annotation_schema_version": "1.0",
+  "annotation_id": "ann_<unique-id>",
+  "dataset_id": "ds_<id>",
+  "site_id": "<site-id>",
+  "session_id": "<session-id>",
+  "event_id": null,
+  "interval_start_ms": 0,
+  "interval_end_ms": 0,
+  "utc_start": null,
+  "utc_end": null,
+  "target_name": "TBD",
+  "target_value": null,
+  "target_unit": "TBD",
+  "label_status": "UNLABELED",
+  "evidence_type": "TBD",
+  "evidence_ref": null,
+  "annotator_id": "TBD",
+  "reviewer_id": null,
+  "confidence": null,
+  "uncertainty": null,
+  "label_method_version": "TBD",
+  "notes": "Target contract chưa được phê duyệt"
+}
+Giá trị trong ví dụ chỉ minh họa cấu trúc; không phải nhãn thật. interval_start_ms/interval_end_ms phải cùng boot_id nếu dùng monotonic time; nếu span nhiều boot/session thì dùng UTC đáng tin hoặc định danh segment rõ ràng.
+
+10.3 Quy tắc gán nhãn
+=====================
+Nhãn phải dựa trên ground truth độc lập với các feature đầu vào hoặc phải ghi rõ nếu không độc lập.
+Không gán “DANGER” chỉ từ một ngưỡng tùy ý rồi tuyên bố model học nguy cơ sạt lở thực tế.
+Annotation phải lưu bằng chứng, quy trình, version và reviewer.
+Label uncertainty/conflict phải được giữ lại; không tự chọn nhãn thuận tiện.
+Nếu nhãn là giá trị đo từ thiết bị tham chiếu, ghi thiết bị, đơn vị, calibration, sai số và thời điểm đo.
+Nếu dùng mô phỏng/bench test, gắn data_origin rõ ràng; không trộn lẫn với dữ liệu hiện trường mà không có metadata.
+Không gán nhãn tương lai cho cửa sổ đầu vào nếu định nghĩa target/horizon chưa được nêu rõ.
+
+10.4 Target time alignment
+==========================
+Target có thể mô tả trạng thái cùng thời điểm, giá trị trung bình trong interval, hoặc outcome trong một horizon tương lai; đây là các bài toán khác nhau. DSD không chọn thay dự án. target_alignment_policy và horizon (nếu có) phải được đóng băng trước khi tạo feature/label table.
+
+11. Feature dataset và Edge Impulse
+===================================
+
+11.1 Nguồn chân lý
+==================
+Canonical feature_schema.json cùng SHA-256 là nguồn chuẩn cho mapping feature → model_index. Không dùng thứ tự cột CSV tình cờ làm nguồn chân lý.
+
+11.2 Mỗi feature phải khai báo
+==============================
+feature_id, name, model_index;
+dtype, unit;
+source channel(s);
+công thức/transform/filter;
+valid range và invalid conditions;
+sample rate, window/stride semantics;
+normalization/scaling và tham số;
+missing-data behavior;
+label/target mapping nếu có liên quan;
+verification/golden-vector evidence.
+
+11.3 Feature schema hiện chưa đóng băng
+=======================================
+FEATURE_COUNT, tên/thứ tự feature, sampling rate, window length, stride, filter, scaling, normalization và target đều TBD cho đến khi được xác nhận bằng:
+sensor models, units, mounting/frame và calibration;
+actual Edge Impulse export metadata/input dimensions;
+preprocessing pipeline đã xác định;
+canonical schema + hash;
+host/ESP32-S3 golden vectors trong tolerance được phê duyệt.
+Không dùng số feature, sample count hoặc stride chỉ vì chúng xuất hiện trong ví dụ. Khi hash/dimension/order mismatch, window phải bị reject; không gọi inference cho window đó.
+
+11.4 Feature record schema đề xuất
+==================================
+{
+  "feature_schema_version": "TBD",
+  "schema_id": "TBD",
+  "schema_hash_sha256": "TBD",
+  "dataset_id": "ds_<id>",
+  "window_id": "win_<id>",
+  "site_id": "<site-id>",
+  "session_id": "<session-id>",
+  "boot_id": "<boot-id>",
+  "window_start_ms": 0,
+  "window_end_ms": 0,
+  "window_sample_count": 0,
+  "feature_count": 0,
+  "feature_values": [],
+  "feature_valid": false,
+  "quality_summary": "TBD",
+  "calibration_id": "TBD",
+  "label_id": null,
+  "target_value": null,
+  "split_group_id": null,
+  "split_name": null
+}
+Đây là envelope minh họa. Trường feature_values chỉ được điền khi schema chính thức đã xác định chính xác thứ tự và unit. Không phát hành vector rỗng/giả làm input hợp lệ.
+
+12. Chia tập train / validation / test
+======================================
+
+12.1 Nguyên tắc chống leakage
+=============================
+Chia theo group độc lập: ưu tiên địa điểm/site, sự kiện, session hoặc các block thời gian độc lập phù hợp với mục tiêu triển khai.
+Các cửa sổ chồng lấp hoặc gần nhau về thời gian không được rơi vào các split khác nhau.
+Tất cả window phát sinh từ cùng một event phải nằm cùng split, trừ khi có lý do phương pháp học được phê duyệt và chứng minh không leakage.
+Calibration, normalization, feature selection và hyperparameter tuning chỉ fit trên training data; validation dùng cho lựa chọn; test chỉ dùng đánh giá cuối.
+Không điều chỉnh ngưỡng risk bằng test set.
+Không random-split từng row/window như mặc định.
+Lưu manifest ánh xạ split_group_id → split_name, seed (nếu có), quy tắc và thời điểm split.
+
+12.2 Tỷ lệ split
+================
+DSD không cố định tỷ lệ train/validation/test khi chưa biết số lượng site/event và cấu trúc dữ liệu. Tỷ lệ phải được quyết định trong experiment plan và giải thích. Nếu không có đủ nhóm độc lập để tạo test độc lập, phải báo cáo giới hạn; không giả lập độ tin cậy bằng cách split ngẫu nhiên các cửa sổ tương quan.
+
+12.3 Dataset shift và đại diện dữ liệu
+======================================
+Dataset nên ghi nhận điều kiện khác nhau: loại đất, độ dốc/địa hình nếu có đo, trạng thái ẩm, điều kiện mưa/ướt, nhiệt độ nếu có, vị trí lắp, độ sâu/điểm đặt cảm biến, rung động/nhiễu, thiết lập bench vs field và trạng thái thiết bị. Chỉ lưu dữ liệu thực sự đo/quan sát; không suy đoán giá trị thiếu.
+
+13. Tiền xử lý và cân bằng dữ liệu
+==================================
+Mỗi transform phải có tên, version, tham số và thứ tự áp dụng.
+Fit các tham số phụ thuộc dữ liệu (mean/std, min/max, imputer, feature selection) trên training split בלבד; lưu tham số để replay.
+Không tính normalization độc lập trên toàn bộ dataset trước split.
+Không oversample/augment trước khi split theo group.
+Augmentation chỉ được dùng khi có căn cứ vật lý và phải giữ lại lineage về sample gốc; không tạo biến đổi giả khiến nhãn không còn đúng.
+Nếu dataset mất cân bằng, báo cáo phân bố theo event/site/condition và ảnh hưởng tới metric; không tự xóa các điều kiện khó.
+Mọi loại bỏ record phải có reason code và thống kê số lượng trước/sau lọc.
+
+14. Evaluation protocol
+=======================
+
+14.1 Regression metrics
+=======================
+Tối thiểu báo cáo:
+MAE;
+RMSE;
+số mẫu/nhóm độc lập được đánh giá;
+phân bố residual/error theo site, event, sensor condition, data quality và khoảng target;
+so sánh với baseline đơn giản đã xác định;
+model version, schema hash, dataset manifest hash và preprocessing version.
+Không báo cáo metric mà không nêu unit/scale của target. Nếu target chưa được định nghĩa và xác minh, MAE/RMSE chỉ có ý nghĩa số học và không đủ để khẳng định giá trị cảnh báo.
+
+14.2 Đánh giá các tình huống nguy hiểm
+======================================
+Nếu có ground truth sự kiện đủ tin cậy, đánh giá riêng:
+missed events / false negatives;
+false alarms / false positives;
+lead time trước sự kiện khi target/horizon cho phép;
+độ trễ pipeline;
+kết quả theo điều kiện vận hành và chất lượng dữ liệu;
+tỷ lệ inference bị chặn vì invalid/stale data;
+hành vi khi sensor/model/storage fault.
+Không suy ra khả năng phát hiện sự kiện nguy hiểm chỉ từ MAE/RMSE trung bình. Prototype không được tuyên bố là hệ thống an toàn được chứng nhận.
+
+14.3 Test set discipline
+========================
+Test set được khóa trước lần đánh giá cuối. Mọi lần xem test để lựa chọn feature, threshold hoặc model đều phải ghi là test reuse và làm suy yếu tính độc lập; nếu tiếp tục tuning, cần một test set mới độc lập khi khả thi.
+
+15. Replay, golden vectors và reproducibility
+=============================================
+Mỗi release candidate phải chứa hoặc tham chiếu:
+raw fixture tối thiểu gồm case bình thường, biên, stale, missing, gap, out-of-order, calibration invalid, non-finite và sensor error;
+calibration/config/feature schema/model metadata hashes;
+expected calibrated samples/features/model outputs;
+tolerance riêng cho từng field;
+toolchain, library, Edge Impulse SDK/export version và target board;
+kết quả replay trên host và ESP32-S3;
+report sai khác, không chỉ pass/fail tổng.
+Golden vectors không phải ground truth địa chất. Chúng kiểm tra tính nhất quán của implementation/preprocessing/model export. Expected values phải được tạo từ nguồn có kiểm soát, review và version hóa.
+
+16. Dataset manifest và lineage
+===============================
+Mỗi dataset release MUST có dataset_manifest.json tối thiểu chứa:
+{
+  "manifest_schema_version": "1.0",
+  "dataset_id": "ds_<unique-id>",
+  "dataset_version": "1.0.0",
+  "status": "DRAFT",
+  "created_utc": null,
+  "time_status": "UNSYNCED",
+  "source_spec_revision": "TBD",
+  "lld_revision": "TBD",
+  "icd_revision": "1.1",
+  "dsd_revision": "1.0",
+  "raw_schema_version": "TBD",
+  "annotation_schema_version": "1.0",
+  "feature_schema_version": "TBD",
+  "feature_schema_sha256": null,
+  "target_name": "TBD",
+  "target_unit": "TBD",
+  "label_method_version": "TBD",
+  "calibration_ids": [],
+  "device_ids": [],
+  "site_ids": [],
+  "session_ids": [],
+  "split_policy_version": "TBD",
+  "split_group_map_sha256": null,
+  "preprocessing_code_revision": "TBD",
+  "firmware_version": "TBD",
+  "model_version": null,
+  "model_sha256": null,
+  "files": [],
+  "reviewers": [],
+  "approval_status": "NOT_APPROVED",
+  "known_limitations": [
+    "Regression target semantics chưa được phê duyệt",
+    "Sensor models/calibration và feature schema còn TBD"
+  ]
+}
+Mỗi entry trong files nên có path, role, format, record_count, size_bytes, sha256, schema_version, split_name (nếu áp dụng), created_by_pipeline_version. Hash phải được tính trên byte chính xác của artifact được phát hành. Không dùng version string thay cho hash.
+Lineage phải cho phép truy ngược:
+model artifact → training run → split manifest → feature dataset → raw samples/annotations → calibration/sensor/device/session → code/config/schema versions.
+
+17. Quản lý phiên bản và thay đổi
+=================================
+Tăng version hoặc tạo schema mới khi thay đổi:
+field name/type/unit/meaning, timestamp semantics hoặc quality encoding;
+sensor model/revision, calibration method hoặc physical transform;
+sample rate, filter, window, stride, feature formula/order/scaling;
+target semantics, label method, alignment/horizon;
+split policy, preprocessing hoặc evaluation protocol;
+serialization format hoặc manifest contract.
+Mọi change record phải ghi: change ID, lý do, artifact bị ảnh hưởng, tương thích ngược, migration/rejection behavior, test evidence, hashes, reviewer và approval. Không sửa dataset release đã phát hành tại chỗ; tạo version mới và giữ lại lineage.
+
+18. Bảo mật, quyền riêng tư và retention
+========================================
+Không đưa thông tin nhận dạng cá nhân vào dataset nếu không cần thiết.
+Site/device identifiers nên dùng ID dự án; vị trí chính xác chỉ lưu khi có nhu cầu và quyền truy cập được kiểm soát.
+Raw data, annotation và derived feature cần quyền truy cập và retention policy riêng.
+Không tự xóa raw data chưa được backup/đánh giá theo retention policy.
+Kiểm tra file hash, tính toàn vẹn và quyền ghi trước khi dùng dữ liệu cho training.
+Khi có lỗi lưu trữ, phải báo cáo record/file bị thiếu; không tuyên bố dataset đầy đủ.
+Chính sách retention cụ thể là TBD cho đến khi owner phê duyệt.
+
+19. Vai trò và trách nhiệm
+==========================
+
+Vai trò | Trách nhiệm chính
+Data owner | Phê duyệt mục đích sử dụng, quyền truy cập, retention và dataset release
+Sensor/calibration owner | Xác nhận model, unit, range, calibration, mounting và quality policy
+ML owner | Target/label contract, feature schema, split, training, metrics, Model Card
+Firmware owner | Log schema, timestamp, quality propagation, replay trên target, artifact hashes
+System/risk reviewer | Xem xét ý nghĩa target, giới hạn sử dụng, hazard-related evaluation và RiskConfig tách biệt
+Reviewer/approver | Kiểm tra độc lập lineage, leakage, evidence và acceptance checklist
+
+Một người có thể đảm nhiệm nhiều vai trò trong prototype nhỏ, nhưng các quyết định quan trọng về nhãn và release nên có review độc lập khi khả thi.
+
+20. Acceptance criteria và release gates
+========================================
+
+20.1 Data collection gate
+=========================
+☐ Board/device/sensor IDs và sensor models đã được xác nhận.
+☐ Raw values, units/encoding, timestamp và sequence semantics được ghi rõ.
+☐ Calibration report có version và gắn đúng sensor revision.
+☐ Data quality policy có range/freshness/missing rules được duyệt theo từng channel.
+☐ Không có zero-imputation hoặc silent row truncation.
+☐ Event/session metadata và provenance đủ để tái tạo bối cảnh.
+
+20.2 Label/feature gate
+=======================
+☐ Regression target, unit, range, alignment/horizon và labeling method được phê duyệt.
+☐ Nhãn có evidence/source/reviewer và uncertainty/conflict được giữ lại.
+☐ `feature_schema.json` canonical có feature IDs, formulas, units, order, scaling và hash.
+☐ Feature dimension/order khớp model metadata thực tế.
+☐ Golden vectors pass trên host và ESP32-S3 trong tolerance được duyệt.
+☐ Invalid/stale/gap/calibration-invalid data không lọt vào inference trái policy.
+
+20.3 Training/evaluation gate
+=============================
+☐ Split group độc lập và không leakage từ overlapping windows.
+☐ Preprocessing fit trên training split; test set không dùng để tune.
+☐ Báo cáo MAE/RMSE cùng unit/scale và error analysis theo điều kiện.
+☐ Có đánh giá dangerous-case misses/false alarms nếu ground truth cho phép.
+☐ Manifest, hashes, code revision, model metadata và Model Card đầy đủ.
+☐ Limitations và dữ liệu chưa đại diện được công bố.
+
+20.4 Release blocker
+====================
+Không phát hành model cho inference hiện trường nếu một trong các điều kiện sau chưa đạt:
+target/label semantics chưa rõ;
+sensor unit/calibration cần thiết chưa xác minh;
+feature schema/hash/model input metadata không khớp;
+split có leakage chưa được xử lý;
+invalid data có thể đi vào model;
+golden/replay compatibility chưa đạt;
+manifest/lineage/hash thiếu;
+đánh giá chưa đủ để hỗ trợ tuyên bố dự định sử dụng.
+Có thể phát hành sensor-logging/diagnostic dataset để thu thập dữ liệu tiếp tục nếu trạng thái draft, channel chưa xác minh và giới hạn sử dụng được ghi rõ. Không gọi đó là model-ready dataset.
+
+21. Danh sách TBD cần đóng
+==========================
+
+ID | TBD | Evidence cần có | Owner gợi ý | Tác động
+DSD-TBD-01 | Board/module, flash/PSRAM, firmware/toolchain baseline | BOM + build manifest | Firmware/hardware | Reproducibility
+DSD-TBD-02 | MPU9250 module/revision, axes, range, ODR, coordinate frame, I2C pin/address/clock | Datasheet + bench/HIL | Sensor owner | Sensor/feature schema
+DSD-TBD-03 | Soil sensor model, raw semantics, unit/range/calibration | Datasheet + calibration report | Sensor owner | Feature eligibility
+DSD-TBD-04 | YL-83 output semantics/calibration | Calibration against reference method | Sensor owner | Không được gọi là rainfall trước khi duyệt
+DSD-TBD-05 | HX710B transducer and measured quantity/unit/range/zero-span | Transducer spec + calibration | System/sensor owner | Feature schema blocker
+DSD-TBD-06 | Sampling rate, window, stride, filtering/resampling | Actual model pipeline + target measurements | ML/firmware | Feature schema blocker
+DSD-TBD-07 | Regression target, unit/range, label evidence and alignment | Approved target contract + annotation SOP | ML/system | Model release blocker
+DSD-TBD-08 | Feature list/order/scaling and schema hash | feature_schema.json + model metadata | ML/firmware | Inference blocker
+DSD-TBD-09 | Split groups and minimum independent event/site count | Split manifest + experiment plan | ML/data owner | Evaluation validity
+DSD-TBD-10 | Per-channel range/freshness/missing policy | Quality policy + sensor tests | Sensor/firmware | Data eligibility
+DSD-TBD-11 | Storage format/retention/backup/record count checks | Storage test + policy | Data/firmware | Data integrity
+DSD-TBD-12 | Evaluation acceptance thresholds | Approved experiment plan / risk review | ML/system reviewer | Model claims
+
+
+22. Tóm tắt trạng thái DSD v1.0
+===============================
+DSD v1.0 xác định cấu trúc quản trị dữ liệu và quy tắc chống lỗi dữ liệu/leakage. Nó không đóng băng feature schema, không định nghĩa nhãn RiskScore và không khẳng định cảm biến YL-83 đo rainfall hoặc HX710B đo một đại lượng cụ thể.
+Trước khi huấn luyện model có thể phát hành, dự án phải đóng các TBD ảnh hưởng đến target, sensor calibration, feature schema, split independence và model metadata. Tất cả output regression phải được gọi là model_value/model_score cho đến khi target có ý nghĩa và unit được phê duyệt; không gọi là xác suất sạt lở.
+END OF DSD v1.0
+---
+
+23. Companion specifications and governance linkage (v1.1 addendum)
+===================================================================
+DSD v1.1 is to be read with these controlled companion artifacts:
+FSS-LANDSLIDE-ESP32S3-001 v1.0 — feature/channel definitions, formulas, units, eligibility and Edge Impulse input compatibility.
+DOP-LANDSLIDE-ESP32S3-001 v1.0 — Labeling SOP, Ground Truth Protocol, Collection Campaign Plan, Coverage Matrix, Quality KPIs, Freeze Process, Experiment Tracking Contract, Model Selection Protocol and Dataset Risk Register.
+The companion artifacts are currently DRAFT. Their existence does not close unresolved project TBDs.
+
+23.1 Authority
+==============
+DSD owns dataset lifecycle, provenance, raw/calibrated/label/split/manifest conventions.
+FSS owns feature definitions, source mappings, formulas, units, feature indexes and model-input compatibility.
+DOP owns collection operations, annotation workflow, ground-truth evidence, quality KPI reporting, freeze governance and experiment/model-selection records.
+ICD owns firmware interface semantics and data-quality/status contracts.
+LLD owns component/runtime implementation design.
+Actual Edge Impulse export metadata and the approved target contract are required evidence; no document may override them by assumption.
+
+23.2 Release gating
+===================
+A dataset/model release is blocked until the target/ground-truth protocol is approved, the feature schema matches the actual model input, data quality and coverage gates are reviewed, split leakage audit passes, frozen artifacts are hashed, and golden/replay tests pass. If only sensor logging is validated, release it as diagnostic collection data and explicitly mark it not model-ready.
+
+23.3 Versioning
+===============
+Any change to feature ID/order/formula/unit, target semantics, sampling/window/stride, calibration transform, quality eligibility, split policy or preprocessing requires a versioned artifact and updated hashes. Frozen dataset bytes and completed experiment records must never be edited in place.
+END OF DSD v1.1 ADDENDUM
+
+
+DSD v1.2 CHANGE NOTE — MPU9250/I2C BASELINE (2026-10-29)
+================================================
+Decision status: SELECTED — IMU model = MPU9250; host interface = I2C.
+This decision supersedes any earlier wording that described the MPU9250 interface as “I2C/SPI TBD” or “I2C or SPI”.
+
+Normative requirements:
+1. The MPU9250 shall be accessed through the ESP32-S3 I2C controller and a dedicated MPU9250 driver; it shall not be read as an analog voltage through the ESP32-S3 ADC.
+2. The driver shall perform bounded bus transactions, device/identity validation where supported by the module, register configuration, sample acquisition, and explicit status/error reporting. No infinite waits and no fabricated zero samples are permitted.
+3. Keep raw register/count values separate from converted physical values. Acceleration scale/unit, gyro usage and scale, axis orientation, mounting transform, output data rate (ODR), digital low-pass filter, sample period, bus clock, SDA/SCL GPIO, I2C address, pull-ups/electrical details, and calibration coefficients remain TBD until confirmed from the actual board/module, datasheet, schematic and bench test. Do not infer these values from the sensor name alone.
+4. Timestamp and sequence each sample; expose per-channel validity and freshness. Detect I2C timeout/bus error, invalid device identity if applicable, stale/missing samples, and recovery attempts. A failed read must not be represented as a valid measurement.
+5. The downstream SensorFrame, dataset raw record, calibrated channels and Edge Impulse input contract must preserve unit, coordinate-frame, calibration/version and quality metadata. This change does not approve any feature as a model input or freeze sampling/window/model semantics.
+6. Verify the exact breakout/module voltage compatibility and I2C pull-up arrangement before connecting it to ESP32-S3. The chosen I2C bus pins and clock rate are board configuration items and remain TBD.
+
+Acceptance evidence required before hardware baseline freeze:
+- Confirmed BOM/module and datasheet revision; schematic/pin map; I2C address and electrical-level review.
+- Cold/warm initialization and repeated read test; device identity/configuration check where supported.
+- Bench test of all three acceleration axes and sign/orientation; scale/unit comparison against a suitable reference; gyro checks if gyro channels are used.
+- Fault injection or test fixture for disconnected sensor, timeout, bus error, stale data and recovery.
+- Captured test report and versioned driver/configuration.
+
+Status remains DRAFT. No GPIO, I2C clock, range, ODR, filter, unit conversion, calibration, or model input value is approved by this change note unless separately verified.
+
+DSD-specific requirement: raw dataset must preserve MPU9250 raw register/count representation and driver status before any conversion; calibrated physical columns require a named calibration/configuration version. Store bus/device errors and sample sequence/timestamp/validity. Never merge raw counts and physical values under the same field name.

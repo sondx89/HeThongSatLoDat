@@ -1,0 +1,101 @@
+Feature Schema Specification (FSS)
+Document ID: FSS-LANDSLIDE-ESP32S3-001
+Version: 1.1
+Status: DRAFT — candidate schema only
+Date: 2026-10-29
+Related: DSD v1.2, ICD v1.2, LLD v1.3; candidate schema only, actual Edge Impulse metadata controls runtime input contract
+
+1. Purpose and authority
+========================
+FSS is the canonical contract for mapping source channels into model inputs. The machine-readable JSON file is the schema artifact; this document explains its rules. The final feature_schema.json and its SHA-256 must match the exact Edge Impulse deployment input contract. This draft deliberately does not assign final model indexes because the actual sensor model, preprocessing, sampling/window configuration, and Edge Impulse model metadata are not yet available.
+
+2. Status semantics
+===================
+CANDIDATE: source channel proposal, not yet approved.
+CONDITIONAL_CANDIDATE: mathematically defined candidate whose physical interpretation depends on mounting, calibration, filtering and test evidence.
+DIAGNOSTIC_ONLY_PENDING_CALIBRATION / ...CHARACTERIZATION / ...TRANSDUCER: retain for engineering diagnostics, not approved as model input.
+model_input_eligible=false: explicit release block; do not train or infer with this feature until approval is recorded.
+
+3. Canonical JSON
+=================
+See FSS_Feature_Schema_Specification_ESP32S3_EdgeImpulse_v1.0.json. Each feature defines ID, index, source, dtype, unit, formula, valid-range basis, quality requirements, missing-data policy, eligibility and verification evidence.
+
+4. Candidate feature catalogue
+==============================
+
+ID | Definition | Unit | Status | Main caveat
+accel_x_raw | Direct MPU9250 X-axis sample | Raw count or calibrated unit TBD | Candidate | I2C selected; module/configuration, scale/frame/range/ODR still TBD
+accel_y_raw | Direct MPU9250 Y-axis sample | Raw count or calibrated unit TBD | Candidate | I2C selected; module/configuration, scale/frame/range/ODR still TBD
+accel_z_raw | Direct MPU9250 Z-axis sample | Raw count or calibrated unit TBD | Candidate | I2C selected; module/configuration, scale/frame/range/ODR still TBD
+accel_magnitude | sqrt(ax² + ay² + az²) | m/s² only if source axes use m/s² | Conditional | All axes valid, same frame/time and calibrated
+tilt_x_deg | Candidate static accelerometer tilt estimate | degree | Conditional | Formula/sign convention and gravity-dominant assumption must be tested
+tilt_y_deg | Candidate static accelerometer tilt estimate | degree | Conditional | Formula/sign convention and gravity-dominant assumption must be tested
+soil_raw | Direct soil sensor output | Raw/ADC units TBD | Diagnostic only | Sensor model and moisture calibration unknown
+yl83_raw | Direct YL-83 output | Raw/ADC units TBD | Diagnostic only | Not rainfall without validated calibration
+hx710b_raw | Direct HX710B ADC reading | Raw counts | Diagnostic only | Transducer and measured physical quantity unknown
+
+Important: The catalogue is not a claim that all nine entries should be model inputs. Edge Impulse may expect raw time-series windows rather than a hand-engineered feature vector. The actual export metadata determines the input contract.
+
+5. Tilt feature caution
+=======================
+Candidate formulae:
+tilt_x_deg = atan2(ay, sqrt(ax² + az²)) × 180/π
+tilt_y_deg = atan2(-ax, sqrt(ay² + az²)) × 180/π
+These are candidate static-acceleration estimates only. They can be misleading under dynamic acceleration, incorrect axis orientation, vibration, or unknown mounting. Before approval, perform a reference-inclinometer sweep, sign/axis verification, repeatability tests and dynamic-motion characterization. The valid range of [-90, 90] is a mathematical convention for these formulae, not proof that all readings in the range are physically valid.
+
+6. Numeric and missing-data rules
+=================================
+Reject NaN/Infinity and integer overflow; never emit bare NaN/Infinity in JSON/CSV.
+Preserve raw values and store calibrated values separately with calibration ID.
+No implicit unit conversion; every transform declares input/output units.
+Invalid required channel → invalid derived feature; do not coerce to zero.
+Do not silently hold-last, interpolate, or impute. Such behavior requires an approved, versioned policy.
+Feature order is defined by index only after approval; indexes must be contiguous and unique for a flat vector.
+Any change to formula, unit, index/order, filter, scaling, input shape or missing policy requires a schema version change and new hash.
+
+7. Edge Impulse compatibility gate
+==================================
+Before assigning final indexes:
+Export the actual model/deployment metadata.
+Decide whether model input is raw time-series or engineered features.
+Freeze sample rate, window length, stride, channel order, preprocessing and scaling.
+Create golden vectors for normal, boundary and invalid cases.
+Compare host pipeline and ESP32-S3 output within per-feature tolerances.
+Generate SHA-256 of the exact released JSON artifact and reference it from dataset/model manifests.
+
+8. Approval checklist
+=====================
+☐ MPU9250 selected with I2C; module revision, configuration and channel units still require confirmation.
+☐ Calibration and quality policies approved.
+☐ Feature formulas and coordinate frame reviewed.
+☐ Sampling/window/stride/preprocessing frozen.
+☐ Target and label alignment approved.
+☐ Actual Edge Impulse input contract matches the schema.
+☐ Golden vectors pass on host and target.
+☐ Schema hash, owner, reviewer and approval date recorded.
+End of FSS v1.1
+
+
+FSS v1.1 CHANGE NOTE — MPU9250/I2C BASELINE (2026-10-29)
+================================================
+Decision status: SELECTED — IMU model = MPU9250; host interface = I2C.
+This decision supersedes any earlier wording that described the MPU9250 interface as “I2C/SPI TBD” or “I2C or SPI”.
+
+Normative requirements:
+1. The MPU9250 shall be accessed through the ESP32-S3 I2C controller and a dedicated MPU9250 driver; it shall not be read as an analog voltage through the ESP32-S3 ADC.
+2. The driver shall perform bounded bus transactions, device/identity validation where supported by the module, register configuration, sample acquisition, and explicit status/error reporting. No infinite waits and no fabricated zero samples are permitted.
+3. Keep raw register/count values separate from converted physical values. Acceleration scale/unit, gyro usage and scale, axis orientation, mounting transform, output data rate (ODR), digital low-pass filter, sample period, bus clock, SDA/SCL GPIO, I2C address, pull-ups/electrical details, and calibration coefficients remain TBD until confirmed from the actual board/module, datasheet, schematic and bench test. Do not infer these values from the sensor name alone.
+4. Timestamp and sequence each sample; expose per-channel validity and freshness. Detect I2C timeout/bus error, invalid device identity if applicable, stale/missing samples, and recovery attempts. A failed read must not be represented as a valid measurement.
+5. The downstream SensorFrame, dataset raw record, calibrated channels and Edge Impulse input contract must preserve unit, coordinate-frame, calibration/version and quality metadata. This change does not approve any feature as a model input or freeze sampling/window/model semantics.
+6. Verify the exact breakout/module voltage compatibility and I2C pull-up arrangement before connecting it to ESP32-S3. The chosen I2C bus pins and clock rate are board configuration items and remain TBD.
+
+Acceptance evidence required before hardware baseline freeze:
+- Confirmed BOM/module and datasheet revision; schematic/pin map; I2C address and electrical-level review.
+- Cold/warm initialization and repeated read test; device identity/configuration check where supported.
+- Bench test of all three acceleration axes and sign/orientation; scale/unit comparison against a suitable reference; gyro checks if gyro channels are used.
+- Fault injection or test fixture for disconnected sensor, timeout, bus error, stale data and recovery.
+- Captured test report and versioned driver/configuration.
+
+Status remains DRAFT. No GPIO, I2C clock, range, ODR, filter, unit conversion, calibration, or model input value is approved by this change note unless separately verified.
+
+FSS-specific interpretation: accel_x_raw/accel_y_raw/accel_z_raw remain candidate channels. Their raw encoding and physical-unit transforms must be defined from the selected MPU9250 module/configuration and validated driver. The interface choice alone does not approve model-input eligibility or feature order.

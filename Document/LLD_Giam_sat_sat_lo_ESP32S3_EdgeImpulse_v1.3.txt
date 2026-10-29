@@ -1,0 +1,1962 @@
+LOW LEVEL DESIGN (LLD)
+HỆ THỐNG GIÁM SÁT NGUY CƠ SẠT LỞ ĐẤT
+ESP32-S3 + ARDUINO/PLATFORMIO + EDGE IMPULSE
+LLD v1.3 | Ngày 2026-10-29
+Bản sửa đổi: bổ sung Feature Schema Contract, thiết kế chi tiết và baseline giao tiếp MPU9250 qua I2C.
+Cơ sở: Đặc tả kỹ thuật Mức B, phiên bản 1.5; ICD v1.2
+
+================================================================================
+0. KIỂM SOÁT TÀI LIỆU VÀ GIỚI HẠN
+================================================================================
+Mục tiêu: chuyển đặc tả v1.4 thành thiết kế mức thấp gồm module, API, dữ liệu,
+FreeRTOS tasks/queues, thuật toán, xử lý lỗi, logging, cấu hình, replay và test.
+
+Phạm vi:
+- MCU ESP32-S3; VS Code + PlatformIO; framework Arduino-ESP32/FreeRTOS.
+- Inference C++ offline bằng model Edge Impulse export.
+- Cảm biến dự kiến: MPU9250, cảm biến độ ẩm đất, YL-83 và HX710B + đầu đo vật lý.
+- Ghi log SD nếu phần cứng có; Serial dùng chẩn đoán.
+- Mức B: prototype thử nghiệm hiện trường, chưa phải hệ thống an toàn được chứng nhận.
+
+Quy ước:
+[CHỌN] là quyết định kiến trúc của LLD.
+[TBD] là dữ liệu chưa được xác minh, không được tự điền theo phỏng đoán.
+[ĐỀ XUẤT] là giá trị/biện pháp khởi điểm cần kiểm chứng.
+
+Các điểm TBD bắt buộc trước release:
+- Board/module ESP32-S3 chính xác, flash/PSRAM, pin map và điện áp; MPU9250 dùng I2C đã chọn nhưng SDA/SCL GPIO, address, clock và điện áp module vẫn TBD.
+- Mã cảm biến/đầu đo HX710B và đại lượng vật lý được đo.
+- Tần số từng sensor, feature schema/window/stride và model input/output.
+- Regression target/label, scaling, RiskConfig, ngưỡng và hysteresis.
+- PlatformIO board ID, framework/SDK versions, task priorities/stacks/queue depth.
+- RAM/Flash budget, watchdog timeout, retention và policy khi lỗi đồng thời.
+- Có/không còi/đèn/relay và khả năng feedback.
+- OTA mặc định DISABLED cho tới khi partition/rollback được kiểm chứng.
+
+Cảnh báo an toàn: không dùng thiết bị làm căn cứ duy nhất để sơ tán, cho phép
+tiếp tục thi công hoặc quyết định an toàn sinh mạng. Không coi output regression
+là xác suất sạt lở nếu chưa có quy trình calibration và đánh giá độc lập.
+
+================================================================================
+1. KIẾN TRÚC THỰC THI
+================================================================================
+Luồng chính:
+Sensor drivers -> SensorManager -> SensorFrame -> Calibration/DataQuality
+-> FeaturePipeline/window -> InferenceEngine (nếu input hợp lệ)
+-> RiskManager + rule engine độc lập với AI -> RiskAssessment
+-> OutputController + EventLogger + HealthMonitor.
+
+Luồng hỗ trợ:
+- ConfigManager xác thực manifest/model/feature/calibration/risk config trước inference.
+- Logger nhận record qua queue và là nơi duy nhất ghi SD.
+- HealthMonitor thu thập metrics; WatchdogSupervisor giám sát progress.
+- USB/Serial dùng nạp firmware, chẩn đoán và export; không phải runtime dependency.
+
+Tách hai chiều trạng thái:
+RiskState = STARTUP, NORMAL, MONITOR, DANGER_TEST, UNKNOWN.
+HealthState = UNKNOWN, HEALTHY, DEGRADED, FAULT.
+Fault flags có thể gồm SENSOR_FAULT, MODEL_ERROR, STORAGE_ERROR, CONFIG_ERROR,
+TIME_UNSYNC, OUTPUT_FAULT, DATA_INVALID, QUEUE_OVERFLOW, WATCHDOG_RECOVERY.
+Không ép các fault vào một enum duy nhất. NORMAL + FAULT/UNKNOWN không được hiển
+thị như “mọi thứ bình thường”.
+
+Nguyên tắc concurrency:
+- Mỗi queue/ring buffer có producer/consumer và ownership rõ ràng.
+- Không để inference/SD block acquisition.
+- Không giữ mutex khi gọi API latency không giới hạn.
+- Không gọi API blocking từ ISR.
+- Queue chứa bản sao kích thước cố định hoặc object pool có ownership xác định.
+- Không cấp phát heap không giới hạn trong sampling loop.
+
+================================================================================
+2. FREERTOS TASKS VÀ QUEUES
+================================================================================
+2.1 Task responsibilities
+
+T-SENSOR / TaskSensorAcq
+- Đọc sensor theo lịch riêng; gán boot_id, sequence_no, timestamp_ms.
+- Tạo SensorFrame có valid_mask, quality_flags, sensor_status_bits.
+- Đẩy Q_SENSOR; không chạy inference/ghi SD.
+- Heartbeat chỉ tăng sau acquisition progress thực.
+- Khi đọc lỗi: ghi status/error; không thay bằng zero giả.
+
+T-PIPE / TaskDataQualityFeature
+- Nhận Q_SENSOR; kiểm tra freshness, range, timestamp, calibration.
+- Calibrate/filter, cập nhật window; chỉ xuất FeatureVector khi đủ mẫu/hợp lệ.
+- Phát validation report/event nếu invalid; không gửi vector sai schema.
+
+T-INFER / TaskInference
+- Nhận Q_FEATURE; kiểm tra schema, dimension và model compatibility.
+- Gọi một inference tại một thời điểm trên instance model.
+- Xác thực output hữu hạn, đúng số chiều và output contract.
+- Đẩy ModelOutput kể cả khi lỗi để downstream xử lý trạng thái invalid.
+
+T-RISK / TaskRiskManager
+- Hợp nhất model output, sensor rules, data quality và health.
+- Rule engine vẫn chạy khi AI lỗi.
+- Cập nhật RiskState, persistence/hysteresis và phát event khi đổi trạng thái.
+- Không truy cập driver/SD trực tiếp.
+
+T-LOG / TaskLogger
+- Là task duy nhất ghi sample/event/health xuống storage.
+- Quản lý flush, rotation, dung lượng, recovery và write errors.
+- Retry hữu hạn/backoff; không block pipeline.
+- Queue overflow phải đếm và áp dụng policy, không được im lặng tuyên bố log đủ.
+
+T-HEALTH / TaskDiagnostics
+- Thu heap/stack/timing/sensor freshness/inference/storage/task metrics.
+- Đánh giá HealthState; phát event khi vượt ngưỡng hoặc đổi trạng thái.
+- Không log lặp lại mỗi chu kỳ khi trạng thái không đổi.
+
+T-WDT / TaskWatchdogSupervisor
+- Kiểm tra heartbeat/progress và deadline của task thiết yếu.
+- Feed watchdog chỉ khi policy health/deadline đạt.
+- Không feed vô điều kiện chỉ vì supervisor còn chạy.
+- Timeout dựa trên phép đo WCET/latency và margin.
+
+T-OUTPUT / TaskOutput (nếu có)
+- Nhận RiskAssessment, điều khiển LED/còi/relay.
+- Đọc feedback nếu phần cứng hỗ trợ.
+- Tách command state khỏi verified output state.
+
+2.2 Queue contract
+
+Q_SENSOR: SensorFrame; T-SENSOR -> T-PIPE.
+Full policy: không block vô hạn; tăng overflow/drop counter, ghi sample gap khi có thể.
+
+Q_FEATURE: FeatureVector; T-PIPE -> T-INFER.
+Full policy: drop/latest theo policy đã duyệt; counter bắt buộc.
+
+Q_MODEL: ModelOutput; T-INFER -> T-RISK.
+Full policy: không làm nghẽn acquisition; ghi lỗi/overflow.
+
+Q_RISK: RiskAssessment; T-RISK -> T-OUTPUT/telemetry.
+State hiện tại có thể dùng latest value; event state-transition phải có policy
+ưu tiên riêng để không mất âm thầm.
+
+Q_LOG: LogRecord tagged union; producers gọi logger facade, T-LOG ghi storage.
+Ưu tiên event CRITICAL/state transition hơn sample định kỳ; đếm dropped samples.
+Queue depth TBD theo sample rate, worst-case latency và RAM budget.
+
+2.3 Task timing/resources
+Không chốt priority, stack hoặc queue depth trước khi đo trên board/model thật.
+Cần đo WCET sensor, feature, inference, SD; stack high-water từng task; heap low
+water; queue high-water; starvation/priority inversion. Đặc tả đặt mục tiêu chu kỳ
+tổng thể khoảng 1 giây, nhưng timing cuối phải dựa vào sensor và model thật.
+Sensor có chu kỳ khác nhau phải có freshness timeout riêng.
+
+================================================================================
+3. SOURCE TREE ĐỀ XUẤT
+================================================================================
+project/
+  platformio.ini
+  README.md
+  include/
+    AppConfig.h
+    BoardPins.h
+    TaskConfig.h
+    DataTypes.h
+    Status.h
+    ErrorCodes.h
+    EventIds.h
+    ManifestTypes.h
+    FeatureSchema.h
+    RiskConfig.h
+  src/
+    main.cpp
+    app/AppController.cpp
+    platform/ClockService.cpp
+    platform/WatchdogAdapter.cpp
+    platform/StorageAdapter.cpp
+    drivers/Mpu9250Driver.cpp  // I2C-only interface for selected MPU9250
+    drivers/SoilMoistureDriver.cpp
+    drivers/RainSensorDriver.cpp
+    drivers/Hx710bDriver.cpp
+    drivers/SdCardDriver.cpp
+    drivers/AlarmOutputDriver.cpp
+    services/SensorManager.cpp
+    services/CalibrationService.cpp
+    services/DataQualityService.cpp
+    services/FeaturePipeline.cpp
+    services/InferenceEngine.cpp
+    services/RiskManager.cpp
+    services/ConfigManager.cpp
+    services/ManifestValidator.cpp
+    services/EventLogger.cpp
+    services/HealthMonitor.cpp
+    services/WatchdogSupervisor.cpp
+    services/OutputController.cpp
+    tasks/TaskSensorAcq.cpp
+    tasks/TaskDataQualityFeature.cpp
+    tasks/TaskInference.cpp
+    tasks/TaskRiskManager.cpp
+    tasks/TaskLogger.cpp
+    tasks/TaskDiagnostics.cpp
+    tasks/TaskWatchdogSupervisor.cpp
+    tasks/TaskOutput.cpp
+    storage/CsvSerializer.cpp
+    storage/EventSerializer.cpp
+    storage/FileRotation.cpp
+    model/edge_impulse/       (Edge Impulse generated library)
+  test/
+    test_data_dictionary.cpp
+    test_feature_pipeline.cpp
+    test_risk_manager.cpp
+    test_manifest_validator.cpp
+    test_serializers.cpp
+  tools/replay/               (host tool, not ESP32 runtime)
+  docs/LLD.txt
+
+Tên file là đề xuất, chưa có nghĩa source đã được triển khai. Giữ cấu trúc
+Edge Impulse export chính thức. Pin literal chỉ được đặt trong BoardPins.h.
+
+================================================================================
+4. DATA TYPES VÀ SERIALIZATION CONTRACT
+================================================================================
+4.1 Quy tắc
+- Dùng <cstdint>; không dùng int/long cho format binary xuyên nền tảng.
+- Raw và calibrated values phải phân biệt.
+- Giá trị invalid có validity/quality flag; không dùng 0 làm “không biết”.
+- timestamp_ms là monotonic trong cùng boot; cần ghép boot_id khi so sánh phiên.
+- Không ghi raw C++ struct trực tiếp ra file do padding/alignment có thể đổi.
+- Feature order/unit/normalization/window/stride version hóa cùng model.
+
+4.2 Enum logic
+Status:
+OK, INVALID_ARGUMENT, NOT_INITIALIZED, TIMEOUT, IO_ERROR, DATA_INVALID,
+STALE_DATA, BUFFER_FULL, NOT_SUPPORTED, VERSION_MISMATCH,
+RESOURCE_EXHAUSTED, INTERNAL_ERROR, BUSY, CANCELLED.
+
+RiskState:
+STARTUP, NORMAL, MONITOR, DANGER_TEST, UNKNOWN.
+HealthState:
+HEALTHY, DEGRADED, FAULT, UNKNOWN.
+InferenceStatus:
+OK, INVALID_INPUT, MODEL_ERROR, NONFINITE_OUTPUT, VERSION_MISMATCH, TIMEOUT.
+AlarmOutputState:
+OFF, ON, FAILED, NOT_PRESENT, NOT_VERIFIABLE.
+
+Serialization phải dùng tên enum ổn định; không dựa vào ordinal nếu cần tương thích
+file lâu dài.
+
+4.3 SensorFrame (logic; điều chỉnh theo sensor thực tế)
+- schema_version: uint32
+- boot_id: uint32/uint64
+- sequence_no: uint64
+- timestamp_ms: uint64
+- imu_ax_raw/imu_ay_raw/imu_az_raw: int32
+- imu_gx_raw/imu_gy_raw/imu_gz_raw: int32 (nếu gyro được dùng)
+- accel_x_g/accel_y_g/accel_z_g: float32
+- gyro_x_dps/gyro_y_dps/gyro_z_dps: float32
+- tilt_roll_deg/tilt_pitch_deg/accel_magnitude: float32
+- soil_moisture_raw: int32; soil_moisture_relative_pct: float32
+- rain_raw: int32; rain_wetness_relative_pct: float32
+- hx710_raw: int32; calibrated_measurement: float32
+- valid_mask, quality_flags, sensor_status_bits: uint32
+- calibration_version: uint32
+
+Không dùng pressure_kpa/load_kg nếu đầu đo HX710B chưa được xác định và hiệu chuẩn.
+
+4.4 FeatureVector
+- schema_version, window_sample_count: uint32
+- window_start_ms, window_end_ms: uint64
+- feature_valid_mask
+- values[FEATURE_COUNT]: float32
+FEATURE_COUNT, order, unit, scaling phải lấy từ model thật, không tự đặt.
+
+4.5 ModelOutput
+- inference_id: uint64
+- inference_start_ms: uint64
+- inference_duration_ms: uint32
+- raw_output[MODEL_OUTPUT_COUNT]: float32
+- prediction_value: float32
+- prediction_valid: bool
+- inference_status
+MODEL_OUTPUT_COUNT/target/scaling phụ thuộc model export.
+
+4.6 RiskAssessment
+- timestamp_ms, risk_state, health_state
+- risk_score + risk_score_valid
+- active_fault_flags
+- decision_reason_code
+- state_enter_ms, persistence_ms
+- alarm_output_state
+- risk_config_version
+
+4.7 EventRecord
+event_id, event_name, severity, timestamp_ms, boot_id, event_sequence_no,
+source_task, sensor_id, manifest_id, firmware_version, model_version,
+risk_config_version, state_before, state_after, error_code, value, unit,
+message, record_crc (nếu hỗ trợ).
+
+4.8 Schema version
+Mỗi file có schema_version + manifest reference. Đổi đơn vị/ý nghĩa/order feature
+là thay đổi schema. Parser phải reject/mark unsupported khi schema không tương thích.
+NaN/Inf không được ghi như số hợp lệ. Không ghi secret vào manifest/log.
+
+================================================================================
+5. API CONTRACT NỘI BỘ
+================================================================================
+5.1 SensorManager
+Status init(const SensorConfig&);
+Status readLatest(SensorFrame& out, uint32_t timeoutMs);
+SensorHealth getHealth() const;
+Status resetSensor(SensorId);
+Contract: timeout không trả mẫu cũ như mới; caller sở hữu out; mỗi field invalid
+phải được đánh dấu; reset sensor ghi event/counter.
+
+5.2 Calibration/DataQuality/FeaturePipeline
+Status validateFrame(const SensorFrame&, ValidationReport&);
+Status calibrate(const SensorFrame&, ProcessedFrame&);
+Status pushFrame(const ProcessedFrame&);
+Status buildWindow(FeatureVector& out);
+Status resetWindow(ResetReason);
+Contract: stale/out-of-range/non-finite/invalid calibration bị reject; không đủ
+window trả trạng thái not-ready/data-invalid; feature order/schema cố định.
+
+5.3 InferenceEngine
+Status init(const ModelManifest&);
+Status run(const FeatureVector&, ModelOutput&);
+ModelStatus getStatus() const;
+Status deinit();
+Contract: kiểm tra schema/dimension trước run; cùng instance không chạy đồng thời
+trừ khi runtime chứng minh thread-safe; output chỉ valid khi status OK, flag valid
+và mọi giá trị hữu hạn; không đổi lỗi thành score=0.
+
+5.4 RiskManager
+Status init(const RiskConfig&);
+Status update(const ModelOutput&, const HealthSnapshot&, const RuleInputs&,
+              uint64_t nowMs, RiskAssessment& out);
+RiskAssessment getCurrent() const;
+Status applyConfig(const RiskConfig&, const ConfigApproval&);
+Contract: rule sensor độc lập với AI; invalid input không tự chuyển NORMAL;
+persistence/hysteresis version hóa; config chỉ đổi sau hash/schema/approval check;
+mọi state transition ghi reason/state_before/state_after.
+
+5.5 ConfigManager/ManifestValidator
+Status loadManifest(Manifest&);
+Status validateManifest(const Manifest&, ValidationReport&);
+Status getActiveRiskConfig(RiskConfig&);
+Status verifyArtifactHash(ArtifactId);
+Contract: model/schema/calibration/risk config mismatch khóa inference hoặc vào
+FAULT/UNKNOWN; manifest không chứa credentials; hash không thay thế signature.
+
+5.6 EventLogger/StorageManager
+Status emitEvent(const EventRecord&);
+Status appendSample(const SampleRecord&);
+Status appendHealth(const HealthSnapshot&);
+Status flush(uint32_t timeoutMs);
+StorageStatus getStatus() const;
+Contract: logger facade enqueue; TaskLogger duy nhất ghi SD; queue-full behavior,
+ownership, retry/backoff và flush semantics phải được định nghĩa/kiểm thử.
+
+5.7 HealthMonitor/WatchdogSupervisor
+Status reportProgress(TaskId, uint64_t progressCounter, uint64_t nowMs);
+Status evaluate(HealthSnapshot&);
+Status requestControlledRestart(RestartReason);
+Contract: heartbeat sau progress thực; feed watchdog chỉ khi task/deadline policy
+đạt; sau reboot bắt buộc self-check.
+
+5.8 OutputController
+Status setAlarm(AlarmCommand);
+Status readback(AlarmOutputState&);
+Status selfTest();
+Contract: command khác feedback; nếu không có feedback, dùng NOT_VERIFIABLE/
+NOT_PRESENT, không giả lập xác nhận.
+
+5.9 Header/API requirements
+Mỗi API phải ghi context task/ISR, timeout/blocking, ownership/lifetime, thread
+safety, Status/ErrorCode và side effects. ISR chỉ dùng API FreeRTOS ISR-safe.
+
+================================================================================
+6. STARTUP VÀ VÒNG XỬ LÝ
+================================================================================
+6.1 Startup order
+1. Serial/diagnostic tối thiểu.
+2. Đọc reset reason, tăng boot_id.
+3. Khởi tạo monotonic clock; UTC có thể TIME_UNSYNC.
+4. Đặt output về trạng thái boot an toàn đã quy định.
+5. Khởi tạo storage best effort.
+6. Load/validate manifest, model/config/calibration/schema.
+7. Init sensor drivers và đọc trạng thái.
+8. Init FeaturePipeline.
+9. Init Edge Impulse model nếu tương thích.
+10. Init RiskManager/HealthMonitor/OutputController.
+11. Tạo queue/tasks; lỗi tạo task là critical.
+12. Self-check/heartbeat/resource check.
+13. Chỉ cho phép NORMAL candidate khi các điều kiện bắt buộc đạt.
+14. Ghi BOOT_COMPLETED; lỗi tồn tại vẫn phải hiển thị.
+
+6.2 Acquisition
+- Timestamp monotonic, sequence tăng.
+- Đọc mỗi sensor theo lịch và timeout riêng.
+- Đóng gói raw data/status/validity.
+- Gửi Q_SENSOR theo policy bounded; đánh dấu gap nếu drop.
+
+6.3 Data quality/feature
+- Check freshness/range/finite/calibration.
+- Calibrate và filter; update window theo sampling/window/stride model.
+- Chỉ tạo FeatureVector khi đủ mẫu và schema hợp lệ.
+- Bộ test vector phải chứng minh cùng input tạo feature output tương đương.
+
+6.4 Inference
+- Đo duration; kiểm tra input dimension, output count, finite values/range.
+- Gửi ModelOutput status dù inference thất bại.
+- Không block acquisition; không chạy nếu window invalid.
+
+6.5 Risk decision — pseudocode
+if startup_check_not_complete:
+    risk = STARTUP
+else:
+    evaluate_sensor_rules_independently()
+    evaluate_model_if_valid()
+    if validated_severe_rule_active:
+        risk = DANGER_TEST
+    elif required_input_invalid:
+        risk = UNKNOWN
+    elif model_required_and_invalid:
+        risk = UNKNOWN or approved_degraded_policy
+    else:
+        candidate = max_severity(sensor_candidate, model_candidate)
+        apply_persistence_and_hysteresis(candidate)
+
+NORMAL chỉ hợp lệ khi self-check hoàn tất, dữ liệu bắt buộc hợp lệ/fresh, manifest
+tương thích, không có cảnh báo rule và không có fault buộc UNKNOWN/DEGRADED/FAULT.
+Mapping Regression output sang risk state phải đến từ RiskConfig được duyệt.
+Ngưỡng tilt/RiskScore trong đặc tả chỉ provisional, không phải ngưỡng địa kỹ thuật
+đã được chứng minh.
+
+6.6 Hysteresis
+- Có thể yêu cầu N mẫu liên tiếp trước khi nâng mức, trừ rule nghiêm trọng đã duyệt.
+- Hạ mức có clear threshold/recovery duration riêng.
+- N, duration, threshold, policy phải version hóa.
+- Ghi event khi state đổi, không phát lặp mỗi chu kỳ.
+
+================================================================================
+7. STATE MACHINE VÀ ERROR POLICY
+================================================================================
+7.1 State flow
+STARTUP -> SELF_CHECK
+SELF_CHECK -> NORMAL nếu required checks pass
+SELF_CHECK -> DEGRADED nếu lỗi không critical nhưng còn hoạt động giới hạn
+SELF_CHECK -> FAULT nếu lỗi critical
+NORMAL -> MONITOR khi rule/model threshold yêu cầu
+NORMAL/MONITOR -> DANGER_TEST khi rule nghiêm trọng đã duyệt
+Any state -> DEGRADED/UNKNOWN khi dữ liệu/model/storage không đủ tin cậy
+DEGRADED -> NORMAL/MONITOR/DANGER_TEST chỉ sau khi fault cleared và recovery policy
+được đáp ứng
+FAULT -> RECOVERY chỉ khi loại lỗi cho phép; recovery fail -> FAULT.
+State hiển thị không được làm mất fault flags đang hoạt động.
+
+7.2 Error handling
+- Retry hữu hạn, có backoff.
+- Lỗi sensor: invalid -> retry -> event -> health/risk update -> recovery chỉ sau
+  valid samples theo policy.
+- Model/hash/schema mismatch: block inference, phát event, tiếp tục rule độc lập.
+- SD error/full: STORAGE_ERROR, counter, bounded retry; không claim log thành công.
+- Queue overflow: counter + gap/drop event, policy theo queue.
+- Heap/stack critical: ghi diagnostic nếu có thể, watchdog/reset theo policy.
+- Output feedback mismatch: output fault; không tuyên bố cảnh báo đã phát vật lý.
+- Config invalid: không âm thầm dùng default thresholds; vào FAULT/UNKNOWN.
+- Watchdog reset: reset reason, boot id mới, self-check, không tự báo NORMAL.
+
+7.3 Event ID vs Error Code
+Event ID nhận diện sự kiện; Error Code nhận diện lỗi module/API. Một event có thể
+tham chiếu error code; hai catalog không dùng lẫn nhau. Mã đã release không đổi
+nghĩa; mọi mã mới cần test và cập nhật tài liệu.
+
+Mapping ví dụ:
+EVT-SENS-0001 + ERR_SENSOR_INIT
+EVT-SENS-0002 + ERR_SENSOR_READ
+EVT-SENS-0004 + ERR_SENSOR_STALE
+EVT-DQ-0002 + ERR_FEATURE_INVALID/ERR_WINDOW_INCOMPLETE
+EVT-MOD-0003 + ERR_MODEL_INFERENCE
+EVT-MOD-0004 + ERR_MODEL_HASH/ERR_VERSION_MISMATCH
+EVT-RISK-0001 + decision_reason_code
+EVT-LOG-0001 + ERR_LOG_WRITE
+EVT-SYS-0004 + ERR_WATCHDOG_TIMEOUT
+EVT-REPLAY-0003 + ERR_REPLAY_MISMATCH
+
+Severity: DEBUG, INFO, NOTICE, WARN, ERROR, CRITICAL. Mỗi event cần trigger,
+severity, rate-limit, required fields, recovery/clear event và test case.
+
+================================================================================
+8. LOGGING, STORAGE VÀ DATA RETENTION
+================================================================================
+File group đề xuất:
+- samples_YYYYMMDD_NNN.csv
+- events_YYYYMMDD_NNN.csv
+- health_YYYYMMDD_NNN.csv
+- manifest_<id>.json
+
+Mỗi file header phải có schema_version, device_id, boot_id, manifest_id/hash,
+firmware/model/config/calibration versions và created_uptime_ms; UTC chỉ khi
+đồng hồ được đồng bộ.
+
+Logger policy:
+- I/O chỉ trong TaskLogger.
+- Event CRITICAL/state transition ưu tiên hơn sample định kỳ.
+- Drop sample phải tăng counter/gap marker nếu còn khả năng.
+- SD full/write fail làm health degraded và hiển thị STORAGE_ERROR.
+- Không tự xóa file chưa sao lưu.
+- Rotation theo size/time cấu hình; recovery sau mất nguồn phải được kiểm thử.
+- CRC/checksum dùng theo schema; không giả định flush đồng nghĩa dữ liệu đã bền
+  vững nếu semantics driver/filesystem chưa được xác minh.
+
+Retention:
+Owner phải phê duyệt chính sách chính thức. Giữ manifest/calibration/config/model
+versions đã dùng; không ghi đè. Raw/event logs giữ đến khi backup xác nhận thành
+công. Dataset/test evidence giữ kèm metadata/checksum theo chính sách dự án.
+
+================================================================================
+9. CONFIGURATION MANIFEST / RISK CONFIG
+================================================================================
+Manifest tối thiểu:
+manifest_schema_version, product_id, device_id, hardware_board/revision/BOM,
+firmware_version/git_commit/SHA-256, build/compiler/framework versions,
+model_name/version/hash/input_schema, feature_schema_version, sampling_rate,
+window_length/stride, calibration version/hash, risk_config ID/version/hash,
+threshold_profile, alarm_policy_version, event/csv schema versions, dataset/model
+lineage nếu có, created_utc, approval status/role/time, signature metadata nếu có.
+
+Startup validation:
+- Required fields/schema.
+- Model hash/input schema.
+- Feature order/count/hash.
+- Calibration version/hash.
+- Risk config hash/range/approval.
+Mismatch: khóa inference hoặc vào FAULT/UNKNOWN; không NORMAL.
+Hash không thay chữ ký số khi threat model yêu cầu chống giả mạo.
+
+RiskConfig fields:
+- config_id/version/hash/schema_version.
+- required/enabled sensor masks.
+- stale timeout từng sensor.
+- threshold + unit + provisional/approved flag.
+- regression output scaling/mapping.
+- persistence/recovery counts and durations.
+- policy khi sensor/model/storage/output fault.
+- logging/health thresholds.
+- approval metadata/change reason.
+Config approved immutable; mọi sửa đổi tạo version/hash mới, changelog, review,
+replay/golden test. Không lưu credential.
+
+================================================================================
+10. HEALTH METRICS, WATCHDOG, RESOURCE BUDGET
+================================================================================
+Metrics:
+- Runtime: uptime_ms, reset_reason, boot_id.
+- Memory: heap_free_bytes, heap_min_free_bytes, largest_free_block_bytes,
+  stack_high_water_words theo task.
+- Timing: sensor_read_ms, inference_ms, loop_period_ms, deadline_miss_count.
+- Sensor: last_sample_age_ms, read_error_count, out_of_range_count.
+- Inference: inference_count, inference_error_count, output_nan_count.
+- Risk: current_state, transition_count, alarm_duration_ms.
+- Storage: log_write_failure_count, bytes_free, rotation_count.
+- Tasks: heartbeat_age_ms_by_task, task_restart_count.
+- Config: active_manifest_hash, config_validation_status.
+- Power: supply_voltage_mv/brownout_count nếu đo được.
+
+Mỗi metric cần type/unit/update interval/validity/threshold/action/test. Không dùng
+0 làm unknown. Log event khi threshold/state đổi; metrics không block pipeline.
+
+Watchdog:
+- Dùng framework/SoC watchdog.
+- Heartbeat sau progress thật, không chỉ sau delay.
+- Feed khi required tasks đáp ứng deadline/health policy.
+- Timeout suy ra từ WCET + period + queueing + margin.
+- Test task block, deadlock, inference chậm, SD chậm, queue full và reset reason.
+- Sau reboot phải self-check; không reset loop không giới hạn.
+
+RAM:
+- Không coi dải ngân sách trong đặc tả là số đo.
+- Đo internal heap free/min/largest block, PSRAM nếu có, stack high-water, heap
+  trước/sau inference, allocation failure và fragmentation.
+- Stress test 72 giờ; ghi board/model/toolchain/build flags.
+
+Flash:
+- Ghi flash physical size, partition table, app binary/map, model placement,
+  NVS/config/calibration, filesystem, OTA slots và margin.
+- Build vượt partition/budget phải fail.
+- OTA disabled nếu A/B partition và rollback chưa xác minh.
+
+================================================================================
+11. REPLAY VÀ DATASET GOVERNANCE
+================================================================================
+Replay host flow:
+CSV/Event logs -> parser/validator -> normalizer -> feature window -> inference
+adapter -> RiskManager -> expected/actual comparator -> report.
+
+Modes:
+- deterministic replay;
+- model comparison;
+- config comparison;
+- fault replay (stale, NaN, out-of-range, sample gap, reset);
+- golden test.
+Replay không phát output vật lý và không ghi đè config thiết bị.
+
+Report mismatch gồm input hash, manifest/model/config hashes, sample index/time,
+feature vector, expected/actual output, state before/after, tolerance và error code.
+Numeric output so theo tolerance; event/state transition phải match chính xác.
+
+Dataset governance:
+- Nguồn, địa điểm, thời gian, sensor BOM/calibration/firmware/conditions.
+- Target/label, đơn vị, method, reviewer và độ tin cậy.
+- Split theo session/event/time/location để tránh leakage.
+- Không dùng test set tune threshold.
+- Lưu dataset version, preprocessing/model versions, metrics và manifest.
+- Nếu thiếu ground truth đáng tin cậy, không tuyên bố dự báo nguy cơ thực tế.
+
+================================================================================
+12. OTA VÀ DEPLOYMENT
+================================================================================
+USB/Serial là đường cập nhật mặc định prototype. OTA chỉ bật khi xác minh:
+partition slots, image integrity/signature theo threat model, candidate boot,
+self-check, rollback, mất nguồn giữa update và quy trình recovery tại hiện trường.
+
+OTA state:
+IDLE -> PACKAGE_VALIDATION -> WRITE_INACTIVE_SLOT -> VERIFY_IMAGE -> BOOT_CANDIDATE
+-> SELF_CHECK -> CONFIRM.
+Lỗi validation/write/verify/self-check phải reject/rollback theo khả năng đã test.
+
+Deployment runtime:
+ESP32-S3 + sensors + local storage + optional alarm; offline.
+Engineering:
+VS Code/PlatformIO, Edge Impulse export, dataset repository, replay/CI, build/map
+report, release manifest. Nạp/export là thao tác bảo trì có kiểm soát, không phải
+đường truyền bắt buộc lúc vận hành.
+
+================================================================================
+13. CLASS RESPONSIBILITIES / DEPENDENCY RULES
+================================================================================
+SensorManager: sở hữu driver, đọc sensor, trả SensorFrame/status; không biết risk.
+CalibrationService: raw -> calibrated, quản lý coefficients/version.
+DataQualityService: freshness/range/finite/missing checks, không sửa lỗi thành 0.
+FeaturePipeline: filter/window/order/schema; reset window khi gap/schema change.
+InferenceEngine: wrapper Edge Impulse, không chứa risk thresholds.
+RiskManager: state machine, rule fusion, persistence/hysteresis; không đọc SD.
+ConfigManager: load/validate manifest/config; approved config immutable.
+EventLogger/StorageManager: serialize/write/rotate/recovery; không inference.
+HealthMonitor: collect metrics/evaluate health.
+WatchdogSupervisor: progress/deadline/feed watchdog theo policy.
+OutputController: command output và feedback.
+AppController: tạo/wire objects, queues, tasks, startup.
+
+Dependency:
+drivers -> platform APIs
+services -> driver interfaces/abstractions
+tasks -> services + queues
+AppController -> constructs/wires modules
+Edge Impulse wrapper -> generated Edge Impulse library
+serializers -> data contracts
+Pure logic nên test được host-side khi khả thi.
+
+================================================================================
+14. BUILD / RELEASE GATES
+================================================================================
+Build environment cần khóa sau khi board thật được chọn: PlatformIO board ID,
+platform/framework version, compiler flags, Edge Impulse export version.
+Pin map chỉ nằm trong BoardPins.h; model artifact giữ nguyên cấu trúc export.
+
+Release package lưu:
+firmware version/commit/hash; board/BOM; toolchain/framework; model/hash/input
+schema; feature schema hash; calibration version/hash; risk config version/hash
+and approval; event/log schema; RAM/Flash/timing report; test/replay report.
+
+Không release nếu:
+- model/feature schema mismatch hoặc manifest invalid;
+- RAM/Flash vượt budget;
+- golden/replay test fail;
+- critical FMEA action chưa đóng/được chấp nhận chính thức;
+- fault injection/watchdog chưa đạt;
+- pin map/calibration/config/model không truy nguyên được;
+- chưa có test evidence cho yêu cầu bắt buộc.
+
+================================================================================
+15. TEST PLAN VÀ TIÊU CHÍ NGHIỆM THU
+================================================================================
+Unit:
+- Status/ErrorCode mapping và uniqueness.
+- Data dictionary serialize/parse.
+- Calibration range/boundaries.
+- NaN/Inf/stale/out-of-range rejection.
+- Feature window count/order/unit/schema hash.
+- Manifest missing/hash/version mismatch.
+- Model output dimension/non-finite.
+- Risk transitions, persistence/hysteresis, simultaneous faults.
+- Event ID/Error Code serialization.
+- CSV escaping/truncation/rotation.
+
+Integration:
+- Sensor missing at boot/runtime/reconnect.
+- Model missing/hash mismatch/dimension mismatch.
+- SD absent/full/read-only/write error.
+- Queue full/slow storage.
+- Heap pressure/stack high-water.
+- Alarm command/feedback mismatch.
+- UTC unsynchronized and monotonic time across reboot.
+- Power loss during write; prior files remain parseable.
+- OTA negative tests only if OTA enabled.
+
+Replay:
+- Golden dataset with expected processed samples/features/output/state.
+- Same input/model/config gives numeric output within tolerance.
+- Event/state transitions match exactly.
+- Report stores hashes and lineage.
+
+Endurance:
+- Target 72 hours per specification.
+- Record uptime/reset reason, heap low-water, largest block, stack high-water,
+  inference/cycle latency, queue high-water, drop counters and SD status.
+- Reboot, missed deadline, critical event drop or unbounded memory growth requires
+  investigation; no PASS without evidence.
+
+Acceptance gates:
+A Functional; B fault handling; C traceability; D measured resource/timing;
+E replay reproducibility; F Safety Case review; G offline deployment/recovery.
+Test record includes ID, build hash, board revision, setup, steps, expected/actual,
+pass/fail, defect reference and reviewer.
+
+================================================================================
+16. OPEN ITEMS TRƯỚC RELEASE
+================================================================================
+OI-01 Board/module/flash/PSRAM -> BOM + board record.
+OI-02 Pin map/bus/voltage -> schematic + pin map.
+OI-03 HX710B sensor head -> datasheet + calibration plan.
+OI-04 Model target/label -> model card + label protocol.
+OI-05 Feature schema/window/stride -> FeatureSchema + golden vector.
+OI-06 Risk thresholds/hysteresis -> approved RiskConfig.
+OI-07 Sampling/timeouts -> timing table + measurements.
+OI-08 Task priority/stack/queue depth -> profiling report.
+OI-09 Watchdog timeout -> fault-injection report.
+OI-10 RAM/Flash -> build map + runtime metrics.
+OI-11 Storage schema/retention -> schema + retention approval.
+OI-12 Alarm feedback -> wiring + output test.
+OI-13 OTA -> rollback evidence or disabled.
+OI-14 Safety Case -> evidence pack/reviewer approval.
+OI-15 Regression vs Classification -> approved ADR-001.
+OI-16 API/header synchronization -> API review + automated tests.
+
+================================================================================
+17. TRACEABILITY
+================================================================================
+SRS acquisition -> SensorManager/TaskSensorAcq -> sensor drivers -> sensor tests.
+Data Dictionary -> DataTypes/serializers -> parse/serialize tests.
+Feature schema/Edge Impulse -> FeaturePipeline/InferenceEngine -> golden vectors.
+Risk logic/ADR-001 -> RiskManager/RiskConfig -> transition/hysteresis/replay tests.
+Event ID/Error Code -> EventIds.h/ErrorCodes.h -> uniqueness/mapping tests.
+Manifest/versioning -> ConfigManager/ManifestValidator -> mismatch tests.
+Watchdog/Health -> HealthMonitor/WatchdogSupervisor -> fault-injection tests.
+Retention/storage -> StorageManager/FileRotation -> SD-full/power-loss tests.
+Replay/Dataset governance -> host replay + dataset lineage -> reproducibility report.
+Safety Case/FMEA -> fault policy + evidence pack -> review/action closure.
+
+================================================================================
+18. KẾT LUẬN
+================================================================================
+LLD v1.0 định nghĩa thiết kế mức thấp để bắt đầu triển khai firmware ESP32-S3 +
+Edge Impulse theo đặc tả v1.4. Đây chưa phải firmware đã build/test trên board.
+Không thay TBD bằng giả định. Trước khi đóng băng code phải chốt board/pin map,
+đầu đo HX710B, model target/input schema, RiskConfig, resource budgets và test plan.
+Chỉ đánh dấu hoàn thành khi có kết quả build, đo đạc, test report và review thực tế.
+
+
+================================================================================
+18. FEATURE SCHEMA CONTRACT (FSC) — HỢP ĐỒNG ĐẶC TRƯNG CHUẨN
+================================================================================
+18.1 Mục đích và nguyên tắc
+FSC là hợp đồng có version giữa Sensor Adapter -> Calibration/Quality -> Feature
+Pipeline -> Edge Impulse Adapter -> model export -> replay/test tooling. Số lượng
+feature giống nhau KHÔNG chứng minh hai schema tương thích. Tên, thứ tự, đơn vị,
+scale, filter, sample rate, window, stride, missing-data policy và cách xử lý lỗi
+đều là một phần của schema.
+
+Quy tắc bắt buộc:
+FSC-001 Mỗi FeatureVector mang schema_id, schema_version, schema_hash, feature_count,
+        window_start_ms, window_end_ms, sample_count, valid_mask, quality_flags.
+FSC-002 Thứ tự đầu vào xác định bằng model_index bắt đầu từ 0; không phụ thuộc thứ tự
+        field trong C++ struct, JSON object hoặc map.
+FSC-003 Mọi feature có tên chuẩn, nguồn, kiểu, đơn vị, công thức, range, scaling,
+        filter, sample rate, window/stride, missing policy và cách xác minh.
+FSC-004 Đổi thứ tự, đơn vị, scale, filter, window, stride, missing policy hoặc ý nghĩa
+        feature phải tạo schema hash mới; thay đổi không tương thích tăng major version.
+FSC-005 Không gọi inference nếu schema hash, dimension, model metadata hoặc chất lượng
+        đầu vào không hợp lệ. Không dùng best-effort fallback.
+FSC-006 Không thay dữ liệu thiếu/lỗi bằng 0 trừ khi đúng như training contract và có
+        quy tắc/mask được mô hình huấn luyện hỗ trợ.
+FSC-007 NaN/Inf, stale samples, window không đủ mẫu hoặc sai đơn vị phải bị reject.
+FSC-008 Mỗi schema release có golden vectors: raw input -> calibrated sample -> feature
+        vector -> expected output/tolerance, kèm hash và lineage dữ liệu.
+FSC-009 Schema không được thay đổi ngầm tại runtime; đổi schema cần package release
+        đồng bộ firmware + model + manifest + fixture.
+
+18.2 Những quyết định vẫn TBD
+Chưa khóa feature list cho tới khi xác minh sensor model/revision, orientation/trục,
+đơn vị, sampling frequency, anti-alias/filter, gravity removal, soil sensor analog/
+digital và calibration curve, YL-83 output semantics, đầu đo HX710B, window N, stride,
+model input dimension, regression target và output scaling. Không được gọi output
+regression là xác suất sạt lở nếu chưa có định nghĩa và hiệu chuẩn xác suất.
+
+18.3 Envelope logic
+struct FeatureVector {
+  uint32_t schema_id;
+  uint16_t schema_major;
+  uint16_t schema_minor;
+  uint8_t  schema_hash[32];       // SHA-256 canonical schema document
+  uint64_t boot_id;
+  uint32_t sequence_no;
+  uint64_t window_start_ms;       // monotonic clock
+  uint64_t window_end_ms;
+  uint16_t sample_count;
+  uint16_t feature_count;
+  uint64_t valid_mask;            // chỉ đủ nếu feature_count <= 64
+  uint32_t quality_flags;
+  float    values[FEATURE_CAPACITY]; // fixed capacity; không dynamic allocation hot path
+};
+FEATURE_CAPACITY phải được sinh/chốt theo model metadata. Nếu trên 64 feature, dùng
+bitset compile-time thay cho valid_mask 64-bit. Đây là hợp đồng logic; wire format
+phải serialize field-by-field, không dump raw struct có padding/endianness.
+
+18.4 Feature Registry — bảng khởi tạo, CHƯA ĐƯỢC DÙNG CHO INFERENCE
+ID | Canonical name | Source | Unit | Formula | Model index | State
+F001 | imu_ax | IMU | m/s^2 | calibrated axis X | TBD | OPEN
+F002 | imu_ay | IMU | m/s^2 | calibrated axis Y | TBD | OPEN
+F003 | imu_az | IMU | m/s^2 | calibrated axis Z | TBD | OPEN
+F004 | tilt_x | IMU | degree | formula/reference TBD | TBD | OPEN
+F005 | tilt_y | IMU | degree | formula/reference TBD | TBD | OPEN
+F006 | soil_moisture | soil sensor | unitless/% after calibration | TBD | TBD | OPEN
+F007 | rain_wetness | YL-83 | bool/ratio | threshold/calibration TBD | TBD | OPEN
+F008 | hx710_measurement | HX710B + transducer | TBD | calibration TBD | TBD | BLOCKED
+F009 | hx710_delta | HX710B + transducer | TBD | current - baseline | TBD | BLOCKED
+F010 | sample_age_ms | timestamps | ms | now - sample timestamp | TBD | OPEN
+F011 | imu_valid | quality layer | bool | driver/range checks | TBD | OPEN
+F012 | soil_valid | quality layer | bool | driver/range checks | TBD | OPEN
+F013 | rain_valid | quality layer | bool | driver/range checks | TBD | OPEN
+F014 | hx710_valid | quality layer | bool | driver/calibration checks | TBD | BLOCKED
+Danh sách này chỉ minh họa các ứng viên. Không được gửi F001–F014 vào model cho đến
+khi model export thật xác nhận tên/order/dimension/transform.
+
+18.5 Canonical schema manifest mẫu
+{
+  "schema_id": "landslide-proto",
+  "schema_version": "0.1.0",
+  "status": "DRAFT_NOT_FOR_INFERENCE",
+  "feature_order": [],
+  "window": {"length_samples": null, "stride_samples": null, "sample_rate_hz": null},
+  "preprocessing": {"filter_version": null, "scaling_owner": null},
+  "missing_data_policy": "REJECT_WINDOW_UNLESS_TRAINED_POLICY_SAYS_OTHERWISE",
+  "target": {"kind": "regression", "name": null, "unit": null, "range": null},
+  "edge_impulse": {"deployment_hash": null, "input_dimension": null},
+  "schema_sha256": null
+}
+Các null phải được thay bằng giá trị có bằng chứng. Trạng thái DRAFT_NOT_FOR_INFERENCE
+là release blocker.
+
+18.6 Validation gate
+Boot: xác minh firmware/model/schema/config/calibration hashes, schema version,
+dimension, transform, model target và board compatibility. Runtime: xác minh hash,
+feature_count, sample_count, freshness, valid mask, quality flags và mọi giá trị finite.
+Bất kỳ gate nào fail -> MODEL_INPUT_REJECTED; zero inference calls; phát event/error.
+Golden-vector acceptance: kiểm tra thứ tự chính xác, sai số từng feature trong
+tolerance được phê duyệt, output trong tolerance và negative fixtures bị reject.
+
+================================================================================
+19. UML CLASS DIAGRAM CHI TIẾT (MERMAID SOURCE)
+================================================================================
+classDiagram
+direction LR
+class AppController { +begin(); +runHealthChecks(); +requestShutdown() }
+class BoardSupportPackage { +initClock(); +initPins(); +initBuses(); +readResetReason(); +feedHardwareWatchdog() }
+class ISensor { <<interface>>; +begin() SensorStatus; +read(SensorRawSample&) SensorStatus; +selfTest() SensorStatus; +descriptor() SensorDescriptor }
+class ImuAdapter
+class SoilMoistureAdapter
+class RainAdapter
+class Hx710Adapter
+class SensorManager { +beginAll(); +pollDue(now_ms); +readSnapshot(out) }
+class CalibrationStore { +load(sensor_id); +saveAtomically(record); +validateCRC(record) }
+class DataQuality { +validate(frame); +checkFreshness(); +checkRange() }
+class FeaturePipeline { +push(frame); +windowReady(); +build(out); +resetWindow(reason) }
+class SchemaRegistry { +activeSchema(); +validate(vector); +compatible(metadata) }
+class IInferenceEngine { <<interface>>; +initialize(metadata); +run(vector,out); +metadata() }
+class EdgeImpulseAdapter { +initialize(); +getInputDimension(); +run(vector,out); +getModelMetadata() }
+class RiskManager { +evaluate(model,frame,health); +applyHysteresis() }
+class ConfigManager { +loadLastValid(); +validateManifest(); +activateAtomically() }
+class HealthMonitor { +snapshot(); +recordMetric() }
+class RecoveryManager { +classifyError(); +executeRecovery() }
+class EventLogger { +enqueue(event) }
+class IStorage { <<interface>>; +append(record); +flush() }
+class OutputController { +apply(risk); +setFaultIndication() }
+AppController --> BoardSupportPackage
+SensorManager o-- ISensor
+ImuAdapter ..|> ISensor
+SoilMoistureAdapter ..|> ISensor
+RainAdapter ..|> ISensor
+Hx710Adapter ..|> ISensor
+SensorManager --> CalibrationStore
+SensorManager --> DataQuality
+FeaturePipeline --> SchemaRegistry
+FeaturePipeline --> DataQuality
+EdgeImpulseAdapter ..|> IInferenceEngine
+EdgeImpulseAdapter --> SchemaRegistry
+RiskManager --> ConfigManager
+RiskManager --> HealthMonitor
+RecoveryManager --> HealthMonitor
+EventLogger --> IStorage
+OutputController --> RiskManager
+Class diagram source is text. Render with Mermaid-compatible tooling if a graphical export is required.
+Dependency rules: only EdgeImpulseAdapter includes generated EI headers; business logic does
+not access GPIO or raw drivers; cross-task data is immutable or passed via queues/snapshots.
+
+================================================================================
+20. SEQUENCE DIAGRAM RUNTIME
+================================================================================
+20.1 Normal runtime
+sequenceDiagram
+autonumber
+participant ST as SensorTask
+participant SM as SensorManager/Drivers
+participant QS as Q_SENSOR
+participant FT as FeatureTask
+participant SR as SchemaRegistry
+participant QF as Q_FEATURE
+participant IT as InferenceTask
+participant EI as EdgeImpulseAdapter
+participant QM as Q_MODEL
+participant RT as RiskTask
+participant OC as OutputController
+participant LG as LoggerTask
+ST->>SM: pollDueSensors()
+SM-->>ST: SensorFrame + per-sensor status/timestamps
+ST->>QS: send(frame, bounded timeout)
+QS-->>FT: receive(frame)
+FT->>FT: calibration + quality + window update
+alt window incomplete or invalid
+ FT->>LG: enqueue gap/invalid event
+else complete valid window
+ FT->>SR: validate schema/hash/dimension
+ SR-->>FT: PASS
+ FT->>QF: send(FeatureVector)
+ QF-->>IT: receive(vector)
+ IT->>EI: run(vector)
+ EI-->>IT: output + status + latency
+ IT->>QM: send(ModelOutput/status)
+ QM-->>RT: receive(output)
+ RT->>RT: combine model, deterministic rules, health
+ RT->>OC: apply(RiskAssessment)
+ RT->>LG: enqueue state/event record
+ OC-->>RT: applied/fault
+end
+
+20.2 Schema/model reject
+sequenceDiagram
+participant FT as FeatureTask
+participant SR as SchemaRegistry
+participant EI as EdgeImpulseAdapter
+participant RT as RiskTask
+participant LG as LoggerTask
+FT->>SR: validate(vector)
+SR-->>FT: REJECT(hash/dimension/quality)
+FT->>LG: FEATURE_SCHEMA_REJECTED
+FT->>RT: publish invalid-input status
+Note over FT,EI: Edge Impulse API must not be called
+RT->>RT: mark model/data unavailable; do not invent score
+RT->>LG: normalized error event
+
+20.3 Sensor bus recovery
+sequenceDiagram
+participant ST as SensorTask
+participant DR as SensorDriver
+participant RM as RecoveryManager
+participant HM as HealthMonitor
+participant LG as LoggerTask
+ST->>DR: read()
+DR-->>ST: BUS_TIMEOUT
+ST->>HM: increment timeout metric
+ST->>RM: requestRecovery(sensor_id, error)
+RM->>DR: bounded re-init
+alt recovery succeeds
+ DR-->>RM: OK
+ RM-->>ST: resume acquisition
+else recovery fails
+ RM-->>ST: SENSOR_UNAVAILABLE
+ ST->>LG: SENSOR_RECOVERY_EXHAUSTED
+ Note over ST: invalid status; never synthesize zero sample
+end
+
+================================================================================
+21. MEMORY LAYOUT, RAM/FLASH BUDGET
+================================================================================
+Không thể khẳng định địa chỉ tuyệt đối/kích thước chính xác trước khi khóa board,
+partition CSV, build flags, EI export, linker map và việc có PSRAM hay không.
+Memory map logic:
+FLASH: bootloader/partition table; NVS config/calibration; app slot A; app slot B
+(OTA only); filesystem (optional); coredump (optional). Kích thước và offset lấy từ
+partition table được build, không hard-code trong tài liệu.
+RAM: internal DRAM cho stacks/TCBs/queues/heap/buffers; IRAM cho ISR/critical code;
+DMA-capable buffers chỉ khi driver yêu cầu; PSRAM chỉ khi board có và API/latency đã
+xác minh; model/tensor arena theo allocation thực tế của EI/TFLM export.
+Không giả định PSRAM có mặt và không giả định mọi heap buffer dùng được cho DMA.
+
+Resource | Release gate khởi điểm | Actual measurement | Result
+App image | <=80% app partition | TBD from size/map report | TBD
+Static DRAM + queues | <=60% DRAM usable after framework | TBD | TBD
+Minimum free heap | >= max(2 x peak transient alloc, 20% usable heap) | TBD | TBD
+Largest free block | >=1.25 x largest required allocation | TBD | TBD
+Task stack high-water | >=25% stack remains in stress test | TBD per task | TBD
+Model arena | measure actual model on target | TBD | TBD
+PSRAM dependency | none until board confirms PSRAM | TBD | TBD
+Các tỷ lệ là gate đề xuất ban đầu, không phải thông số bảo đảm của ESP32-S3.
+Đo bằng .map, size report, partition summary, heap minimum/largest block, stack
+high-water và 72h soak test; gắn kết quả với firmware/model/board/toolchain hashes.
+
+================================================================================
+22. QUEUE SIZING FORMULA
+================================================================================
+Với queue i:
+Q_required >= ceil(lambda_peak * T_block_max) + B_burst + M_safety
+lambda_peak = tốc độ producer item/s; T_block_max = thời gian consumer không phục vụ;
+B_burst = burst bổ sung; M_safety = margin (khởi đầu có thể max(2, ceil(25% base)).
+Cần điều kiện ổn định dài hạn lambda_average < mu_consumer_average. Nếu lambda >= mu
+kéo dài, queue sẽ đầy dù tăng depth; cần giảm tải hoặc đổi kiến trúc.
+Ví dụ minh họa, không phải giá trị đã chốt:
+Sensor 25 frame/s, consumer block 0.20 s, burst 2, margin 2:
+Q >= ceil(25*0.20)+2+2 = 9 items.
+Feature 5 vector/s, inference block 0.30 s, burst 1, margin 2:
+Q >= ceil(5*0.30)+1+2 = 5 items.
+Thay bằng peak rate/WCET đo trên firmware thực tế. Window ring buffer cần tính riêng theo
+window length N, stride và overlap; không đồng nhất với queue giữa task.
+
+Queue | Producer -> consumer | Full policy
+Q_SENSOR | Sensor -> Feature | bounded send; count overflow; mark gap; drop oldest only if approved
+Q_FEATURE | Feature -> Infer | drop/reject window; never block acquisition indefinitely
+Q_MODEL | Infer -> Risk | explicit latest-result policy or bounded queue; sequence gap tracked
+Q_EVENT | modules -> Logger | prioritize critical events; count dropped logs
+Q_HEALTH | tasks -> Health | aggregate/coalesce metrics
+Q_OUTPUT | Risk -> Output | versioned latest state; output worker detects sequence gaps
+For every queue record sizeof(payload), depth, allocated bytes, rate, service rate,
+high-water mark, overflow count and rationale.
+
+================================================================================
+23. TIMING BUDGET
+================================================================================
+Definitions: T_sample sample period; T_acq bus read/conversion; T_pipe calibration,
+quality and features; T_infer EI inference; T_risk risk decision; T_output output update;
+T_e2e end-to-end latency from final sample of a window to output update; T_log logging.
+For sequential path, T_acq + T_pipe must fit its relevant period. For pipelined tasks,
+each consumer's sustained service rate must exceed producer rate.
+T_e2e = T_wait_window + T_queue1 + T_pipe + T_queue2 + T_infer + T_queue3
+        + T_risk + T_queue4 + T_output.
+Logging is asynchronous and must not block critical path, but backlog is monitored.
+
+Stage | Target | P50 | P95 | P99 | Max | Gate
+Sensor read | TBD | TBD | TBD | TBD | TBD | sensor deadline
+Calibration/quality | TBD | TBD | TBD | TBD | TBD | pipeline period
+Feature extraction | TBD | TBD | TBD | TBD | TBD | stride interval
+EI inference | TBD | TBD | TBD | TBD | TBD | inference deadline
+Risk decision | TBD | TBD | TBD | TBD | TBD | bounded WCET
+Output update | TBD | TBD | TBD | TBD | TBD | output deadline
+End-to-end | TBD from hazard requirement | TBD | TBD | TBD | TBD | approved limit
+Logger write | non-critical | TBD | TBD | TBD | TBD | no critical-path blocking
+Measure with monotonic high-resolution timer, at least 10,000 samples/stage plus stress
+tests; use same release build/model/flags. Include bus timeout, SD latency, queue full,
+flash operations and peak inference. Watchdog timeout must be derived from measured WCET,
+margin and recovery deadline—not selected arbitrarily.
+
+================================================================================
+24. EDGE IMPULSE ADAPTER DESIGN
+================================================================================
+Only EdgeImpulseAdapter may include generated EI headers or call generated inference APIs.
+Exact names (e.g. run_classifier/run_classifier_continuous) depend on export version and
+must be verified against actual export; do not assume one API before seeing model bundle.
+
+enum class InferStatus : uint8_t {
+  Ok, NotInitialized, SchemaMismatch, DimensionMismatch, InvalidInput,
+  AllocationFailure, SdkError, Timeout, OutputInvalid
+};
+struct ModelMetadata {
+  uint32_t input_dimension;
+  uint16_t output_count;
+  uint8_t model_hash[32];
+  uint32_t schema_id;
+  uint16_t schema_version;
+};
+class IInferenceEngine {
+ public:
+  virtual InferStatus initialize(const ModelMetadata& expected) = 0;
+  virtual InferStatus run(const FeatureVector&, ModelOutput&) = 0;
+  virtual const ModelMetadata& metadata() const = 0;
+  virtual ~IInferenceEngine() = default;
+};
+
+initialize(): load generated metadata; verify dimension/schema/model hash; initialize SDK
+once; return explicit error on mismatch.
+run(): validate schema and finite values; map values by model_index; call actual exported
+API; measure latency; validate return code, output count, finite output and target contract;
+return status. Never map an error to score 0. One task owns the model instance unless the
+SDK explicitly documents thread safety. Avoid per-inference dynamic allocation where possible.
+Unit tests use FakeInferenceEngine; integration tests use the exact generated model export.
+Build manifest records EI export/SDK version, model hash, input dimension, output names/units.
+
+================================================================================
+25. BOARD SUPPORT PACKAGE (BSP)
+================================================================================
+Suggested files:
+include/bsp/board_config.h
+include/bsp/IBoardSupport.h
+src/bsp/esp32s3_board.cpp
+src/bsp/board_self_test.cpp
+
+BSP contract: initEarly(), configureOutputsSafe(), initBuses(), resetReason(),
+monotonicMillis()/Micros(), boardIdentity(), watchdogInit()/Feed(), optional power status.
+board_config.h owns BOARD_ID/revision, all pin numbers, bus frequency, ADC settings,
+active polarity and electrical constraints. Unverified pins remain TBD and must fail
+configuration/build rather than silently choosing arbitrary GPIOs. BSP has no risk/model
+business logic. Safe output electrical state must be reviewed for reset and power loss.
+
+================================================================================
+26. SENSOR ABSTRACTION LAYER (SAL)
+================================================================================
+SensorDescriptor: sensor_id/type, model/revision, driver version, unit, physical range,
+sample period, calibration_id, required flag, timestamp semantics.
+ISensor contract: begin() -> SensorStatus; read(SensorRawSample&) -> SensorStatus;
+selfTest() -> SensorStatus; descriptor() -> SensorDescriptor.
+Layers: DriverRaw (register/ADC/count) -> PhysicalSample (calibrated value + unit) ->
+SensorFrame (timestamps and validity per sensor) -> FeatureVector (FSC only).
+Never mix raw count and physical unit in one field. Each driver has bounded timeout,
+range/staleness checks, device ID/CRC checks where supported and host mock. ISR only
+notifies/timestamps; it does not perform blocking bus transactions.
+Verify IMU orientation/scale/bias/rate; soil sensor analog/digital and ADC limits;
+YL-83 wetness semantics (do not label as mm/h without calibration); HX710B transducer,
+wiring, zero/span, physical unit and load range before using in model/risk rules.
+
+================================================================================
+27. CALIBRATION PERSISTENCE
+================================================================================
+Record fields: magic, format_version, record_length, sensor_id/revision, calibration_id,
+sequence, coefficients, units, valid range, optional temperature range, CRC32, commit marker.
+Use A/B slots in NVS/appropriate partition. Update inactive slot -> write -> read back ->
+validate CRC/schema/ranges/finite coefficients -> write commit marker last -> select newest
+valid sequence. Power loss must leave the previous valid slot usable. If both slots invalid,
+mark calibration invalid and enter degraded/unknown; do not silently use defaults.
+Calibration writes occur only during explicit calibration action, not every sample.
+Attach calibration_id/hash to feature/log metadata. Sensor revision mismatch invalidates
+calibration. Emit CALIBRATION_CHANGED after successful activation.
+
+================================================================================
+28. RECOVERY MATRIX
+================================================================================
+Fault | Detection | Recovery | Bound | Result/event
+I2C timeout | driver timeout | bounded bus/device re-init and retries | SENSOR_DEGRADED
+Sensor absent | self-test/read fail | retry then quarantine | N retries TBD | UNKNOWN + SENSOR_UNAVAILABLE
+Stale sample | age check | discard/reacquire | freshness TBD | DATA_INVALID
+Schema mismatch | hash/version/dim | no inference; require compatible release | zero calls | MODEL_INCOMPATIBLE
+EI error | SDK status/output invalid | one bounded re-init if supported | bounded | MODEL_ERROR
+Queue overflow | overflow counter | policy-specific drop/coalesce | bounded | QUEUE_OVERFLOW
+Storage full | filesystem error | bounded retry/rotation only per retention | bounded | STORAGE_DEGRADED
+Calibration CRC failure | boot validation | use other valid A/B slot | bounded | CALIBRATION_INVALID
+Output fault | feedback/self-test if available | retry safe command | bounded | OUTPUT_FAULT
+Watchdog reset | reset reason | boot diagnostics/recovery counter | threshold TBD | RECOVERY_MODE
+Brownout | reset cause/supervisor | atomic-state recovery | hardware dependent | POWER_RESET
+Config corrupt | schema/CRC/signature | last valid approved config or reject | bounded | CONFIG_INVALID
+Repeated fault loop | rolling reset counter | degraded mode/reboot backoff if feasible | threshold TBD | RECOVERY_EXHAUSTED
+Do not reset MCU on every sensor error; do not clear initiating fault history; retry and
+backoff are bounded. Watchdog feeding must prove critical task progress, not merely a timer.
+
+================================================================================
+29. VERSION COMPATIBILITY MATRIX
+================================================================================
+Firmware <-> feature schema: exact schema ID/hash; mismatch inhibits inference.
+Model <-> schema: exact order/dimension/transform/target; mismatch fails build/boot.
+Model <-> EI SDK/export wrapper: tested version pair; mismatch fails build.
+Calibration <-> sensor revision: sensor ID/revision match; otherwise invalid.
+Risk config <-> firmware: supported config schema + CRC/signature policy; otherwise reject.
+Manifest <-> firmware/model/config/calibration: all hashes resolve; otherwise package reject.
+Replay fixture <-> schema/model: exact metadata; mismatch is test failure, never skip.
+OTA image <-> board/partition: target and slot fit; otherwise reject update.
+NVS record <-> record schema: tested migration or safe rejection/fallback.
+Dataset <-> schema/training pipeline: lineage and transforms reproducible; otherwise model
+release blocked.
+Use semantic version for human communication; SHA-256 schema hash is authoritative.
+Major = incompatible semantics/order/unit/transform; minor = compatible metadata only if
+parser supports it; patch = documentation/non-semantic fix. Never infer compatibility from
+version string alone.
+
+================================================================================
+30. MOCK / TEST ARCHITECTURE
+================================================================================
+Profiles: native_test (host compiler/fake clock/drivers/storage/model); esp32s3_test
+(HIL on target); production (real BSP, drivers, exact EI export). Fake code must never link
+into production.
+Mockable interfaces: IClock, ISensor, IStorage, IInferenceEngine, IOutputDevice,
+IConfigStore, IWatchdog, IEventSink.
+Test layers:
+1 Unit: calibration, range checks, feature formulas, schema, hysteresis/state.
+2 Contract: exact model input order/dimension and metadata.
+3 Replay: timestamped raw fixture -> features -> model/risk transitions, compare golden.
+4 Integration: real EI export on ESP32-S3.
+5 HIL fault injection: disconnect sensor, bus timeout, storage full/removal, output fault,
+  brownout only with safe test setup.
+6 Soak: prototype target >=72h with intermittent faults.
+7 Release gates: reproducible manifest, map/size, timing/RAM reports and replay report.
+FakeInferenceEngine scripted outcomes: success, timeout, SDK error, NaN output, wrong
+dimension, delayed inference. FakeSensor: stale/out-of-range/missing/burst/timestamp jump.
+FakeStorage: full/slow/write error/remount. Assert invalid input never becomes zero/safe and
+schema rejection always results in zero inference calls.
+
+================================================================================
+31. POWER FAILURE STRATEGY
+================================================================================
+Firmware cannot guarantee an alarm during physical power loss without external backup
+power. Brownout detector, supervisor and hold-up energy are board-specific TBD.
+Use atomic A/B config/calibration records with CRC, sequence and commit marker written last.
+Do not write flash/SD per sample; batch logs and flush periodically. On boot inspect reset
+reason, validate persistent records, recover last valid commit and emit POWER_RESET or
+UNCLEAN_SHUTDOWN when inferable. Critical event durability is guaranteed only after durable
+commit/flush; if abrupt loss can occur before flush, document possible event loss.
+If hold-up circuitry exists, require T_hold_up >= T_detect + T_atomic_commit + T_required_flush
++ margin, validated experimentally. On reset, outputs must default to reviewed safe
+electrical state; test active polarity and relay fail-state. Repeated brownout must not cause
+unbounded write/reboot loops. Do not claim graceful shutdown without hardware evidence.
+
+================================================================================
+32. DEPLOYMENT PACKAGE STRUCTURE
+================================================================================
+release/
+  README_DEPLOY.txt
+  manifest/
+    release_manifest.json
+    feature_schema.json
+    model_manifest.json
+    calibration_template.json
+    risk_config.schema.json
+    compatibility_matrix.csv
+  firmware/
+    firmware.bin
+    firmware.map
+    size_report.txt
+    bootloader.bin             (only when explicitly required)
+    partition-table.bin        (only when required by flashing procedure)
+  model/
+    edge_impulse_export/
+    model.sha256
+    model_api_notes.txt
+  config/
+    risk_config.json
+    board_config_id.txt
+  test/
+    test_summary.txt
+    golden_vectors/
+    replay_report.csv
+    timing_report.csv
+    memory_budget.csv
+    fault_injection_report.txt
+  tools/
+    flash_instructions.txt
+    verify_package.py
+  checksums.sha256
+  SIGNATURE.txt                (only if signing implemented)
+Manifest binds firmware/model/schema/config hashes, calibration format, board/revision,
+build/toolchain, source commit and test report IDs. Package verifier fails closed on missing
+files, hash mismatch or unsupported board. Never ship fake/test adapters or secrets.
+USB/Serial is the default prototype deployment; OTA disabled until partition, signature,
+rollback and power-failure behavior are verified.
+
+================================================================================
+33. EVENT ID AND ERROR CODE CATALOG — STARTER REGISTRY
+================================================================================
+Events:
+EVT-0001 BOOT_STARTED
+EVT-0002 BOOT_COMPLETE
+EVT-0003 RESET_RECOVERED
+EVT-0100 SENSOR_STATUS_CHANGED
+EVT-0101 SENSOR_SAMPLE_INVALID
+EVT-0102 SENSOR_STALE
+EVT-0103 SENSOR_RECOVERY_STARTED
+EVT-0104 SENSOR_RECOVERY_EXHAUSTED
+EVT-0200 FEATURE_WINDOW_READY
+EVT-0201 FEATURE_SCHEMA_REJECTED
+EVT-0202 FEATURE_GAP_DETECTED
+EVT-0300 INFERENCE_STARTED
+EVT-0301 INFERENCE_COMPLETED
+EVT-0302 INFERENCE_FAILED
+EVT-0400 RISK_STATE_CHANGED
+EVT-0401 RISK_RULE_TRIGGERED
+EVT-0402 RISK_STATE_UNKNOWN
+EVT-0500 CONFIG_REJECTED
+EVT-0501 CALIBRATION_CHANGED
+EVT-0502 CALIBRATION_INVALID
+EVT-0600 STORAGE_DEGRADED
+EVT-0601 STORAGE_FULL
+EVT-0602 LOG_RECORD_DROPPED
+EVT-0700 OUTPUT_FAULT
+EVT-0800 WATCHDOG_RECOVERY
+EVT-0801 POWER_RESET
+EVT-0900 PACKAGE_COMPATIBILITY_REJECTED
+
+Errors:
+ERR-0000 OK
+ERR-0001 NOT_INITIALIZED
+ERR-0002 INVALID_ARGUMENT
+ERR-0100 SENSOR_NOT_FOUND
+ERR-0101 SENSOR_BUS_TIMEOUT
+ERR-0102 SENSOR_OUT_OF_RANGE
+ERR-0103 SENSOR_STALE
+ERR-0104 SENSOR_CALIBRATION_INVALID
+ERR-0200 FEATURE_SCHEMA_MISMATCH
+ERR-0201 FEATURE_DIMENSION_MISMATCH
+ERR-0202 FEATURE_NONFINITE_VALUE
+ERR-0203 FEATURE_WINDOW_INCOMPLETE
+ERR-0300 MODEL_NOT_INITIALIZED
+ERR-0301 MODEL_API_FAILURE
+ERR-0302 MODEL_OUTPUT_INVALID
+ERR-0303 MODEL_INPUT_REJECTED
+ERR-0400 CONFIG_PARSE_ERROR
+ERR-0401 CONFIG_CRC_ERROR
+ERR-0402 CONFIG_VERSION_UNSUPPORTED
+ERR-0500 STORAGE_UNAVAILABLE
+ERR-0501 STORAGE_FULL
+ERR-0502 STORAGE_WRITE_FAILURE
+ERR-0600 QUEUE_OVERFLOW
+ERR-0601 DEADLINE_MISSED
+ERR-0602 STACK_WATERMARK_LOW
+ERR-0700 OUTPUT_DEVICE_FAILURE
+ERR-0800 CALIBRATION_CRC_FAILURE
+ERR-0801 POWER_RECOVERY_INCOMPLETE
+ERR-0900 PACKAGE_HASH_MISMATCH
+ERR-0901 BOARD_INCOMPATIBLE
+Registry rules: append-only after release; never reuse IDs. Each entry ultimately requires
+severity, retryable flag, recovery action, operator message, metric key and owner.
+Event ID describes occurrence; Error Code describes cause/status. They are not interchangeable.
+
+================================================================================
+34. ADR-002 — REGRESSION VS CLASSIFICATION
+================================================================================
+Status: PROVISIONAL, pending confirmation of target and labeling method.
+Decision: retain Regression only because it is the current project baseline. Regression
+output is a continuous target, not automatically a probability of landslide. Until target,
+unit, range and calibration are defined, call it model_value/model_score, not probability.
+RiskManager must combine output with deterministic rules, sensor quality and health; model
+output must not be the sole safety decision.
+Required evidence: target_name/unit/range, label-generation method, preprocessing/scaling,
+dataset lineage, split policy, MAE/RMSE and error analysis by operating condition.
+If the actual desired target is SAFE/WATCH/DANGER classes, write a replacement ADR and
+retrain as classification rather than relabeling regression output.
+
+================================================================================
+35. DATA DICTIONARY — NORMATIVE CORE FIELDS
+================================================================================
+boot_id | uint64 | unique boot/session identifier | new value each boot
+sequence_no | uint32 | monotonically increasing per boot | wrap policy documented
+timestamp_ms | uint64 | monotonic milliseconds since boot | not UTC
+sensor_id | enum/uint16 | sensor registry identifier | unknown ID rejected
+raw_value | int32/float | raw driver value | raw_unit mandatory
+physical_value | float32 | calibrated physical value | finite and in range
+valid_mask | bitset | validity by documented field mapping | schema versioned
+quality_flags | uint32 | stale/range/calibration/timestamp flags | defined bit assignments
+schema_id | uint32/string | feature contract identity | match manifest
+schema_version | string | schema semantics version | hash remains authoritative
+schema_hash | byte[32] | SHA-256 canonical schema | exact match
+feature_count | uint16 | model input count | exact model dimension
+feature_values | float32[] | schema-defined units/scaling | finite, ordered by model_index
+window_start_ms/end_ms | uint64 | feature window bounds | end >= start
+model_value | float32[] | model output in target units | invalid if nonfinite
+model_valid | bool | output contract passed | false on any inference failure
+inference_latency_us | uint32 | monotonic inference duration | measured, not wall clock
+risk_state | enum | project-defined risk state | separate from health state
+health_state | enum | UNKNOWN/HEALTHY/DEGRADED/FAULT | separate from risk state
+event_id/error_code | enum/string | registry IDs | append-only after release
+firmware_hash/model_hash/config_hash | byte[32] | artifact hashes | manifest-bound
+calibration_id | uint32/string | active calibration record | sensor revision must match
+Serialize fields explicitly by schema version; never write raw C++ struct bytes as a
+portable log format. Define byte order, float representation and NaN/Inf policy.
+
+================================================================================
+36. INTERNAL API CONTRACT ADDITIONS
+================================================================================
+SensorManager:
+  beginAll() -> SensorInitReport
+  pollDue(now_ms) -> SensorPollReport
+  readSnapshot(out SensorFrame) -> Status
+FeaturePipeline:
+  push(const SensorFrame&) -> PushResult
+  windowReady() -> bool
+  build(FeatureVector&) -> FeatureBuildStatus
+  resetWindow(reason) -> void
+SchemaRegistry:
+  activeSchema() -> const FeatureSchema&
+  validate(const FeatureVector&) -> SchemaValidation
+  compatible(const ModelMetadata&) -> bool
+ConfigManager:
+  loadLastValid() -> ConfigLoadResult
+  validate(manifest) -> ConfigValidation
+  activateAtomically(manifest) -> Status
+RecoveryManager:
+  requestRecovery(FaultContext) -> RecoveryRequestId
+  pollRecovery(id) -> RecoveryStatus
+Every API must document buffer ownership, timeout/WCET, thread/task context, retryability,
+and status distinctions (success, retryable failure, permanent failure, invalid input).
+No API may block indefinitely.
+
+================================================================================
+37. FEATURE SCHEMA RELEASE GATE
+================================================================================
+[ ] Sensor models, units, calibration, coordinate frame and timestamp semantics confirmed.
+[ ] Sample rate, window, stride, filters, scaling and missing-data policy frozen.
+[ ] Canonical feature_schema.json and SHA-256 generated.
+[ ] Every feature has ID/name/unit/formula/range/model_index/verification evidence.
+[ ] Regression target, unit, label generation and output scaling are explicit.
+[ ] Feature count/order exactly matches actual Edge Impulse model metadata.
+[ ] Firmware/model/schema/config hashes bound in release manifest.
+[ ] Golden vectors pass on host and ESP32-S3 within approved tolerances.
+[ ] Replay regression report attached to release.
+[ ] Negative tests prove mismatch/NaN/stale inputs do not call inference.
+[ ] Compatibility matrix passes and is included in package.
+[ ] Responsible reviewer approves schema and dataset/model lineage.
+If any required item is incomplete, disable inference in field release; a sensor-logging
+diagnostic build may be released separately with explicit non-safety labeling.
+
+================================================================================
+38. RELEASE BLOCKERS / OPEN DECISIONS
+================================================================================
+P0 before model inference: actual Feature Schema + hash; model export and input metadata;
+sensor models/units/HX710B transducer/calibration; board revision/flash/PSRAM/pin map/
+partition/power; reviewed RiskConfig and output fail-state; measured RAM/timing/queues.
+P1 before field test: retry limits/reset-loop threshold/power behavior; retention/storage
+policy; golden replay fixtures; compatibility verifier; memory/timing/HIL reports; 72h soak.
+P2 later: package signing/secure boot/OTA after threat model and rollback verification;
+RTC/UTC if needed; networking only if explicitly required.
+Final principle: Feature Schema Contract is the central interface. A compiling firmware
+or running model does not prove correctness if feature order, units, transforms or window
+semantics differ from training. All TBDs require evidence from actual model, board and tests.
+
+================================================================================
+39. UML DEPLOYMENT DIAGRAM
+================================================================================
+Mục đích: mô tả node vật lý, artifact triển khai và kênh kết nối. Diagram này là
+logical deployment baseline; pin map, board revision, storage và transducer vẫn TBD.
+
+```mermaid
+graph TB
+  subgraph FIELD[Field device]
+    ESP[ESP32-S3 MCU / FreeRTOS]
+    FW[Firmware ELF/BIN]
+    EI[Edge Impulse generated model library]
+    CFG[Config + manifest + calibration]
+    SD[(microSD: CSV / events / diagnostics)]
+    SER[USB-UART / Serial console]
+    SENS[IMU + soil moisture + rain sensor + HX710B interface]
+    OUT[Optional LED / buzzer / relay]
+    FW --> ESP
+    EI --> ESP
+    CFG --> ESP
+    SENS <--> ESP
+    ESP <--> SD
+    SER <--> ESP
+    ESP --> OUT
+  end
+  subgraph HOST[Engineering / test host - not required at runtime]
+    PIO[PlatformIO + compiler]
+    REPLAY[Replay / golden-vector test tool]
+    PACK[Release package + hashes + model card]
+  end
+  PIO -->|build| FW
+  REPLAY -->|offline validation| PACK
+  PACK -->|controlled deployment| FW
+```
+
+Deployment rules:
+- Runtime inference and risk evaluation execute locally on ESP32-S3; no PC/cloud is
+  required for normal operation.
+- Host replay/build tools are engineering tools, not runtime dependencies.
+- SD absence must not block sensing/risk logic; storage health becomes degraded.
+- USB Serial is diagnostic/control surface only; commands that change persistent config
+  require validation, authorization policy and transaction handling.
+- Diagram does not imply electrical compatibility or finalized pin assignment.
+
+================================================================================
+40. COMPONENT DIAGRAM / SUBSYSTEM DEPENDENCIES
+================================================================================
+Dependency direction is inward toward contracts/domain logic. Drivers do not depend on
+RiskManager, FeaturePipeline or generated Edge Impulse headers. Only the EI adapter may
+include generated EI API headers.
+
+```mermaid
+graph LR
+  subgraph HAL[Hardware / Platform]
+    BSP[BSP + BoardPins]
+    DRV[Sensor Drivers]
+    FS[Storage Driver]
+    RTOS[FreeRTOS / ESP-IDF-Arduino]
+  end
+  subgraph SERVICES[Services / Adapters]
+    SAL[Sensor Abstraction Layer]
+    CAL[Calibration Service]
+    STORE[StorageManager]
+    EIAD[EdgeImpulseAdapter]
+    CFGM[ConfigManager]
+    DIAG[Diagnostics / HealthMonitor]
+  end
+  subgraph DOMAIN[Domain]
+    DQ[DataQuality]
+    FP[FeaturePipeline]
+    RM[RiskManager + RiskConfig]
+    CONTRACT[SensorFrame / FeatureVector / ModelOutput / RiskAssessment]
+  end
+  subgraph APP[Application]
+    TASKS[FreeRTOS Tasks + Queues]
+    APPCTRL[AppController / StartupCoordinator]
+    LOG[EventLogger / SerialCommandRouter]
+  end
+  DRV --> BSP
+  FS --> BSP
+  DRV --> SAL
+  SAL --> CAL
+  SAL --> CONTRACT
+  CAL --> DQ
+  DQ --> FP
+  FP --> CONTRACT
+  FP --> EIAD
+  EIAD --> CONTRACT
+  CFGM --> CAL
+  CFGM --> RM
+  RM --> CONTRACT
+  STORE --> FS
+  LOG --> STORE
+  DIAG --> RTOS
+  TASKS --> SAL
+  TASKS --> FP
+  TASKS --> EIAD
+  TASKS --> RM
+  TASKS --> LOG
+  APPCTRL --> TASKS
+  APPCTRL --> CFGM
+  APPCTRL --> BSP
+```
+
+Rules:
+- Queues are explicit asynchronous boundaries; no service may secretly call another
+  task's private mutable state.
+- Domain logic should be host-testable and avoid direct FreeRTOS/Arduino dependencies.
+- Cross-layer dependency violations are review failures (e.g. driver calling logger,
+  FeaturePipeline including generated EI headers, RiskManager writing SD directly).
+- Diagram is logical; exact class/interface split can change only through reviewed ADR/API
+  version change.
+
+================================================================================
+41. THREAD-SAFETY MATRIX
+================================================================================
+Definitions: "Task-owned" means exactly one task may call mutating methods. "Queue" means
+messages cross task boundaries by value or immutable ownership transfer. Mutexes must be
+short-held; never hold one across sensor I/O, SD writes, inference, delays or callbacks.
+
+Component | Thread-safety / ownership | Mutex / synchronization | Rule
+SensorManager / SAL | Task-owned by T-SENSOR; not generally thread-safe | None internally unless driver requires it | Other tasks request snapshots via queue, not direct calls
+Sensor driver instance | One owner task per physical bus/device | Bus mutex only if multiple tasks truly share bus | Prefer one bus-owner task; timeout every transaction
+FeaturePipeline | Single consumer T-PIPE | None | No concurrent push/reset/config mutation
+CalibrationService | Immutable active snapshot; writes by ConfigManager only | Short critical section or pointer swap | Never mutate active calibration field-by-field
+EdgeImpulseAdapter | Single caller T-INFER unless EI SDK proves thread-safe | No mutex under single-owner rule | One inference at a time
+RiskManager | Task-owned by T-RISK | None | Inputs via queues; publish immutable assessment
+EventLogger | Multi-producer API, single logger consumer | FreeRTOS queue; no shared string buffer | Copy bounded event payload into queue
+StorageManager / SD | T-LOG only | None if strictly single-owner; otherwise storage mutex | No other task opens/writes files
+ConfigManager | Startup owner, or serialized command owner | Transaction lock / immutable snapshot swap | No partial activation visible to readers
+HealthMonitor | Metrics owned by producer or atomic snapshot | Atomics/critical section for small counters only | No long global critical section
+OutputController | T-OUTPUT only | Queue for commands; mutex only if shared driver | Command state != verified output state
+SerialCommandRouter | T-DIAG owns UART RX/TX | Single UART owner; bounded command queue | No concurrent printf from arbitrary tasks
+WatchdogSupervisor | T-WDT owns feed decision | Atomic/queue heartbeat snapshots | Feed only after policy checks
+
+Implementation requirements:
+- Document task owner for every mutable object in its header.
+- Public APIs state whether they are task-only, ISR-safe, blocking, or non-blocking.
+- ISR handlers only capture minimal data and notify a task; never perform logging, model
+  inference, allocation or SD I/O from ISR context.
+- Use queue-by-value for small fixed-size messages; for large buffers use an explicit
+  pool/ownership-transfer protocol and prove exactly one release path.
+- Add stress tests for concurrent diagnostic requests, event producers and queue overflow.
+
+================================================================================
+42. DATA LIFE CYCLE / OWNERSHIP / RETENTION IN RAM
+================================================================================
+```mermaid
+flowchart LR
+  A[Sensor sample / raw read] --> B[SensorFrame]
+  B --> C[ProcessedFrame]
+  C --> D[FeatureVector]
+  D --> E[ModelOutput]
+  E --> F[RiskAssessment]
+  B --> G[CsvRecord / event record]
+  C --> G
+  D --> G
+  E --> G
+  F --> G
+  G --> H[Logger queue]
+  H --> I[Serialized SD record]
+```
+
+Stage | Owner | Lifetime / release rule | Invalid/failure behavior
+Raw sample | Sensor driver / T-SENSOR | Until copied into SensorFrame; no retained driver pointer | Return status + timestamp; no synthetic zero
+SensorFrame | Queue then T-PIPE | Queue owns copied item; consumer releases slot after receive/process | Mark validity/quality flags; reject stale frame
+ProcessedFrame/window | T-PIPE | Window buffer persists for configured window; overwritten only after feature extraction policy permits | Reset/invalidate window after sequence gap per schema rule
+FeatureVector | Q_FEATURE then T-INFER | Immutable message until inference consumer finishes | Schema/hash/dimension mismatch => do not invoke model
+ModelOutput | Q_MODEL then T-RISK | Immutable result/status until consumed | Failure is invalid output with explicit status, never score=0
+RiskAssessment | T-RISK; snapshot published to T-OUTPUT/T-LOG | Until consumers copy/acknowledge; prefer value snapshot | Separate RiskState from HealthState
+CsvRecord/event | Queue then T-LOG | Queue slot released after serialization/write attempt; retry buffer bounded | Count drops/errors; no unbounded retry accumulation
+Serialized bytes | T-LOG / filesystem | Until write/flush/rotation; storage policy governs retention | Partial-write recovery and record integrity checks
+
+Lifecycle rules:
+- Every queue item is a value type or carries an explicit owner-managed pool handle; raw
+  pointers into a producer's stack or mutable buffer are forbidden.
+- Every data structure has a bounded size, a validity/status field where needed, and a
+  documented timestamp basis (monotonic for timing; UTC optional for wall-clock labels).
+- A consumer must not retain a pointer/reference to a queue item after its lifetime ends.
+- Logging failure must not retain unlimited records in RAM. Any retry cache has a fixed
+  capacity, expiry/drop policy and observable counter.
+- CSV persistence is not a substitute for in-RAM ownership rules; serialization copies
+  fields into a bounded record buffer owned by T-LOG.
+
+================================================================================
+43. QUEUE MEMORY ACCOUNTING — STATIC + MEASURED
+================================================================================
+Queue RAM formula (FreeRTOS queue-by-copy):
+  RAM_queue_payload = queue_depth * sizeof(item_type)
+  RAM_queue_total ~= RAM_queue_payload + sizeof(StaticQueue_t) + queue control metadata
+                    + alignment/padding
+Use actual sizeof() from the target build; never assume the illustrative values below are
+actual ESP32-S3 measurements. Record compiler, architecture, packing and build flags.
+
+Queue | Depth | Illustrative item size | Payload RAM | Status
+Q_SENSOR | 32 | 256 B | 8,192 B (8 KiB) | Example only; measure sizeof(SensorFrame)
+Q_FEATURE | 4 | 128 B | 512 B | Example only; depends on feature count/type
+Q_MODEL | 4 | 64 B | 256 B | Example only; includes status/metadata
+Q_EVENT | 16 | 96 B | 1,536 B | Example only; bounded event payload
+Q_OUTPUT | 4 | 32 B | 128 B | Example only
+Q_COMMAND | 8 | 64 B | 512 B | Example only
+TOTAL illustrative payload | | | 11,136 B | Excludes queue metadata, alignment, task stacks and pools
+
+Accounting procedure:
+1. Add compile-time diagnostics: sizeof(SensorFrame), sizeof(ProcessedFrame),
+   sizeof(FeatureVector), sizeof(ModelOutput), sizeof(RiskAssessment), sizeof(EventMessage),
+   sizeof(CsvRecord), sizeof(each queue item).
+2. Prefer xQueueCreateStatic() for deterministic queue storage where supported by the
+   selected framework; include both StaticQueue_t and backing byte-array sizes.
+3. Add fixed window buffers, EI tensor/signal buffers, logger serialization buffers,
+   filesystem/SD buffers, task stacks, task control blocks, driver state, heap fragmentation
+   reserve, and worst-case temporary allocation to the RAM budget.
+4. Measure free heap, minimum-ever free heap, largest allocatable block, task stack
+   high-water marks and queue high-water marks under inference + SD + diagnostics stress.
+5. Set release limits from the selected board's actual SRAM/PSRAM map and measured peak,
+   retaining an explicit safety margin approved for this prototype.
+
+Example compile-time report (adapt to actual types):
+```cpp
+static_assert(sizeof(SensorFrame) <= SENSOR_FRAME_MAX_BYTES,
+              "SensorFrame exceeds RAM contract");
+// Emit sizeof(...) values in a host/target memory-report test.
+```
+
+Do not count PSRAM as equivalent to internal RAM for DMA, ISR or library allocations unless
+the specific allocation and API explicitly support it. No release PASS until the complete
+RAM report is generated from the actual firmware build.
+
+================================================================================
+44. STARTUP FAILURE MATRIX
+================================================================================
+Failure | Continue startup? | Required state/action | Inference allowed?
+BSP/clock/critical GPIO init fails | No | Fatal boot error; safe outputs; persist/reset reason if possible | No
+RiskConfig missing, invalid or hash mismatch | No for operational mode | Fail closed; diagnostics-only mode may be explicitly selected | No
+Manifest missing/invalid/signature-or-hash mismatch | No for operational mode | Reject candidate package; report manifest error | No
+Feature schema absent/mismatch | No for inference mode | Disable inference; allow sensor-logging diagnostics build only if explicitly configured | No
+Model artifact absent/hash/dimension mismatch | Degraded startup | Model unavailable; rule-based monitoring may run only if reviewed RiskConfig permits | No
+EI SDK initialization failure | Degraded startup | HealthState degraded; retry only per bounded policy | No
+IMU init/read failure | Yes, degraded | Set sensor unavailable/stale; emit event; rule policy determines risk validity | Only if schema explicitly permits missing IMU; default no
+Soil sensor failure | Yes, degraded | Mark channel invalid; no zero substitution | Only if model schema explicitly defines missing-data handling; default no
+Rain sensor failure | Yes, degraded | Mark invalid; rule-based rain rule cannot treat failure as dry | Only if schema explicitly permits missing data; default no
+HX710B / transducer not configured | Yes only in diagnostic build | Mark channel unsupported/unconfigured; never infer physical unit | No until ADR/schema/model contract resolved
+SD missing/full/write failure | Yes, degraded | Continue bounded sensing/risk; count log loss and expose diagnostics | Yes if all inference prerequisites are valid
+Output device failure | Yes, degraded / alarm unavailable | Record command/feedback mismatch; do not claim alarm delivered | Yes; assessment remains separate from output health
+Calibration missing/invalid | Degraded or no inference according to channel criticality | Reject calibration; use raw data only for diagnostics | No if calibration is required by schema
+Time source unavailable | Yes | Use monotonic time and mark wall-clock unsynchronized | Yes if schema uses monotonic-relative timing
+
+Startup policy:
+- Distinguish bootable diagnostic mode, degraded monitoring mode and operational inference
+  mode. The allowed mode must be explicitly declared in configuration/manifest.
+- A component may be optional only when its absence is represented in HealthState and the
+  risk/model contract explicitly permits it. "Startup continues" does not mean "healthy".
+- No default risk thresholds or missing-data semantics may be silently invented.
+
+================================================================================
+45. BOOT TIME BUDGET AND STARTUP DEADLINES
+================================================================================
+Provisional performance target: operational-ready within 15 s after reset release under
+nominal conditions. This is a target to validate, not a measured guarantee. Define the
+start point and end point in test reports; exclude bootloader time only if explicitly stated.
+
+Stage | Target | Deadline/failure behavior
+Early BSP / safe outputs | <= 1 s | Fatal if clocks or safety-relevant output initialization fails
+Load manifest/config/calibration | <= 1 s | Invalid required config => no operational mode
+Self-test / memory checks | <= 3 s | Critical failure => fatal; optional failure => degraded
+Sensor initialization | <= 5 s | Per-sensor timeout; proceed degraded where policy permits
+Model/EI initialization | <= 2 s | Failure => inference disabled/degraded mode
+Task/queue startup + readiness checks | <= 2 s | Missing critical task/queue => fatal
+Total sequential budget | <= 14 s nominal | Reserve <= 1 s for orchestration/measurement margin
+Overall ready target | < 15 s | Verify on target board across cold/warm resets
+
+The stage budgets are provisional and must not be interpreted as guaranteed additive maxima
+if stages overlap. Each stage uses a monotonic clock, bounded timeouts and a recorded result.
+Measure at least 100 cold/warm boots per release candidate, reporting median, P95, maximum,
+board revision, firmware/model/config hashes and fault-injection outcomes. Also test SD
+missing, model invalid and each sensor absent; degraded startup has its own documented
+readiness deadline. Do not wait indefinitely for a peripheral.
+
+================================================================================
+46. INTERFACE VERSIONING AND COMPATIBILITY RULES
+================================================================================
+Contract version constants are required in firmware, replay tools and release manifest:
+
+```cpp
+#define SENSOR_API_VERSION  0x00010000u
+#define FEATURE_API_VERSION 0x00010000u
+#define MODEL_API_VERSION   0x00010000u
+#define EVENT_API_VERSION   0x00010000u
+#define CONFIG_API_VERSION  0x00010000u
+```
+
+The values above are examples of the initial 1.0.0 contract and must be updated to the
+actual release. Encoding: 0xMMMMmmpp = major/minor/patch (8 bits each); reserve the low
+byte for patch. If the project chooses another encoding, document it once and use it
+consistently across firmware and host tools.
+
+Rules:
+- MAJOR: incompatible field meaning/layout, units, ordering, timestamp semantics, missing
+  data policy or behavior; require explicit migration and compatibility rejection by default.
+- MINOR: backward-compatible additive field/command with safe default; consumers must ignore
+  unknown optional fields only where the serialization contract explicitly allows it.
+- PATCH: correction that does not change wire/data semantics.
+- Version equality alone is insufficient for model input compatibility: compare feature
+  schema ID/version/hash, ordered feature IDs, units, window/stride, normalization, model
+  hash, output contract and EI export metadata.
+- Firmware, replay tool, model, calibration, RiskConfig, manifest and log schema versions
+  must be recorded in every replay report and release package.
+- CI must reject unsupported major versions before parsing or inference. No silent fallback.
+- Golden replay fixtures include the exact version tuple and hashes; stale replay tools fail
+  with a clear compatibility error rather than producing apparently valid output.
+
+================================================================================
+47. CONFIGURATION TRANSACTION FLOW
+================================================================================
+```mermaid
+flowchart TD
+  A[Load candidate bytes] --> B[Parse with size and format limits]
+  B --> C[Validate schema and API versions]
+  C --> D[Verify hash / signature policy]
+  D --> E[Validate ranges and cross-field invariants]
+  E --> F[Check model + feature schema compatibility]
+  F --> G[Build immutable candidate snapshot]
+  G --> H[Activate at safe boundary]
+  H --> I[Run post-activation health checks]
+  I -->|Pass| J[Commit active version / audit event]
+  I -->|Fail| K[Rollback to last known-good snapshot]
+  B -->|Fail| X[Reject candidate]
+  C -->|Fail| X
+  D -->|Fail| X
+  E -->|Fail| X
+  F -->|Fail| X
+  K --> L{Known-good config valid?}
+  L -->|Yes| M[Continue with old config and report rollback]
+  L -->|No| N[Fail closed: diagnostic-only / no inference]
+```
+
+Transaction requirements:
+- Active config is immutable; activation swaps one complete validated snapshot, never
+  exposes partially updated fields to consumers.
+- Persistent commit uses two-slot or equivalent A/B records with generation counter, length,
+  CRC/hash, schema version and a final commit marker written last. Keep the prior valid slot
+  until the new slot is verified after write/readback.
+- On power loss during candidate write, boot selects the newest fully valid committed slot;
+  never accept a truncated or uncommitted candidate.
+- Hash provides integrity detection, not authenticity. If hostile modification is in scope,
+  add signature verification and key lifecycle in a separately reviewed security design.
+- OTA remains disabled until partition layout, authenticity, rollback and power-failure tests
+  have passed. The same transactional principles apply to local config updates.
+
+================================================================================
+48. EDGE IMPULSE MODEL CARD — REQUIRED ARTIFACT
+================================================================================
+Status: TEMPLATE / NOT RELEASE-READY. Do not fill unknown model facts with illustrative
+values. The completed card must be generated from the actual trained project, exported
+library metadata, training evaluation report and approved dataset lineage.
+
+Field | Required value | Current status
+Model name / model ID | Stable unique identifier | TBD
+Model task | Regression or classification | PROVISIONAL; ADR-002 open
+Model version / training run | Immutable version and run ID | TBD
+Training dataset ID / hash | Dataset lineage, splits and label procedure | TBD
+Training/evaluation date | Reproducible metadata | TBD
+Input feature count | Exact exported model input dimension | TBD
+Feature schema ID/version/SHA-256 | Canonical ordered schema | TBD
+Sampling rate / window / stride | Exact training and runtime semantics | TBD
+Feature names/order/units | Match generated model input mapping exactly | TBD
+Normalization/scaling/filtering | Exact fitted constants and transform order | TBD
+Missing/outlier policy | Explicit reject/impute/mask semantics | TBD
+Output name/count/unit/range | Exact model output contract | TBD
+Regression target definition | Physical/normalized target and label-generation method | TBD
+Metrics | MAE, RMSE, R-squared or task-appropriate metrics with units | TBD
+Evaluation protocol | Split method, leakage controls, test-set size | TBD
+Known limitations / operating domain | Environment, sensor placement, range, drift | TBD
+Edge Impulse project/export version | Exact version and export date | TBD
+EI SDK/library hash | Reproducible generated artifact hash | TBD
+Quantization/optimization | Float/int8, RAM/Flash requirements | TBD
+Golden vectors | Inputs, expected outputs, tolerances and hashes | TBD
+Approval | Reviewer/date/release decision | Pending
+
+Model card rules:
+- Metrics must include units and evaluation split; never copy example MAE/RMSE values as
+  project results without an actual report.
+- Input dimension is not necessarily the count of named physical sensors; it is the exact
+  tensor/vector contract consumed by the exported model.
+- Store model card alongside model artifact, feature_schema.json, manifest and replay report.
+- Release gate: no inference in operational mode while required card fields are TBD.
+
+================================================================================
+49. ADR-003 — HX710B TRANSDUCER / MEASURAND DECISION
+================================================================================
+Status: OPEN — no physical measurand is approved. HX710B is an ADC/interface component;
+its presence does not identify what physical quantity the attached transducer measures.
+
+Decision to make:
+A. Load cell / force or load measurement.
+B. Pore-water pressure transducer.
+C. Soil stress / contact pressure transducer.
+D. Other explicitly specified bridge/transducer.
+E. Exclude HX710B from this model/release until a transducer is selected.
+
+Required evidence before decision:
+- Exact transducer manufacturer/model, datasheet and wiring/bridge configuration.
+- Physical measurand, unit, full scale, overload limit, accuracy, drift and temperature range.
+- Calibration procedure, traceability, calibration coefficients and persistence version.
+- Mechanical placement, installation method, waterproofing and field-maintenance procedure.
+- Electrical supply, excitation, grounding, cable length/noise, sample rate and conversion
+  timing; verify the HX710B operating mode and library implementation against its datasheet.
+- Raw count to engineering-unit conversion, sign convention, valid range and fault detection.
+- Whether the measurement is present in training data and whether its semantics match the
+  model training labels and feature schema.
+
+Consequences:
+- Until approved, expose channel status as UNCONFIGURED; do not label values as pressure,
+  load or stress and do not add it to Feature Schema Contract.
+- Selecting a measurand requires a new feature-schema revision, calibration version, test
+  fixtures, dataset lineage review and model retraining/revalidation if the input changes.
+- If excluded, record exclusion in BOM, manifest, diagnostics and model card; unused readings
+  must not silently affect risk decisions.
+- ADR approval requires owner, evidence links, date and explicit accepted option.
+
+================================================================================
+50. SERIAL DEBUG / DIAGNOSTICS PROTOCOL
+================================================================================
+Transport: USB-UART/Serial, line-oriented UTF-8/ASCII commands, one command per line,
+maximum command length 128 bytes (configurable but bounded). Proposed default baud rate is
+115200 and must match the board configuration. Responses are bounded and machine-readable;
+no arbitrary memory dumps or unbounded printing in runtime tasks.
+
+Command | Purpose | Example response fields | Side effects
+help | List supported commands | command list, protocol version | None
+ diag status | Overall status | firmware, boot_id, uptime_ms, mode, RiskState, HealthState | None
+ diag memory | Memory snapshot | free_heap, min_free_heap, largest_block, stack_high_water per task | None
+ diag sensors | Sensor health snapshot | sensor_id, status, last_sample_ms, age_ms, error_count, validity | None
+ diag risk | Risk snapshot | assessment_valid, risk_state, model_status, score only if valid, reason_codes | None
+ diag queues | Queue metrics | queue_id, depth, high_water, drops, overflows | None
+ diag model | Model compatibility | model_hash, schema_hash, API versions, initialized, last_infer_status | None
+ diag config | Active configuration metadata | config_version, hash, calibration_version, risk_config_version | None
+ diag logs | Storage health | mounted, free_bytes, write_errors, dropped_records | None
+ diag reset | Request controlled reboot | accepted/rejected, reason | Reboot; restricted policy
+
+The leading whitespace in command names above is not significant; canonical commands are
+`diag status`, `diag memory`, `diag sensors`, `diag risk`, `diag queues`, `diag model`,
+`diag config`, `diag logs`, `diag reset`.
+
+Protocol rules:
+- Every response includes protocol version, request ID (or sequence), result status and
+  bounded error code. Use CRLF or LF consistently and document it in the host tool.
+- Commands are parsed only by the UART-owner task. Concurrent tasks publish structured
+  diagnostics snapshots; they do not print directly to UART.
+- Read-only commands are available in field diagnostic mode. Reset/config-changing commands
+  require explicit enablement and confirmation policy; no hidden destructive command.
+- Reject unknown commands, overlong lines, malformed numbers and repeated command floods;
+  rate-limit output so diagnostics cannot starve sensing or inference.
+- No secrets or personal data in logs. Diagnostic values must distinguish invalid/unavailable
+  from numeric zero. `diag risk` must not imply a valid risk score when inference failed.
+
+================================================================================
+51. ADR-002 STATUS — REGRESSION VS CLASSIFICATION
+================================================================================
+Status remains PROVISIONAL. The LLD architecture may support an adapter boundary for either
+kind of model, but no final target/output semantics are approved in this revision.
+
+Decision criteria:
+- If the required output is a calibrated continuous target with a meaningful physical unit
+  and training labels support that quantity, regression may be appropriate.
+- If the required output is a defined class/state and labels are reliable, classification
+  may be appropriate.
+- A regression score is not automatically a probability of landslide. A classification
+  confidence is not automatically a calibrated probability or a validated alarm threshold.
+- The model must be evaluated against the field operating domain, class/target imbalance,
+  false negatives/positives, temporal leakage, sensor drift and missing-data conditions.
+- The system's final RiskState must combine model validity, independent rule checks, data
+  quality and HealthState under an approved RiskConfig; the model output alone is not a
+  certified landslide prediction.
+
+Decision gate before freeze:
+1. Define operational question and output meaning, unit/range and response to invalid data.
+2. Define label/ground-truth generation and dataset split strategy.
+3. Compare candidate models using held-out data and field-relevant error/cost analysis.
+4. Review thresholds, hysteresis/persistence, alarm response and failure mode with domain
+   owner; document limitations and non-safety status of prototype.
+5. Freeze ADR-002, model card, feature schema and RiskConfig together; version/hash all.
+
+No training report, label definition or stakeholder-approved output meaning was provided in
+this revision. Therefore ADR-002 cannot responsibly be marked ACCEPTED and no metrics or
+risk thresholds are invented here.
+
+================================================================================
+52. RELEASE CHECKLIST ADDITIONS FOR LLD v1.2
+================================================================================
+[ ] Deployment diagram matches actual BOM, host/runtime boundary and storage topology.
+[ ] Component diagram and dependency direction pass architecture review.
+[ ] Thread-safety matrix has an owner for every mutable component and shared peripheral.
+[ ] Data lifecycle documents ownership, lifetime, validity and release for every message.
+[ ] Target-build queue memory accounting includes sizeof, metadata, stacks, pools and margin.
+[ ] Startup failure matrix is implemented and fault-injection tested.
+[ ] Boot timing measured on target hardware and readiness endpoints are defined.
+[ ] Firmware and replay tools enforce interface/API versions and schema/model hashes.
+[ ] Config update is transactional and power-loss tests preserve a valid committed version.
+[ ] Model card completed from actual EI export, dataset lineage and evaluation report.
+[ ] ADR-003 transducer/measurand selected or HX710B explicitly excluded from inference.
+[ ] Serial diagnostics protocol is bounded, rate-limited and tested under load.
+[ ] ADR-002 regression/classification decision approved with evidence.
+[ ] All TBDs relevant to operational inference closed; otherwise release diagnostic-only.
+
+Document status: LLD v1.2 extends v1.1. It adds architecture and verification contracts but
+does not claim measured RAM/boot-time performance, final sensor hardware, finalized model
+semantics, or safety certification. Prototype use must remain explicitly non-safety-rated.
+
+
+LLD v1.3 CHANGE NOTE — MPU9250/I2C BASELINE (2026-10-29)
+================================================
+Decision status: SELECTED — IMU model = MPU9250; host interface = I2C.
+This decision supersedes any earlier wording that described the MPU9250 interface as “I2C/SPI TBD” or “I2C or SPI”.
+
+Normative requirements:
+1. The MPU9250 shall be accessed through the ESP32-S3 I2C controller and a dedicated MPU9250 driver; it shall not be read as an analog voltage through the ESP32-S3 ADC.
+2. The driver shall perform bounded bus transactions, device/identity validation where supported by the module, register configuration, sample acquisition, and explicit status/error reporting. No infinite waits and no fabricated zero samples are permitted.
+3. Keep raw register/count values separate from converted physical values. Acceleration scale/unit, gyro usage and scale, axis orientation, mounting transform, output data rate (ODR), digital low-pass filter, sample period, bus clock, SDA/SCL GPIO, I2C address, pull-ups/electrical details, and calibration coefficients remain TBD until confirmed from the actual board/module, datasheet, schematic and bench test. Do not infer these values from the sensor name alone.
+4. Timestamp and sequence each sample; expose per-channel validity and freshness. Detect I2C timeout/bus error, invalid device identity if applicable, stale/missing samples, and recovery attempts. A failed read must not be represented as a valid measurement.
+5. The downstream SensorFrame, dataset raw record, calibrated channels and Edge Impulse input contract must preserve unit, coordinate-frame, calibration/version and quality metadata. This change does not approve any feature as a model input or freeze sampling/window/model semantics.
+6. Verify the exact breakout/module voltage compatibility and I2C pull-up arrangement before connecting it to ESP32-S3. The chosen I2C bus pins and clock rate are board configuration items and remain TBD.
+
+Acceptance evidence required before hardware baseline freeze:
+- Confirmed BOM/module and datasheet revision; schematic/pin map; I2C address and electrical-level review.
+- Cold/warm initialization and repeated read test; device identity/configuration check where supported.
+- Bench test of all three acceleration axes and sign/orientation; scale/unit comparison against a suitable reference; gyro checks if gyro channels are used.
+- Fault injection or test fixture for disconnected sensor, timeout, bus error, stale data and recovery.
+- Captured test report and versioned driver/configuration.
+
+Status remains DRAFT. No GPIO, I2C clock, range, ODR, filter, unit conversion, calibration, or model input value is approved by this change note unless separately verified.
