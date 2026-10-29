@@ -12,6 +12,14 @@ struct ModelOutput {
     std::uint32_t schemaVersion{0};
     std::uint64_t bootId{0};
     std::uint64_t inferenceId{0};
+    std::uint64_t relatedSequenceNo{0};
+    std::uint64_t sourceWindowStartMs{0};
+    std::uint64_t sourceWindowEndMs{0};
+    std::uint32_t sourceWindowSampleCount{0};
+    std::uint32_t sourceFeatureSchemaVersion{0};
+    std::uint32_t sourceFeatureSchemaId{0};
+    std::uint8_t sourceFeatureSchemaHashSha256[32]{};
+    bool sourceFeatureSchemaHashValid{false};
     std::uint64_t inferenceStartMs{0};
     std::uint32_t inferenceDurationMs{0};
     std::uint32_t inferenceLatencyUs{0};  // TODO(TBD): choose canonical duration unit.

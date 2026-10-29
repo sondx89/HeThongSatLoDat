@@ -71,10 +71,10 @@ TaskStepResult TaskSensor::runOne() noexcept {
         return TaskStepResult::Failure;
     }
 
-    // The sample was acquired even if the bounded queue rejects it; queue drops
-    // are counted by QueueRegistry, while this heartbeat reflects acquisition work.
-    (void)queues_.sendSensor(frame, 0);
-    return TaskStepResult::Progress;
+    return queues_.sendSensor(frame, 0) ==
+                   project::queues::QueueRegistryStatus::Ok
+               ? TaskStepResult::Progress
+               : TaskStepResult::Failure;
 }
 
 TaskFeature::TaskFeature(
@@ -90,6 +90,9 @@ TaskFeature::TaskFeature(
 
 bool TaskFeature::onStart() noexcept {
     featureConfigurationFailureReported_ = false;
+    lastSensorBootId_ = 0U;
+    lastSensorSequence_ = 0U;
+    hasLastSensorSequence_ = false;
     if (!calibration_.loadCalibration()) {
         return false;
     }
@@ -104,6 +107,22 @@ TaskStepResult TaskFeature::runOne() noexcept {
     if (received != project::queues::QueueRegistryStatus::Ok) {
         return queueTimeoutResult(received);
     }
+
+    const bool sequenceGap =
+        hasLastSensorSequence_ &&
+        (sensorFrame.bootId != lastSensorBootId_ ||
+         lastSensorSequence_ == UINT64_MAX ||
+         sensorFrame.sequence != lastSensorSequence_ + 1U);
+    if (sequenceGap) {
+        pipeline_.resetWindow();
+        if (!events_.reportFeatureRejection(
+                FeatureRejectReason::SensorSequenceGap, sensorFrame, nullptr)) {
+            return TaskStepResult::Failure;
+        }
+    }
+    lastSensorBootId_ = sensorFrame.bootId;
+    lastSensorSequence_ = sensorFrame.sequence;
+    hasLastSensorSequence_ = true;
 
     project::models::ProcessedFrame qualityFrame{};
     if (!quality_.process(sensorFrame, qualityFrame)) {
@@ -158,7 +177,13 @@ TaskStepResult TaskFeature::runOne() noexcept {
                    ? TaskStepResult::Progress
                    : TaskStepResult::Failure;
     }
-    (void)queues_.sendFeature(features, 0);
+    if (queues_.sendFeature(features, 0) !=
+        project::queues::QueueRegistryStatus::Ok) {
+        pipeline_.resetWindow();
+        (void)events_.reportFeatureRejection(
+            FeatureRejectReason::FeatureQueueFull, sensorFrame, &processed);
+        return TaskStepResult::Failure;
+    }
     return TaskStepResult::Progress;
 }
 
@@ -226,12 +251,25 @@ TaskStepResult TaskInference::runOne() noexcept {
     if (output.bootId == 0) {
         output.bootId = features.bootId;
     }
+    output.relatedSequenceNo = features.relatedSequenceNo;
+    output.sourceWindowStartMs = features.windowStartMs;
+    output.sourceWindowEndMs = features.windowEndMs;
+    output.sourceWindowSampleCount = features.windowSampleCount;
+    output.sourceFeatureSchemaVersion = features.schemaVersion;
+    output.sourceFeatureSchemaId = features.schemaId;
+    for (std::size_t i = 0; i < sizeof(features.schemaHashSha256); ++i) {
+        output.sourceFeatureSchemaHashSha256[i] =
+            features.schemaHashSha256[i];
+    }
+    output.sourceFeatureSchemaHashValid = features.schemaHashValid;
     output.inferenceId = inferenceId_;
     if (output.timestampMs == 0) {
         output.timestampMs = tickToMillis(xTaskGetTickCount());
     }
-    (void)queues_.sendModel(output, 0);
-    return TaskStepResult::Progress;
+    return queues_.sendModel(output, 0) ==
+                   project::queues::QueueRegistryStatus::Ok
+               ? TaskStepResult::Progress
+               : TaskStepResult::Failure;
 }
 
 TaskRisk::TaskRisk(const TaskRuntimeConfig& config,

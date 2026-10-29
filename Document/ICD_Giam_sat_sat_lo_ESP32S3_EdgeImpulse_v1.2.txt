@@ -261,8 +261,9 @@ active_fault_flags, decision_reason_code, state-enter/persistence data, output s
 risk_config_version.
 
 7.2 State contract
-RiskState: STARTUP, NORMAL, MONITOR, DANGER_TEST, UNKNOWN.
-HealthState: UNKNOWN, HEALTHY, DEGRADED, FAULT.
+RiskState codes: 0=STARTUP, 1=NORMAL, 2=MONITOR, 3=DANGER_TEST, 4=UNKNOWN.
+HealthState codes: 0=UNKNOWN, 1=HEALTHY, 2=DEGRADED, 3=FAULT.
+EventSeverity codes: 0=DEBUG, 1=INFO, 2=NOTICE, 3=WARN, 4=ERROR, 5=CRITICAL.
 Fault flags được duy trì riêng, không gộp thành một enum làm mất thông tin.
 Mapping regression output -> risk state chỉ lấy từ RiskConfig đã review/approved.
 Threshold, unit, persistence, hysteresis, clear condition và policy khi lỗi phải version hóa.
@@ -331,7 +332,8 @@ Q_SENSOR | TaskSensorAcq -> TaskDataQualityFeature | SensorFrame | bounded send;
 Q_FEATURE | FeaturePipeline -> TaskInference | FeatureVector | reject/drop window per policy; never block acquisition indefinitely
 Q_MODEL | TaskInference -> TaskRiskManager | ModelOutput | bounded policy; sequence gap tracked
 Q_RISK/Q_OUTPUT | TaskRiskManager -> Output/telemetry | RiskAssessment/command | latest state may coalesce; transitions must not silently disappear
-Q_EVENT/Q_LOG | logger facade/producers -> TaskLogger | tagged LogRecord | prioritize critical/state transition; count drops
+Q_EVENT | EventLogger/producers -> TaskLogger | EventRecord | prioritize critical/state transition; count drops
+Q_LOG | logger facade/producers -> TaskLogger | tagged LogRecord | bounded send; count drops
 Q_HEALTH | task metrics -> HealthMonitor | metrics/snapshot | aggregate/coalesce noncritical metrics
 
 10.2 Sizing and memory

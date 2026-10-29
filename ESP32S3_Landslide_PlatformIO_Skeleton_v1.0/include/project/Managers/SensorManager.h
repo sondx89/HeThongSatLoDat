@@ -19,6 +19,8 @@ enum class SensorSlot : std::uint8_t {
 };
 
 struct SensorReadPolicy {
+    // These are elapsed-time checks around synchronous calls, not preemption.
+    // Each driver must bound its own bus/peripheral operation.
     std::uint32_t beginTimeoutMicros{0};
     std::uint32_t timeoutMicros{0};
     std::uint8_t maxRetries{0};

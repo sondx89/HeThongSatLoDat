@@ -15,6 +15,7 @@ enum class WatchdogStatus : std::uint8_t {
     NotInitialized,
     AlreadyInitialized,
     TasksNotRegistered,
+    PlatformUnavailable,
     FaultLatched,
     ResetFailed
 };
@@ -22,7 +23,8 @@ enum class WatchdogStatus : std::uint8_t {
 enum class WatchdogFailure : std::uint8_t {
     FaultSink = 1U << 0U,
     EventQueue = 1U << 1U,
-    Reset = 1U << 2U
+    Reset = 1U << 2U,
+    PlatformWatchdog = 1U << 3U
 };
 
 class IWatchdogFaultSink {

@@ -86,6 +86,13 @@ WatchdogStatus WatchdogSupervisor::begin(std::uint64_t bootId) noexcept {
         state_.store(State::Uninitialized, std::memory_order_release);
         return WatchdogStatus::TasksNotRegistered;
     }
+    if (bsp_.watchdogInit() != project::bsp::BspStatus::Ok) {
+        failureFlags_.store(
+            static_cast<std::uint8_t>(WatchdogFailure::PlatformWatchdog),
+            std::memory_order_release);
+        state_.store(State::Uninitialized, std::memory_order_release);
+        return WatchdogStatus::PlatformUnavailable;
+    }
 
     bootId_ = bootId;
     faultedTaskMask_.store(0, std::memory_order_relaxed);
@@ -132,6 +139,18 @@ WatchdogStatus WatchdogSupervisor::checkTaskProgress() noexcept {
         if (!heartbeat.taskCreated || heartbeat.taskExited || heartbeat.stale) {
             return handleTimeout(id, heartbeat);
         }
+    }
+
+    if (bsp_.watchdogFeed() != project::bsp::BspStatus::Ok) {
+        state_.store(State::ResetRequested, std::memory_order_release);
+        failureFlags_.store(
+            static_cast<std::uint8_t>(WatchdogFailure::PlatformWatchdog),
+            std::memory_order_release);
+        (void)bsp_.restart();
+        failureFlags_.fetch_or(
+            static_cast<std::uint8_t>(WatchdogFailure::Reset),
+            std::memory_order_release);
+        return WatchdogStatus::ResetFailed;
     }
 
     return WatchdogStatus::Healthy;

@@ -82,19 +82,11 @@ const char* riskName(project::models::RiskState state) noexcept {
         case project::models::RiskState::Startup:
             return "startup";
         case project::models::RiskState::Normal:
-            return "safe";
-        case project::models::RiskState::Watch:
-            return "watch";
+            return "normal";
         case project::models::RiskState::Monitor:
             return "monitor";
-        case project::models::RiskState::Warning:
-            return "warning";
         case project::models::RiskState::DangerTest:
             return "high_risk_test";
-        case project::models::RiskState::Alarm:
-            return "alarm";
-        case project::models::RiskState::Critical:
-            return "critical";
         case project::models::RiskState::Unknown:
             return "unknown";
     }

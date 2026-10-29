@@ -40,6 +40,17 @@ bool MockModelRuntime::run(
     project::models::ModelOutput& output) {
     output = {};
     output.bootId = input.bootId;
+    output.relatedSequenceNo = input.relatedSequenceNo;
+    output.sourceWindowStartMs = input.windowStartMs;
+    output.sourceWindowEndMs = input.windowEndMs;
+    output.sourceWindowSampleCount = input.windowSampleCount;
+    output.sourceFeatureSchemaVersion = input.schemaVersion;
+    output.sourceFeatureSchemaId = input.schemaId;
+    for (std::size_t i = 0U; i < sizeof(input.schemaHashSha256); ++i) {
+        output.sourceFeatureSchemaHashSha256[i] =
+            input.schemaHashSha256[i];
+    }
+    output.sourceFeatureSchemaHashValid = input.schemaHashValid;
 
     if (!initialized_) {
         output.status = project::models::InferenceStatus::ModelError;

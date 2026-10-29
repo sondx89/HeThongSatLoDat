@@ -363,6 +363,35 @@ void testSensorManagerMarksReadTimeoutAndContinuesSnapshot() {
     TEST_ASSERT_TRUE(frame.hx710bStatus.valid);
 }
 
+void testSensorManagerKeepsPerSensorReadTimestamps() {
+    SensorCallLog calls{};
+    TestClock clock{};
+    TestSensor imu('I', calls, clock);
+    TestSensor soil('S', calls, clock);
+    TestSensor rain('R', calls, clock);
+    TestSensor hx710b('H', calls, clock);
+    imu.readDurationMicros = 1500U;
+    soil.readDurationMicros = 2500U;
+    rain.readDurationMicros = 3500U;
+    hx710b.readDurationMicros = 4500U;
+    auto config = sensorManagerConfig();
+    for (auto& policy : config.readPolicies) {
+        policy.timeoutMicros = 5000U;
+    }
+    project::managers::SensorManager manager(
+        imu, soil, rain, hx710b, config, clock);
+
+    TEST_ASSERT_TRUE(manager.beginAll());
+    TEST_ASSERT_TRUE(manager.pollDue(1000000U));
+    project::models::SensorFrame frame{};
+    TEST_ASSERT_TRUE(manager.readSnapshot(frame));
+    TEST_ASSERT_EQUAL_UINT64(1000U, frame.timestampMs);
+    TEST_ASSERT_EQUAL_UINT64(1001U, frame.imuStatus.timestampMs);
+    TEST_ASSERT_EQUAL_UINT64(1004U, frame.soilStatus.timestampMs);
+    TEST_ASSERT_EQUAL_UINT64(1007U, frame.rainStatus.timestampMs);
+    TEST_ASSERT_EQUAL_UINT64(1012U, frame.hx710bStatus.timestampMs);
+}
+
 void testDataQualityClassifiesRequiredChannelStates() {
     project::services::DataQualityService service(qualityConfig());
     const auto source = goodSensorFrame();
@@ -530,6 +559,59 @@ void testRiskManagerReturnsUnknownForInvalidQualityOrModel() {
                           static_cast<int>(result.risk));
 }
 
+void testRiskManagerHealthFaultBlocksModelRisk() {
+    project::managers::RiskManager manager(riskConfig());
+    project::models::RiskAssessment result{};
+    project::managers::RiskEvaluationContext context{
+        7U, 1U, 1000U, HealthState::Fault};
+    const project::managers::TiltValidation notApprovedTilt{};
+
+    TEST_ASSERT_TRUE(manager.evaluate(
+        modelOutput(0.9F), notApprovedTilt, DataQualityState::VALID,
+        context, result));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(RiskState::Unknown),
+                          static_cast<int>(result.risk));
+    TEST_ASSERT_FALSE(result.riskScoreValid);
+
+    const project::managers::TiltValidation severeApprovedTilt{
+        20.0F, project::managers::TiltValidationStatus::Valid, true};
+    context.sequenceNo = 2U;
+    TEST_ASSERT_TRUE(manager.evaluate(
+        modelOutput(0.1F), severeApprovedTilt, DataQualityState::VALID,
+        context, result));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(RiskState::HighRiskTest),
+                          static_cast<int>(result.risk));
+    TEST_ASSERT_FALSE(result.riskScoreValid);
+}
+
+void testRiskManagerRejectsMismatchedModelProvenance() {
+    project::managers::RiskManager manager(riskConfig());
+    auto frame = goodProcessedFrame(1U, 1000U, 0.0F, 0.0F, 1.0F);
+    project::models::HealthSnapshot health{};
+    health.healthState = HealthState::Healthy;
+    auto model = modelOutput(0.9F);
+    model.bootId = frame.bootId;
+    model.relatedSequenceNo = frame.sequence;
+    model.sourceWindowStartMs = frame.timestampMs;
+    model.sourceWindowEndMs = frame.timestampMs;
+    model.sourceWindowSampleCount = 1U;
+    model.sourceFeatureSchemaVersion = 1U;
+    model.sourceFeatureSchemaId = 2U;
+    model.sourceFeatureSchemaHashSha256[0] = 0xA5U;
+    model.sourceFeatureSchemaHashValid = true;
+
+    project::models::RiskAssessment result{};
+    TEST_ASSERT_TRUE(manager.evaluate(model, frame, health, result));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(RiskState::HighRiskTest),
+                          static_cast<int>(result.risk));
+
+    model.relatedSequenceNo++;
+    TEST_ASSERT_TRUE(manager.evaluate(model, frame, health, result));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(RiskState::Unknown),
+                          static_cast<int>(result.risk));
+    TEST_ASSERT_FALSE(result.riskScoreValid);
+}
+
 void testRiskManagerFusesApprovedTiltWithModelScore() {
     project::managers::RiskManager manager(riskConfig());
     project::models::RiskAssessment result{};
@@ -622,21 +704,48 @@ void testReplayEngineRejectsMalformedRow() {
     TEST_ASSERT_EQUAL_UINT64(1U, replay.stats().rowsRejected);
 }
 
+void testReplayMalformedRowDoesNotAdvanceTimestampBaseline() {
+    static constexpr char csv[] =
+        "timestamp,tilt,soil,rain,stress,risk\n"
+        "1000,1.5,50,0,0.2,SAFE\n"
+        "1100,invalid,60,0,0.3,MONITOR\n"
+        "1200,2.5,70,0,0.4,MONITOR\n";
+    MemoryCsvSource source(csv, sizeof(csv) - 1U);
+    project::replay::ReplayEngine replay(source, replayConfig());
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::replay::ReplayStatus::Ok),
+        static_cast<int>(replay.begin()));
+
+    project::models::FeatureVector output{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::replay::ReplayStatus::InvalidRow),
+        static_cast<int>(replay.next(output)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::replay::ReplayStatus::TimestampDiscontinuity),
+        static_cast<int>(replay.next(output)));
+    TEST_ASSERT_EQUAL_UINT64(1U, replay.stats().rowsRead);
+    TEST_ASSERT_EQUAL_UINT64(2U, replay.stats().rowsRejected);
+}
+
 }  // namespace
 
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testSensorManagerReadsSensorsInOrderAndRetries);
     RUN_TEST(testSensorManagerMarksReadTimeoutAndContinuesSnapshot);
+    RUN_TEST(testSensorManagerKeepsPerSensorReadTimestamps);
     RUN_TEST(testDataQualityClassifiesRequiredChannelStates);
     RUN_TEST(testDataQualityRejectsUnconfiguredPolicy);
     RUN_TEST(testFeaturePipelineBuildsApprovedWindow);
     RUN_TEST(testFeaturePipelineFailsClosedForTbdRawFeature);
     RUN_TEST(testRiskManagerFusesApprovedScoreAndAppliesHysteresis);
     RUN_TEST(testRiskManagerReturnsUnknownForInvalidQualityOrModel);
+    RUN_TEST(testRiskManagerHealthFaultBlocksModelRisk);
+    RUN_TEST(testRiskManagerRejectsMismatchedModelProvenance);
     RUN_TEST(testRiskManagerFusesApprovedTiltWithModelScore);
     RUN_TEST(testReplayEngineReplaysApprovedCsvWindow);
     RUN_TEST(testReplayEngineRejectsBadHeaderAndManifest);
     RUN_TEST(testReplayEngineRejectsMalformedRow);
+    RUN_TEST(testReplayMalformedRowDoesNotAdvanceTimestampBaseline);
     return UNITY_END();
 }

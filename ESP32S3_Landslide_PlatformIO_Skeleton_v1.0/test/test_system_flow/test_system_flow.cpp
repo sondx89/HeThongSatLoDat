@@ -103,6 +103,17 @@ struct ScriptedTestModel final : project::ai::IModelRuntime {
         }
         capturedInput = input;
         output.bootId = input.bootId;
+        output.relatedSequenceNo = input.relatedSequenceNo;
+        output.sourceWindowStartMs = input.windowStartMs;
+        output.sourceWindowEndMs = input.windowEndMs;
+        output.sourceWindowSampleCount = input.windowSampleCount;
+        output.sourceFeatureSchemaVersion = input.schemaVersion;
+        output.sourceFeatureSchemaId = input.schemaId;
+        for (std::size_t i = 0U; i < sizeof(input.schemaHashSha256); ++i) {
+            output.sourceFeatureSchemaHashSha256[i] =
+                input.schemaHashSha256[i];
+        }
+        output.sourceFeatureSchemaHashValid = input.schemaHashValid;
         output.status = InferenceStatus::Ok;
         output.outputCount = 1U;
         output.rawOutputs[0] = scriptedOutput;

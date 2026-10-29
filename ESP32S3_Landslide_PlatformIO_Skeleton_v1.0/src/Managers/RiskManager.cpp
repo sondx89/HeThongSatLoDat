@@ -271,7 +271,8 @@ bool RiskManager::evaluate(
     if (configValid_ && context.bootId != 0U &&
         context.sequenceNo != 0U) {
         Candidate modelCandidate = Candidate::Unknown;
-        if (config_.modelRuleEnabled &&
+        if (context.health != project::models::HealthState::Fault &&
+            config_.modelRuleEnabled &&
             quality == project::models::DataQualityState::VALID) {
             modelCandidate = classifyModel(model, scoreValid);
             if (scoreValid) {
@@ -314,6 +315,23 @@ bool RiskManager::evaluate(
     const RiskEvaluationContext context{frame.bootId, frame.sequence,
                                         frame.timestampMs, health.healthState};
     const TiltValidation tilt{};
+    bool schemaHashPresent = false;
+    for (const std::uint8_t byte : model.sourceFeatureSchemaHashSha256) {
+        schemaHashPresent = schemaHashPresent || byte != 0U;
+    }
+    const bool provenanceMatches =
+        model.bootId == frame.bootId &&
+        model.relatedSequenceNo == frame.sequence &&
+        model.sourceWindowSampleCount > 0U &&
+        model.sourceWindowStartMs <= model.sourceWindowEndMs &&
+        model.sourceWindowEndMs == frame.timestampMs &&
+        model.sourceFeatureSchemaVersion != 0U &&
+        model.sourceFeatureSchemaId != 0U &&
+        model.sourceFeatureSchemaHashValid && schemaHashPresent;
+    if (!provenanceMatches) {
+        setAssessment(output, Candidate::Unknown, false, 0.0F, context);
+        return true;
+    }
     if (!qualityValid) {
         setAssessment(output, Candidate::Unknown, false, 0.0F, context);
         return true;

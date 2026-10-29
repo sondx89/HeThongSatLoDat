@@ -26,6 +26,8 @@ struct RiskEvaluationContext {
     std::uint64_t bootId{0};
     std::uint64_t sequenceNo{0};
     std::uint64_t timestampMs{0};
+    // FAULT blocks model-derived score; only an approved severe sensor rule
+    // may independently retain DANGER_TEST.
     project::models::HealthState health{project::models::HealthState::Unknown};
 };
 

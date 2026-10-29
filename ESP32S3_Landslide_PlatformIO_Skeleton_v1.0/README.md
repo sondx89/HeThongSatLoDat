@@ -39,6 +39,14 @@ Only `AI/EdgeImpulseAdapter` may include generated Edge Impulse headers once tho
 Do not convert invalid/stale/missing data into zero or NORMAL. Risk state and health state are
 independent. A regression output is not a landslide probability unless separately validated.
 
+## Production startup gate
+
+The non-mock `setup()` validates early board configuration and safe bus setup, then remains
+fail-closed because `ConfigManager`, approved queue sizing, runtime adapters and task settings
+are not yet released. It does not start application tasks. Do not treat this skeleton as a
+deployable firmware image. Runtime startup must be wired transactionally after board/model
+artifacts and measured task/queue/watchdog limits are approved.
+
 ## Data contracts
 
 The fixed-storage C++17 contracts are under `include/project/Models/`; include
@@ -46,10 +54,17 @@ The fixed-storage C++17 contracts are under `include/project/Models/`; include
 for bounded FreeRTOS queue transfer and keep monotonic milliseconds, validity, quality,
 raw/calibrated values, and health/risk state separate.
 
-The document set in `../Document/` remains authoritative. Model dimensions, feature ordering,
-calibration units, risk-state reconciliation, event string limits, and serializer wire formats
-are not frozen. The serialization functions therefore return `NotImplemented` until those
-items are approved; do not persist a C++ struct memory dump.
+`RiskState`, `HealthState`, and `EventSeverity` numeric codes now match the ICD registry.
+Internal aliases (`Safe`/`Normal`, `HighRiskTest`/`DangerTest`, `Warning`/`Warn`) do not add
+serialized states. Fault-flag bits and model/feature metadata remain TBD. Model dimensions,
+feature ordering, calibration units, event string limits, and serializer wire formats are not
+frozen. Serialization therefore returns `NotImplemented`; do not persist a C++ struct memory
+dump.
+
+`ModelOutput` carries source boot/sequence, feature-window bounds/count and schema identity.
+`RiskManager` rejects mismatched provenance; `HealthState::FAULT` suppresses model-derived
+risk scores and yields `UNKNOWN` unless an independently approved severe sensor rule requires
+`DANGER_TEST`.
 
 ## Data quality service
 

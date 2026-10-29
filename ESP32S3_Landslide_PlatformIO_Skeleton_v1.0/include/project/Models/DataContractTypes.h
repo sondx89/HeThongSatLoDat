@@ -5,17 +5,13 @@
 namespace project::models {
 
 enum class RiskState : std::uint8_t {
-    Startup,
-    Normal,
+    Startup = 0,
+    Normal = 1,
     Safe = Normal,
-    Watch,      // Candidate names conflict across Data Dictionary/ICD/LLD.
-    Monitor,    // TODO(TBD): resolve before policy or serialization is frozen.
-    Warning,
-    DangerTest,
+    Monitor = 2,
+    DangerTest = 3,
     HighRiskTest = DangerTest,
-    Alarm,
-    Critical,
-    Unknown
+    Unknown = 4
 };
 
 enum class SensorId : std::uint16_t {
@@ -41,10 +37,10 @@ enum class FaultKind : std::uint8_t {
 };
 
 enum class HealthState : std::uint8_t {
-    Unknown,
-    Healthy,
-    Degraded,
-    Fault
+    Unknown = 0,
+    Healthy = 1,
+    Degraded = 2,
+    Fault = 3
 };
 
 enum class InferenceStatus : std::uint8_t {
@@ -65,12 +61,13 @@ enum class AlarmOutputState : std::uint8_t {
 };
 
 enum class EventSeverity : std::uint8_t {
-    Debug,
-    Info,
-    Notice,  // TODO(TBD): reconcile Data Dictionary NOTICE with ICD WARNING.
-    Warning,
-    Error,
-    Critical
+    Debug = 0,
+    Info = 1,
+    Notice = 2,
+    Warn = 3,
+    Warning = Warn,
+    Error = 4,
+    Critical = 5
 };
 
 enum class DataQualityFlag : std::uint8_t {

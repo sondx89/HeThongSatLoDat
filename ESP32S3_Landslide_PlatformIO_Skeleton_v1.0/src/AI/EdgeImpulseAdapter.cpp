@@ -63,6 +63,8 @@ bool EdgeImpulseAdapter::isValidInput(
         input.schemaId != config.featureSchemaId ||
         !input.schemaHashValid ||
         input.bootId == 0U ||
+        input.relatedSequenceNo == 0U ||
+        input.windowStartMs > input.windowEndMs ||
         input.windowSampleCount == 0U) {
         return false;
     }
@@ -151,6 +153,17 @@ bool EdgeImpulseAdapter::run(
     project::models::ModelOutput& output) {
     output = {};
     output.bootId = input.bootId;
+    output.relatedSequenceNo = input.relatedSequenceNo;
+    output.sourceWindowStartMs = input.windowStartMs;
+    output.sourceWindowEndMs = input.windowEndMs;
+    output.sourceWindowSampleCount = input.windowSampleCount;
+    output.sourceFeatureSchemaVersion = input.schemaVersion;
+    output.sourceFeatureSchemaId = input.schemaId;
+    for (std::size_t i = 0U; i < sizeof(input.schemaHashSha256); ++i) {
+        output.sourceFeatureSchemaHashSha256[i] =
+            input.schemaHashSha256[i];
+    }
+    output.sourceFeatureSchemaHashValid = input.schemaHashValid;
     output.timestampMs = monotonicMillis();
 
     if (!initialized_) {

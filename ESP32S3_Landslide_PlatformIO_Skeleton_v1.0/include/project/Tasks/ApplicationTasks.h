@@ -53,7 +53,9 @@ enum class FeatureRejectReason : std::uint8_t {
     SensorQuality,
     Calibration,
     ProcessedQuality,
-    FeatureSchema
+    FeatureSchema,
+    SensorSequenceGap,
+    FeatureQueueFull
 };
 
 class ITaskEventReporter {
@@ -104,6 +106,9 @@ private:
     ITaskEventReporter& events_;
     project::queues::QueueRegistry& queues_;
     bool featureConfigurationFailureReported_{false};
+    std::uint64_t lastSensorBootId_{0};
+    std::uint64_t lastSensorSequence_{0};
+    bool hasLastSensorSequence_{false};
 };
 
 class TaskInference final : public TaskBase {

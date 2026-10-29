@@ -247,8 +247,8 @@ const char* severityName(EventSeverity severity) noexcept {
         return "INFO";
     case EventSeverity::Notice:
         return "NOTICE";
-    case EventSeverity::Warning:
-        return "WARNING";
+    case EventSeverity::Warn:
+        return "WARN";
     case EventSeverity::Error:
         return "ERROR";
     case EventSeverity::Critical:
@@ -264,18 +264,10 @@ const char* riskStateName(project::models::RiskState state) noexcept {
         return "STARTUP";
     case RiskState::Normal:
         return "NORMAL";
-    case RiskState::Watch:
-        return "WATCH";
     case RiskState::Monitor:
         return "MONITOR";
-    case RiskState::Warning:
-        return "WARNING";
     case RiskState::DangerTest:
         return "DANGER_TEST";
-    case RiskState::Alarm:
-        return "ALARM";
-    case RiskState::Critical:
-        return "CRITICAL";
     case RiskState::Unknown:
         return "UNKNOWN";
     }

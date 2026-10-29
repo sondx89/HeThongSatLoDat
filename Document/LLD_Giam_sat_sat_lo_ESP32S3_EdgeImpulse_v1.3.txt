@@ -422,6 +422,8 @@ else:
 
 NORMAL chỉ hợp lệ khi self-check hoàn tất, dữ liệu bắt buộc hợp lệ/fresh, manifest
 tương thích, không có cảnh báo rule và không có fault buộc UNKNOWN/DEGRADED/FAULT.
+HealthState::FAULT blocks model-derived risk scores; risk is UNKNOWN unless an approved severe
+sensor rule independently requires DANGER_TEST. HealthState remains FAULT in the assessment.
 Mapping Regression output sang risk state phải đến từ RiskConfig được duyệt.
 Ngưỡng tilt/RiskScore trong đặc tả chỉ provisional, không phải ngưỡng địa kỹ thuật
 đã được chứng minh.

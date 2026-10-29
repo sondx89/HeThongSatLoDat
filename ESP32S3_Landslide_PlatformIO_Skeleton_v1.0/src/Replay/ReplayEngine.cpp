@@ -351,23 +351,6 @@ ReplayStatus ReplayEngine::parseRow(
     if (!parseUnsigned(fields[0], fieldLengths[0], timestamp)) {
         return ReplayStatus::InvalidRow;
     }
-    if (hasPreviousTimestamp_) {
-        if (timestamp <= previousTimestampMs_) {
-            previousTimestampMs_ = timestamp;
-            return ReplayStatus::TimestampDiscontinuity;
-        }
-        const double expected =
-            1000.0 / static_cast<double>(config_.sampleRateHz);
-        const double actual =
-            static_cast<double>(timestamp - previousTimestampMs_);
-        if (std::fabs(actual - expected) >
-            static_cast<double>(config_.samplePeriodToleranceMs)) {
-            previousTimestampMs_ = timestamp;
-            return ReplayStatus::TimestampDiscontinuity;
-        }
-    }
-    previousTimestampMs_ = timestamp;
-    hasPreviousTimestamp_ = true;
 
     if (fieldLengths[5] != 0U &&
         !validRiskToken(fields[5], fieldLengths[5])) {
@@ -393,6 +376,23 @@ ReplayStatus ReplayEngine::parseRow(
         }
         sample.values[feature] = numeric[column - 1U];
     }
+
+    if (hasPreviousTimestamp_) {
+        const double expected =
+            1000.0 / static_cast<double>(config_.sampleRateHz);
+        const bool timestampDiscontinuous =
+            timestamp <= previousTimestampMs_ ||
+            std::fabs(static_cast<double>(timestamp - previousTimestampMs_) -
+                      expected) >
+                static_cast<double>(config_.samplePeriodToleranceMs);
+        if (timestampDiscontinuous) {
+            previousTimestampMs_ = timestamp;
+            return ReplayStatus::TimestampDiscontinuity;
+        }
+    }
+    previousTimestampMs_ = timestamp;
+    hasPreviousTimestamp_ = true;
+
     sample.timestampMs = timestamp;
     sample.rowSequence = rowSequence_;
     return ReplayStatus::Ok;

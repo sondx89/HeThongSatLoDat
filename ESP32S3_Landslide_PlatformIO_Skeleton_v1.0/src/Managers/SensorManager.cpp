@@ -202,6 +202,7 @@ project::models::SensorStatus SensorManager::readSensor(
         const std::uint64_t started = clock_.nowMicros();
         status = sensor.read(sensorFrame);
         const std::uint64_t finished = clock_.nowMicros();
+        status.timestampMs = finished / 1000U;
         bool timedOut = false;
 
         if (finished < started) {
@@ -307,11 +308,6 @@ bool SensorManager::readSnapshot(
         }
     }
 
-    const auto statusTimestamp = output.timestampMs;
-    output.imuStatus.timestampMs = statusTimestamp;
-    output.soilStatus.timestampMs = statusTimestamp;
-    output.rainStatus.timestampMs = statusTimestamp;
-    output.hx710bStatus.timestampMs = statusTimestamp;
     return true;
 }
 

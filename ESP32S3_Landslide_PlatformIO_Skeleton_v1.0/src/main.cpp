@@ -82,12 +82,49 @@ void loop() {
 
 #include <Arduino.h>
 
-// Application composition root.
-// Intentionally empty: initialization order and task creation are not implemented yet.
+#include "project/BSP/BoardConfig.h"
+#include "project/BSP/BoardSupportPackage.h"
+#include "project/Managers/ConfigManager.h"
+
 void setup() {
+    Serial.begin(115200);
+
+    project::bsp::BoardSupportPackage bsp{};
+    const project::bsp::BspStatus earlyStatus = bsp.initEarly();
+    if (earlyStatus != project::bsp::BspStatus::Ok) {
+        const project::bsp::BoardConfigReport report =
+            project::bsp::activeBoardConfigReport();
+        Serial.printf(
+            "BOOT BLOCKED: board configuration is not approved "
+            "(status=%u, issues=0x%08lx)\r\n",
+            static_cast<unsigned int>(earlyStatus),
+            static_cast<unsigned long>(report.issues));
+        return;
+    }
+
+    if (bsp.configureOutputsSafe() != project::bsp::BspStatus::Ok ||
+        bsp.initBuses() != project::bsp::BspStatus::Ok) {
+        Serial.println(
+            "BOOT BLOCKED: safe outputs or verified peripheral buses unavailable");
+        return;
+    }
+
+    project::managers::ConfigManager configuration{};
+    if (!configuration.loadLastValid() ||
+        !configuration.validateManifest() ||
+        !configuration.activateAtomically()) {
+        Serial.println(
+            "BOOT BLOCKED: validated active configuration is unavailable");
+        return;
+    }
+
+    Serial.println(
+        "BOOT BLOCKED: runtime queue/task composition has no approved "
+        "target configuration");
 }
 
 void loop() {
+    delay(1000);
 }
 
 #endif
