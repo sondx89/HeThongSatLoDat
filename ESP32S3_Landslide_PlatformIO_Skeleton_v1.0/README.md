@@ -77,6 +77,19 @@ reference pose and filter remain TBD. Do not consume the placeholder as a
 measurement. See [docs/MPU9250_DRIVER.md](docs/MPU9250_DRIVER.md) for the class
 diagram, configuration contract and remaining integration work.
 
+## Soil moisture driver
+
+`project/Drivers/SoilMoistureDriver.h` and
+`src/Drivers/SoilMoistureDriver.cpp` implement a bounded ADC acquisition and
+fixed-capacity moving-average filter. The ADC pin comes from `BoardPins`, and
+`ArduinoAdcReader` uses Arduino `analogRead()`. ADC resolution, attenuation,
+input range and hardware calibration remain externally configured and must be
+verified; the driver rejects an unverified configuration. Moisture percentage
+is a piecewise-linear mapping between two caller-supplied calibration points,
+clamped to their percentage range. It is a calibrated relative percentage, not
+volumetric water content. See [docs/SOIL_MOISTURE_DRIVER.md](docs/SOIL_MOISTURE_DRIVER.md)
+for the contract and calibration procedure.
+
 ## FreeRTOS queues
 
 `project/Queues/QueueRegistry.h` provides a thread-safe singleton that owns the six

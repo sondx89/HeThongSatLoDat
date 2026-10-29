@@ -89,6 +89,7 @@ bool SensorManager::readSnapshot(
     if (soilStatus.valid) {
         output.soilMoistureRaw = soilFrame.soilMoistureRaw;
         output.soilMoisturePct = soilFrame.soilMoisturePct;
+        output.calibrationVersion = soilFrame.calibrationVersion;
     }
     if (rainStatus.valid) {
         output.rainRaw = rainFrame.rainRaw;
