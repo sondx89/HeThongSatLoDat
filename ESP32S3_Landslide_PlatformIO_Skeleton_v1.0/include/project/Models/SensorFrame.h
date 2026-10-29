@@ -73,6 +73,10 @@ struct SensorFrame {
     bool rainWetnessValid{false};
     float rainRateMmH{0.0F};         // Valid only if sensor/calibration supports it.
     std::int32_t hx710bRaw{0};
+    float hx710bCalibrationFactor{0.0F};
+    bool hx710bCalibrationFactorValid{false};
+    float hx710bFactorScaledRaw{0.0F};  // Not an engineering-unit measurement.
+    bool hx710bFactorScaledRawValid{false};
     float hx710bCalibratedValue{0.0F};  // Unit/measurand remain TBD.
 
     std::uint32_t validMask{0};       // TODO(TBD): freeze bit-to-field mapping.

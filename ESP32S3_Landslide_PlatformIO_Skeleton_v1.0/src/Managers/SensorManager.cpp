@@ -103,7 +103,17 @@ bool SensorManager::readSnapshot(
     }
     if (hx710bStatus.valid) {
         output.hx710bRaw = hx710bFrame.hx710bRaw;
-        output.hx710bCalibratedValue = hx710bFrame.hx710bCalibratedValue;
+        output.hx710bCalibrationFactor =
+            hx710bFrame.hx710bCalibrationFactor;
+        output.hx710bCalibrationFactorValid =
+            hx710bFrame.hx710bCalibrationFactorValid;
+        output.hx710bFactorScaledRaw =
+            hx710bFrame.hx710bFactorScaledRaw;
+        output.hx710bFactorScaledRawValid =
+            hx710bFrame.hx710bFactorScaledRawValid;
+        if (hx710bFrame.calibrationVersion != 0U) {
+            output.calibrationVersion = hx710bFrame.calibrationVersion;
+        }
     }
 
     const auto statusTimestamp = output.timestampMs;

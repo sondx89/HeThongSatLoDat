@@ -1,8 +1,9 @@
 # ESP32-S3 Landslide Monitoring — PlatformIO Skeleton
 
-**Status:** Skeleton / DRAFT. MPU9250, soil-moisture, and rain acquisition
-drivers plus a synthetic sensor environment exist, but hardware configuration
-and validation remain open; storage, risk, and inference logic is incomplete.
+**Status:** Skeleton / DRAFT. MPU9250, soil-moisture, rain, and raw HX710B
+acquisition drivers plus a synthetic sensor environment exist, but hardware
+configuration and validation remain open; storage, risk, and inference logic
+is incomplete.
 
 ## Fixed baseline
 - MCU family: ESP32-S3
@@ -100,6 +101,17 @@ filter size, and calibration must be provided by the integration layer. The
 result is a relative wetness indicator, not rainfall amount or intensity.
 Driver-local quality flags report ADC/calibration validity, filter warm-up, and
 endpoint clamping. See [docs/RAIN_SENSOR_DRIVER.md](docs/RAIN_SENSOR_DRIVER.md).
+
+## HX710B driver
+
+`project/Drivers/HX710BDriver.h` and `src/Drivers/HX710BDriver.cpp` provide a
+bounded GPIO transport and raw-count `ISensor` driver. GPIO mapping and all
+protocol timing/format choices are supplied explicitly and rejected unless
+marked verified against the selected device datasheet. The optional calibration
+factor and its factor-scaled raw count carry no physical unit; the driver never
+sets `hx710bCalibratedValue` or labels data as pressure/load/stress. Until a
+transducer and measurand are approved, use raw values and diagnostics only.
+See [docs/HX710B_DRIVER.md](docs/HX710B_DRIVER.md).
 
 ## FreeRTOS queues
 
