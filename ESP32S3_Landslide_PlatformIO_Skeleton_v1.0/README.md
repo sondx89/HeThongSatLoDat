@@ -177,6 +177,27 @@ implementation should call `writeOutputs()` after receiving an event from
 Q_EVENT and propagate any non-`Ok` status as an explicit handled/unhandled
 write result.
 
+## Periodic CSV logger
+
+`project/Storage/CsvLogger.h` implements the requested six-column sample CSV:
+`timestamp,tilt,soil,rain,stress,risk`. Invalid measurements serialize as empty
+fields, not zero. The timestamp is monotonic uptime milliseconds; `stress` is
+an untyped model output value and its unit/meaning remains the integration's
+responsibility. The risk token is caller-supplied so the logger does not freeze
+the unresolved enum-to-text mapping. A fixed-size `CsvRecord` keeps the logger
+independent of unapproved model feature mappings.
+
+Rotation is size-based, with a caller-provided maximum file size and names such
+as `data_000000.csv`; old files are never deleted or overwritten. Startup
+validates the header and each complete row, truncates a malformed/incomplete
+tail to the last complete row, or starts a new numbered file if the latest
+header is corrupt. Each header and record is flushed. The storage adapter must
+implement `ICsvFileSystem`, including exclusive create, read, truncate and
+flush. Its media/filesystem and the actual durability point remain TBD; a
+successful flush is not claimed to survive power loss until verified on the
+selected hardware. Logger operations are serialized with a static FreeRTOS
+mutex on ESP32.
+
 ## FreeRTOS task framework
 
 `project/Tasks/TaskFramework.h` and `ApplicationTasks.h` define the startup/heartbeat
