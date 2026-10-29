@@ -93,7 +93,13 @@ bool SensorManager::readSnapshot(
     }
     if (rainStatus.valid) {
         output.rainRaw = rainFrame.rainRaw;
+        output.rainWetnessRelativePct =
+            rainFrame.rainWetnessRelativePct;
+        output.rainWetnessValid = rainFrame.rainWetnessValid;
         output.rainRateMmH = rainFrame.rainRateMmH;
+        if (rainFrame.calibrationVersion != 0U) {
+            output.calibrationVersion = rainFrame.calibrationVersion;
+        }
     }
     if (hx710bStatus.valid) {
         output.hx710bRaw = hx710bFrame.hx710bRaw;

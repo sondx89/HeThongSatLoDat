@@ -27,6 +27,7 @@ enum class SensorChannel : std::uint8_t {
     SoilMoistureRaw,
     SoilMoisturePct,
     RainRaw,
+    RainWetnessRelativePct,
     RainRateMmH,
     Hx710bRaw,
     Hx710bCalibratedValue
@@ -68,6 +69,8 @@ struct SensorFrame {
     std::int32_t soilMoistureRaw{0};
     float soilMoisturePct{0.0F};     // Valid only after approved calibration.
     std::int32_t rainRaw{0};
+    float rainWetnessRelativePct{0.0F};  // Not rainfall amount/intensity.
+    bool rainWetnessValid{false};
     float rainRateMmH{0.0F};         // Valid only if sensor/calibration supports it.
     std::int32_t hx710bRaw{0};
     float hx710bCalibratedValue{0.0F};  // Unit/measurand remain TBD.

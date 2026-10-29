@@ -62,7 +62,7 @@ classDiagram
 
 ## Acquisition and filtering
 
-`ArduinoAdcReader` obtains one conversion through `analogRead()`. The selected
+The shared `ArduinoAdcReader` obtains one conversion through `analogRead()`. The selected
 pin comes only from `BoardPins::adc.soilMoisture`; no GPIO number is embedded in
 the driver. ADC resolution, attenuation, input range, and any board-specific ADC
 setup must be configured and verified by the integration/BSP layer before

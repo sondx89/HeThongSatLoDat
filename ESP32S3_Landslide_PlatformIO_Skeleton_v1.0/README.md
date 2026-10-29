@@ -1,8 +1,8 @@
 # ESP32-S3 Landslide Monitoring — PlatformIO Skeleton
 
-**Status:** Skeleton / DRAFT. The MPU9250 acquisition driver and synthetic sensor
-environment exist, but other production sensor, storage, risk, and inference
-logic remains unimplemented.
+**Status:** Skeleton / DRAFT. MPU9250, soil-moisture, and rain acquisition
+drivers plus a synthetic sensor environment exist, but hardware configuration
+and validation remain open; storage, risk, and inference logic is incomplete.
 
 ## Fixed baseline
 - MCU family: ESP32-S3
@@ -89,6 +89,17 @@ is a piecewise-linear mapping between two caller-supplied calibration points,
 clamped to their percentage range. It is a calibrated relative percentage, not
 volumetric water content. See [docs/SOIL_MOISTURE_DRIVER.md](docs/SOIL_MOISTURE_DRIVER.md)
 for the contract and calibration procedure.
+
+## Rain sensor driver
+
+`project/Drivers/RainSensorDriver.h` and
+`src/Drivers/RainSensorDriver.cpp` read the configured rain ADC pin through the
+shared `IAdcReader`, maintain a bounded moving average, and map two verified
+calibration points to `rainWetnessRelativePct`. ADC range, wetness semantics,
+filter size, and calibration must be provided by the integration layer. The
+result is a relative wetness indicator, not rainfall amount or intensity.
+Driver-local quality flags report ADC/calibration validity, filter warm-up, and
+endpoint clamping. See [docs/RAIN_SENSOR_DRIVER.md](docs/RAIN_SENSOR_DRIVER.md).
 
 ## FreeRTOS queues
 
