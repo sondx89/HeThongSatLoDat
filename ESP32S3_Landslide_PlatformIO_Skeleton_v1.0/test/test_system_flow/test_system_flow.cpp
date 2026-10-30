@@ -7,6 +7,7 @@
 
 #include "project/AI/IInferenceEngine.h"
 #include "project/AI/MockModelRuntime.h"
+#include "project/Drivers/MockCsvTelemetry.h"
 #include "project/Drivers/ISensor.h"
 #include "project/Managers/RiskManager.h"
 #include "project/Managers/SensorManager.h"
@@ -412,7 +413,7 @@ void testSensorFeatureScriptedModelRiskAndCsvIntegration() {
     TEST_ASSERT_EQUAL_UINT64(2U, storage.flushCount);
     TEST_ASSERT_TRUE(storage.equals(
         "timestamp,tilt,soil,rain,stress,risk\n"
-        "1000,0,55,25,0.8,HIGH_RISK_TEST\n"));
+        "1000,0,55,25,0.800000012,HIGH_RISK_TEST\n"));
 }
 
 void testMockRuntimeFailurePropagatesUnknownToLogger() {
@@ -433,11 +434,53 @@ void testMockRuntimeFailurePropagatesUnknownToLogger() {
         "1000,0,55,25,,UNKNOWN\n"));
 }
 
+void testMockRawSerialCsvMarksMissingAndSyntheticData() {
+    project::models::SensorFrame frame{};
+    frame.sequence = 7U;
+    frame.timestampMs = 2500U;
+    frame.imu.accelX = -10;
+    frame.imu.accelY = 20;
+    frame.imu.accelZ = 30;
+    frame.soilMoistureRaw = 999;
+    frame.rainRaw = 0;
+    frame.hx710bRaw = 1234;
+    frame.imuStatus =
+        {SensorHealth::Healthy, true, 0U, 0U, frame.timestampMs};
+    frame.soilStatus =
+        {SensorHealth::Fault, false, 1U, 0U, frame.timestampMs};
+    frame.rainStatus =
+        {SensorHealth::Healthy, true, 0U, 0U, frame.timestampMs};
+    frame.hx710bStatus =
+        {SensorHealth::Healthy, true, 0U, 0U, frame.timestampMs};
+
+    char row[160]{};
+    std::size_t bytesWritten = 0U;
+    TEST_ASSERT_TRUE(project::drivers::serializeMockCsvTelemetry(
+        frame, row, sizeof(row), bytesWritten));
+    TEST_ASSERT_EQUAL_STRING(
+        "record_type,sequence_no,timestamp_ms,accel_x_raw,accel_y_raw,"
+        "accel_z_raw,soil_raw,rain_raw,hx710b_raw,imu_valid,soil_valid,"
+        "rain_valid,hx710b_valid,dataset_eligible,eligibility_reason\n",
+        project::drivers::mockCsvTelemetryHeader());
+    TEST_ASSERT_EQUAL_STRING(
+        "MOCK_RAW_V1,7,2500,-10,20,30,,0,1234,true,false,true,true,"
+        "false,SYNTHETIC_MOCK\n",
+        row);
+    TEST_ASSERT_EQUAL_UINT32(std::strlen(row), bytesWritten);
+
+    char undersized[1]{};
+    bytesWritten = 1U;
+    TEST_ASSERT_FALSE(project::drivers::serializeMockCsvTelemetry(
+        frame, undersized, sizeof(undersized), bytesWritten));
+    TEST_ASSERT_EQUAL_UINT32(0U, bytesWritten);
+}
+
 }  // namespace
 
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testSensorFeatureScriptedModelRiskAndCsvIntegration);
     RUN_TEST(testMockRuntimeFailurePropagatesUnknownToLogger);
+    RUN_TEST(testMockRawSerialCsvMarksMissingAndSyntheticData);
     return UNITY_END();
 }

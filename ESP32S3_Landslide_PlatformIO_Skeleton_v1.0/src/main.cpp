@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <esp_timer.h>
 
+#include "project/Drivers/MockCsvTelemetry.h"
 #include "project/Drivers/MockSensors.h"
 #include "project/Managers/SensorManager.h"
 
@@ -32,32 +33,16 @@ project::managers::SensorManager gSensors(
     makeMockSensorManagerConfig(), gSensorClock);
 bool gSensorManagerReady = false;
 
-void printSample(const project::models::SensorFrame& frame) {
-    Serial.printf(
-        "MOCK seq=%llu uptime_ms=%llu imu_raw=%ld/%ld/%ld soil_raw=%ld "
-        "rain_raw=%ld hx710b_raw=%ld valid=%u/%u/%u/%u\r\n",
-        static_cast<unsigned long long>(frame.sequence),
-        static_cast<unsigned long long>(frame.timestampMs),
-        static_cast<long>(frame.imu.accelX),
-        static_cast<long>(frame.imu.accelY),
-        static_cast<long>(frame.imu.accelZ),
-        static_cast<long>(frame.soilMoistureRaw),
-        static_cast<long>(frame.rainRaw),
-        static_cast<long>(frame.hx710bRaw),
-        frame.imuStatus.valid ? 1U : 0U,
-        frame.soilStatus.valid ? 1U : 0U,
-        frame.rainStatus.valid ? 1U : 0U,
-        frame.hx710bStatus.valid ? 1U : 0U);
-}
-
 }  // namespace
 
 void setup() {
     Serial.begin(115200);
     gSensorManagerReady = gSensors.beginAll();
-    Serial.println(gSensorManagerReady
-                       ? "Mock sensor environment ready (synthetic raw data)"
-                       : "Mock sensor environment initialization failed");
+    if (!gSensorManagerReady) {
+        Serial.println("# MOCK_INIT_FAILED");
+        return;
+    }
+    Serial.print(project::drivers::mockCsvTelemetryHeader());
 }
 
 void loop() {
@@ -70,9 +55,17 @@ void loop() {
     if (gSensors.pollDue(nowMicros)) {
         project::models::SensorFrame frame{};
         if (gSensors.readSnapshot(frame)) {
-            printSample(frame);
+            char row[192]{};
+            std::size_t bytesWritten = 0U;
+            if (project::drivers::serializeMockCsvTelemetry(
+                    frame, row, sizeof(row), bytesWritten)) {
+                Serial.write(reinterpret_cast<const std::uint8_t*>(row),
+                             bytesWritten);
+            } else {
+                Serial.println("# MOCK_SERIALIZE_FAILED");
+            }
         } else {
-            Serial.println("Mock sensor snapshot failed");
+            Serial.println("# MOCK_SNAPSHOT_FAILED");
         }
     }
     delay(1);

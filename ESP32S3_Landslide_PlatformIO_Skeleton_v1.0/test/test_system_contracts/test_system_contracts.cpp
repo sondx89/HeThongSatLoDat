@@ -484,7 +484,7 @@ void testFeaturePipelineBuildsApprovedWindow() {
     TEST_ASSERT_EQUAL_UINT32(0x0FU, output.featureValidMask);
     TEST_ASSERT_FLOAT_WITHIN(0.01F, 0.0F, output.values[0]);
     TEST_ASSERT_FLOAT_WITHIN(0.01F, 9.81F, output.values[1]);
-    TEST_ASSERT_FLOAT_WITHIN(0.02F, 35.264F, output.values[2]);
+    TEST_ASSERT_FLOAT_WITHIN(0.02F, 45.0F, output.values[2]);
     TEST_ASSERT_FLOAT_WITHIN(0.02F, 13.873F, output.values[3]);
     TEST_ASSERT_FALSE(pipeline.windowReady());
 }

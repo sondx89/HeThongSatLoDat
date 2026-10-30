@@ -33,6 +33,13 @@ Edge Impulse headers but `initialize()` returns false and `run()` reports
 `ModelError`. This permits the rest of the firmware to build without
 mistaking a stub for working inference.
 
+This adapter is the on-device inference integration only; it does not upload
+sensor samples or datasets to Edge Impulse Studio. The current mock firmware
+streams synthetic raw diagnostic CSV over serial, marked
+`dataset_eligible=false`. It is not a model-input or training-data contract.
+Dataset ingestion remains blocked until the DSD raw schema, FSS/model input,
+labels, and eligibility rules are approved.
+
 ## Configuration and validation
 
 `EdgeImpulseModelConfig` has no operational defaults. Populate it only from a

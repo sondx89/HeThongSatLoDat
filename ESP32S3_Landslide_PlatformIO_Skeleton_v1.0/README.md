@@ -119,6 +119,15 @@ dimension, schema and output mapping must be populated from verified metadata;
 classification values are not interpreted as risk scores. See
 [docs/EDGE_IMPULSE_ADAPTER.md](docs/EDGE_IMPULSE_ADAPTER.md).
 
+## One-click mock upload and CSV capture
+
+On Windows, run `build_project.bat` to run native tests, build and upload the
+synthetic ESP32-S3 mock firmware, then open its 115200-baud serial monitor.
+The serial stream is a diagnostic raw CSV and is explicitly not eligible for
+Edge Impulse training. The six-column `CsvLogger` output remains a separate
+runtime log contract. See [docs/MOCK_SERIAL_CAPTURE.md](docs/MOCK_SERIAL_CAPTURE.md)
+and [docs/CSV_LOGGER.md](docs/CSV_LOGGER.md).
+
 ## Unit tests
 
 The Unity native test suite covers SensorManager, DataQualityService,

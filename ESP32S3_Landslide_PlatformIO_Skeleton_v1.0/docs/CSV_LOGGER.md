@@ -15,6 +15,11 @@ calibration metadata. They are intentionally not appended to this header; decide
 whether to add a companion metadata file or adopt the wider schema before using
 these rows as the only production/audit log.
 
+The `esp32-s3-mock` serial stream is a separate raw diagnostic format with its
+own header and an explicit `dataset_eligible=false` field. It is not emitted by
+`CsvLogger`, is not the DSD raw dataset contract, and must not be merged with or
+treated as this six-column operational log.
+
 ## Column contract
 
 | Column | Representation |
