@@ -1,5 +1,10 @@
 # EdgeImpulseAdapter
 
+**Document revision:** 1.0
+
+**Audit date:** 2026-11-02
+**Status:** Conditional adapter exists; actual deployment export is absent.
+
 `project/AI/EdgeImpulseAdapter.h` implements `IModelRuntime` (also exposed
 through the existing `IInferenceEngine` alias). It adapts the approved
 `FeatureVector` to the Edge Impulse Arduino `signal_t` callback and calls
@@ -97,3 +102,9 @@ if (ready && model.run(input, output) &&
 ```
 
 Initialize once during task startup and reuse the runtime instance.
+
+## Audit change history
+
+| Revision | Date | Change |
+|---|---|---|
+| 1.0 | 2026-11-02 | Reconfirmed repository contains no generated deployment and recorded current audit status. |

@@ -2,8 +2,15 @@
 
 **Project:** ESP32-S3 Landslide Monitoring  
 **Baseline:** PlatformIO + Arduino + C++17; MPU9250 over I2C; Edge Impulse inference intended to run offline on ESP32-S3.  
-**Updated:** 2026-10-30  
+**Updated:** 2026-11-02
+
 **Purpose:** Convert the current skeleton and placeholder inventory into file-level coding, documentation, test, and hardware tasks.
+
+**Audit revision:** 2.1
+**Change history:** 2026-11-02 — reconciled module status with current source
+and test results; added repository-level requirement traceability and release
+gates. The backlog version remains v2.0; this is a documentation revision,
+not a system-requirement revision.
 
 ## How to use this list
 
@@ -17,6 +24,17 @@
 - Keep all unknown hardware, model, calibration, risk, timing, and storage parameters as `TBD`.
 - A mock/test configuration must be visibly separated from production configuration.
 - Do not enable operational alarm decisions or claim field readiness from host tests alone.
+- Status terms used in the audit snapshot: **implemented**, **partial**,
+  **mock/test-only**, **blocked**, and **not configured**. `[x]` is reserved for
+  work with concrete evidence; host tests alone do not close target/HW/MODEL
+  acceptance.
+
+**Current evidence snapshot (2026-11-02):** `pio test -e native-unit-tests`
+passed 71/71; `pio test -e native-integration-tests` passed 3/3. No ESP32-S3
+target build, hardware-in-loop, physical storage durability, or deployed-model
+evidence is recorded. See `docs/BASELINE_TEST_REPORT.md`,
+`docs/PLACEHOLDER_STATUS.md`, `docs/REQUIREMENT_TRACEABILITY.md`, and
+`docs/RELEASE_CHECKLIST.md`. These results do not close release gates.
 
 ## 0. Immediate work package — do these first
 
@@ -25,9 +43,9 @@ These tasks are intentionally chosen because they can be done now without knowin
 ### 0.1 Establish a clean baseline [NOW]
 
 - [ ] Create a clean working branch or backup copy before changing implementation files.
-- [ ] Record the current project tree and current TODO version in the change log.
+- [x] Record the current project tree and TODO/backlog revision in `PROJECT_TREE.txt` and this document's revision notes.
 - [ ] Run the existing native unit and integration test environments from a clean build directory.
-- [ ] Record exact commands, compiler/platform versions, pass/fail counts, and test output in `docs/BASELINE_TEST_REPORT.md`.
+- [x] Record exact current native test commands and pass/fail counts in `docs/BASELINE_TEST_REPORT.md`; clean-build provenance is not claimed.
 - [ ] Confirm `platformio.ini` environment names and `build_project.bat` target names match; document any mismatch rather than silently renaming targets.
 - [ ] Check that generated files under `build_output/` are not mistaken for source or release artifacts; keep generated outputs out of source control unless intentionally archived.
 - [ ] Add a short `CHANGELOG.md` entry for each implementation batch.
@@ -60,14 +78,15 @@ Current headers use `bool` or `void` for several operations. This hides the reas
 
 ### 0.4 Documentation synchronization [DOC, NOW]
 
-- [ ] Update `README.md`: state clearly that the current repository is a development skeleton, identify mock paths, and list what is not production-ready.
-- [ ] Update `ARCHITECTURE.md`: show actual source modules separately from planned modules; do not draw a planned task/driver as implemented if it is not.
-- [ ] Update `PROJECT_TREE.txt` if any source/header/test/doc is added or renamed.
-- [ ] Add `docs/PLACEHOLDER_STATUS.md` with one row per placeholder: source file, header, current behavior, dependency/blocker, test file, completion evidence.
-- [ ] Update `docs/TASK_RUNTIME_FLOW.md` to identify which task orchestration is implemented versus planned.
-- [ ] Update `docs/EDGE_IMPULSE_ADAPTER.md` to distinguish existing fail-closed checks from the not-yet-integrated generated Edge Impulse library.
+- [x] Update `README.md` to distinguish implemented, mock, partial, and blocked behavior.
+- [x] Update `ARCHITECTURE.md` with actual implementation status, composition limitations, and requirement-source caveat.
+- [x] Update `PROJECT_TREE.txt` with current source, test, and documentation paths.
+- [x] Update `docs/PLACEHOLDER_STATUS.md` with current source/test evidence and blockers.
+- [x] Update `docs/TASK_RUNTIME_FLOW.md` with AppController protocol and production API gaps.
+- [x] Confirm `docs/EDGE_IMPULSE_ADAPTER.md` distinguishes adapter checks from absent export; inventory search found no generated deployment.
 - [ ] Update `docs/CSV_LOGGER.md` to distinguish the operational logger, mock serial CSV, and DSD training dataset export.
 - [ ] Keep DOP/DSD/FSS/ICD/LLD/TCS/GTIS version numbers unchanged unless their content is actually revised and reviewed. If revised, increment the relevant version and add a change history.
+- [x] Add repository-level requirement-to-module-to-test/evidence traceability and release checklist in `docs/REQUIREMENT_TRACEABILITY.md` and `docs/RELEASE_CHECKLIST.md`. These do not replace controlled requirement documents.
 
 **Acceptance:** A new developer can tell what exists, what is a stub, what is mock-only, and what is blocked by TBD evidence.
 
@@ -79,13 +98,19 @@ Current headers use `bool` or `void` for several operations. This hides the reas
 
 **Current files**
 - `include/project/Managers/AppController.h`
-- `src/Managers/AppController.cpp` — currently only a skeleton comment.
+- `src/Managers/AppController.cpp` — dependency-injected lifecycle state
+  machine and fixed phase order; no production composition adapter.
 - Related modules: BSP, ConfigManager, SensorManager, CalibrationService, FeaturePipeline, SchemaRegistry, EdgeImpulseAdapter, RiskManager, StorageManager, EventLogger, HealthMonitor, WatchdogSupervisor, ApplicationTasks.
 
+**Current status:** Lifecycle protocol and native fake tests are implemented.
+Startup sequencing/reverse cleanup are **host-tested**; concrete BSP/storage/
+task/model adapters and production wiring are **blocked**. See
+`docs/TASK_RUNTIME_FLOW.md`.
+
 **Tasks**
-- [ ] Define an explicit `AppController` state enum: at minimum uninitialized, initializing, ready/degraded, shutting down, fault. Reuse existing project state types if already defined.
-- [ ] Define dependencies as constructor-injected references/pointers or a documented composition structure. Avoid hidden global objects and avoid dynamic allocation unless the project explicitly approves it.
-- [ ] Define startup phases as small private methods so each phase can be tested independently.
+- [x] Define explicit lifecycle states and constructor-injected dependency seam. Evidence: `AppControllerState`, `IAppLifecycle`; AppController fake tests.
+- [x] Define the startup phase order as an injectable phase contract. Evidence: deterministic phase-order host test. (Per-phase concrete module initialization remains blocked on integration adapters.)
+- [ ] Split every phase into independently callable production phase methods; current controller delegates generic phase callbacks, not module-specific implementations.
 - [ ] Implement phase 1: BSP minimal init, read reset reason/boot identity, initialize monotonic time, force outputs to the approved boot-safe state.
 - [ ] Implement phase 2: initialize diagnostic/event path best-effort without blocking startup indefinitely.
 - [ ] Implement phase 3: load and validate configuration manifest; do not proceed to inference setup if configuration is invalid.
@@ -95,16 +120,15 @@ Current headers use `bool` or `void` for several operations. This hides the reas
 - [ ] Implement phase 7: verify FSS/model compatibility; initialize Edge Impulse only if the actual export and schema are approved.
 - [ ] Implement phase 8: initialize RiskManager, HealthMonitor, OutputController, queues, and tasks in the approved order.
 - [ ] Implement phase 9: run self-checks and only then permit the system to report a normal/ready candidate.
-- [ ] Implement rollback/cleanup in reverse order for resources initialized before a failure.
-- [ ] Implement `requestShutdown()` as an ordered operation: prevent new work, drain/stop tasks, flush logger/storage with bounded timeout, set outputs to safe state, then mark shutdown complete.
-- [ ] Implement `runHealthChecks()` as a bounded call; it must not perform long storage I/O or block sensor acquisition.
-- [ ] Replace the current `bool begin()`/`void` APIs with the agreed status/result contract if section 0.2 approves it.
-- [ ] Add dependency-injection tests using fake BSP/storage/sensor/model interfaces; no physical GPIO values are needed for these tests.
-- [ ] Add failure-injection tests for failure at every startup phase and verify reverse cleanup and safe outputs.
+- [x] Implement reverse cleanup protocol and failure injection for each startup phase. Evidence: `testAppControllerCleansUpEveryStartupFailureInReverse`.
+- [ ] Integrate actual bounded task drain, storage flush and physical safe output. Current interface ports are host-tested only; module contracts lack the required verified bounded operations.
+- [x] Implement bounded health-check port/status behavior; concrete adapter must enforce configured bound.
+- [x] Replace no-argument bool/void skeleton API with injected status-bearing lifecycle interface. `AppControllerStatus` is module-specific; coordinate any later API-status unification.
+- [x] Add fake lifecycle tests for startup, inference gate, cleanup, health, shutdown and flush failure. They are protocol fakes, not hardware module fakes.
 
 **Documentation**
-- [ ] Add startup/shutdown sequence diagram to `docs/TASK_RUNTIME_FLOW.md`.
-- [ ] Add dependency ownership and startup failure table to `docs/PLACEHOLDER_STATUS.md`.
+- [x] Document startup/shutdown sequence and API gaps in `docs/TASK_RUNTIME_FLOW.md`.
+- [x] Record lifecycle ownership/status/test evidence in `docs/PLACEHOLDER_STATUS.md`.
 
 **Acceptance**
 - Startup order is deterministic and documented.
@@ -116,47 +140,63 @@ Current headers use `bool` or `void` for several operations. This hides the reas
 
 **Current files**
 - `include/project/Managers/ConfigManager.h`
-- `src/Managers/ConfigManager.cpp` — `loadLastValid()`, `validateManifest()`, `activateAtomically()` currently return `false`.
+- `src/Managers/ConfigManager.cpp` — pure validation, injected logical
+  two-slot protocol, read-back validation, generation selection and
+  production-purpose activation gate.
+
+**Current status:** Pure validation and fake persistence protocol are
+**implemented/host-tested**. The production persistence adapter, encoded
+storage format/ownership, firmware injection, and target power-loss evidence
+remain **blocked**. `activateAtomically()` selects a valid manifest view; it
+does not apply values to live modules.
 
 **Tasks**
 - [ ] Inventory the configuration structs already present in `include/project/` and identify the authoritative owner of each field.
 - [ ] Define `Manifest`/configuration data structures only for fields already specified by approved documents; leave unresolved fields explicitly absent/unknown/TBD.
 - [ ] Define a `ValidationReport` containing a stable error code, field/path, and short diagnostic reason.
-- [ ] Implement pure validation first, without filesystem dependency: required fields, supported schema version, enum validity, finite numeric values, min/max consistency, and cross-field dependencies.
+- [x] Implement pure validation without filesystem dependency: required fields, supported schema version, enum validity, finite values and cross-field dependencies. Evidence: ConfigManager tests in `test_system_contracts`.
 - [ ] Validate model hash/schema hash/calibration version/risk config version only when those artifacts are actually supplied.
-- [ ] Add tests for missing field, unsupported version, invalid enum, NaN/Inf, out-of-range values, inconsistent min/max, mismatched model/FSS hash, and missing approval.
-- [ ] Define a storage abstraction for manifest slots; do not couple ConfigManager directly to Arduino `File` or SD APIs.
-- [ ] Define two-slot or equivalent staging/active metadata, including generation number and integrity check.
-- [ ] Implement load of the newest fully valid committed slot; if newest is corrupt, try the previous committed slot.
-- [ ] Implement staged activation as: write candidate -> flush -> read back -> validate -> mark committed -> switch active pointer/record.
-- [ ] Ensure power loss before commit leaves the previous active config usable.
-- [ ] Ensure activation failure does not overwrite the last known-good config.
-- [ ] Add fault-injection tests around each write/commit boundary using a fake storage backend.
+- [x] Add validation tests for missing fields, version, enum, NaN/Inf, range, model/FSS and approval/hash cases. Evidence: test methods named `testConfigManager...`.
+- [x] Define injected `IConfigManifestPersistence`; no direct Arduino File/SD dependency.
+- [x] Define logical two-slot committed/candidate status and generation selection. Physical integrity encoding remains the adapter's responsibility.
+- [x] Implement highest-valid-committed selection and fallback from a corrupt newest record. Host fake test.
+- [x] Implement write -> flush -> read-back -> validate -> marker -> marker-flush protocol. Host fake test.
+- [x] Add host fault injection at candidate-write, candidate-flush, read-back, marker-write and marker-flush boundaries.
+- [ ] Verify power-loss/commit-marker semantics on selected physical media; host fake test is not durability evidence.
 - [ ] Do not add cryptographic signature verification unless the signing/key-management design is approved; a hash alone is integrity checking, not authenticity.
 
 **Documentation**
-- [ ] Create `docs/CONFIG_MANIFEST.md` with field table, versioning, validation rules, storage layout, commit sequence, rollback behavior, and error codes.
-- [ ] Update `ARCHITECTURE.md` to show ConfigManager owns validation/activation, while storage backend owns physical I/O.
+- [x] Document manifest validation, logical slots, commit sequence, rollback behavior and errors in `docs/CONFIG_MANIFEST.md`; physical encoding/storage layout remain TBD.
+- [x] Update `ARCHITECTURE.md` to distinguish ConfigManager's logical protocol from physical adapter I/O.
 
 **Acceptance**
 - Pure validation tests pass on host.
 - Atomic activation and power-loss behavior pass fake-backend fault-injection tests.
-- Production activation remains disabled until manifest schema and approval process are frozen.
+- Production firmware activation remains unwired: `main.cpp` default-constructs ConfigManager. Its instance-level gate only exposes a valid Production manifest view; it does not apply configuration to runtime modules.
+
+**Acceptance note:** Host tests verify logical ordering and fallback only.
+Firmware production activation remains blocked until concrete persistence,
+manifest approval/provenance, and runtime application are integrated.
 
 ### 1.3 `CalibrationService` — raw-to-processed conversion [NOW for validity propagation; HW/WAIT for coefficients]
 
 **Current files**
 - `include/project/Services/CalibrationService.h`
-- `src/Services/CalibrationService.cpp` — `loadCalibration()` returns `false`; `process()` clears output and returns `false`.
+- `src/Services/CalibrationService.cpp` — status-bearing raw/validity
+  propagation; calibration remains uninitialized and no coefficients are
+  applied.
+
+**Current status:** Validity/raw pass-through and failure cases are
+**host-tested**. Calibration artifact loading, physical-unit conversion, and
+calibration approval remain **blocked**.
 
 **Tasks**
 - [ ] Inspect `SensorFrame`, `ProcessedFrame`, sensor status/validity flags and current adapters; write a field mapping table before coding.
 - [ ] Define the exact source field, destination field, unit, validity bit and calibration version for each supported channel.
 - [ ] Implement initialization/state reporting so “no calibration loaded” is distinguishable from “valid identity calibration”.
-- [ ] Implement raw-field copying and validity/status propagation without applying unapproved coefficients.
-- [ ] Implement finite-value checks for all floating-point inputs; reject NaN/Inf.
-- [ ] Ensure invalid/stale/missing input remains invalid in `ProcessedFrame`; never turn it into zero and mark it valid.
-- [ ] Keep raw values available for logging/diagnostics.
+- [x] Implement raw-field copying and validity/status propagation without applying unapproved coefficients. Evidence: CalibrationService host tests.
+- [x] Reject nonfinite inputs and preserve missing/partial values as invalid rather than valid zero. Evidence: `testCalibrationServiceRejectsNonFiniteAndDoesNotMakeValidZero`.
+- [x] Keep supported raw values available in output/diagnostics; physical conversion remains unimplemented.
 - [ ] Add per-channel validity rather than a single global valid flag where the data contract supports it.
 - [ ] Add calibration artifact version/hash/sensor identity checks.
 - [ ] Implement conversion equations only after sensor-specific calibration data and units are approved.
@@ -177,14 +217,18 @@ Current headers use `bool` or `void` for several operations. This hides the reas
 
 **Current files**
 - `include/project/AI/SchemaRegistry.h`
-- `src/AI/SchemaRegistry.cpp` — `validate()` and `compatible()` currently return `false`.
+- `src/AI/SchemaRegistry.cpp` — detailed descriptor/vector validation and
+  compatibility mismatch reporting.
 - Related: `FeatureVector`, FSS JSON/TXT, `EdgeImpulseAdapter`.
+
+**Current status:** Generic compatibility logic is **host-tested using
+synthetic/test-only descriptors**. Production compatibility and inference
+remain **blocked** on released FSS and actual Edge Impulse metadata.
 
 **Tasks**
 - [ ] Inspect `FeatureVector` fields and FSS v1.1 status; record that draft FSS is not a production-approved schema unless a released artifact says otherwise.
 - [ ] Define a runtime schema descriptor containing only fields supported by the approved contract: schema ID/version/hash, feature count, ordered feature IDs, units, preprocessing/normalization identity, window/stride/sample-rate identity.
-- [ ] Implement generic structural validation: feature count does not exceed storage capacity; required metadata present; values finite; valid mask consistent with active features.
-- [ ] Implement compatibility comparison as an explicit field-by-field comparison with a mismatch reason.
+- [x] Implement generic structural validation and explicit mismatch reporting. Evidence: SchemaRegistry test group in `test_system_contracts`.
 - [ ] Add a mismatch enum/report for missing descriptor, version mismatch, hash mismatch, count mismatch, order mismatch, unit mismatch, preprocessing mismatch and timing/window mismatch.
 - [ ] Add host tests using synthetic test descriptors with clearly marked TEST schema IDs; never reuse them as production metadata.
 - [ ] Wire `EdgeImpulseAdapter` to ask SchemaRegistry before inference.
@@ -193,7 +237,7 @@ Current headers use `bool` or `void` for several operations. This hides the reas
 - [ ] Do not infer model feature count from `FeatureVector::kMaxFeatures`.
 
 **Documentation**
-- [ ] Create `docs/SCHEMA_REGISTRY.md` with comparison matrix and fail-closed rules.
+- [ ] Create `docs/SCHEMA_REGISTRY.md` with comparison matrix and fail-closed rules. No dedicated guide exists yet; `FEATURE_PIPELINE.md` and `EDGE_IMPULSE_ADAPTER.md` describe related gates.
 - [ ] Update `docs/EDGE_IMPULSE_ADAPTER.md` with exact source of model metadata and inference enablement gate.
 
 **Acceptance**
@@ -203,26 +247,32 @@ Current headers use `bool` or `void` for several operations. This hides the reas
 ### 1.5 `Serialization` — explicit record formats [NOW for schema design/tests; WAIT for format freeze]
 
 **Current files**
-- `include/project/Models/Serialization.h` — `BoundedByteWriter` exists; seven serialize/deserialize pairs return `NotImplemented`.
+- `include/project/Models/Serialization.h`, `src/Models/Serialization.cpp` —
+  bounded field-by-field EventRecord JSONL v2 codec; other record/format
+  combinations explicitly return `NotImplemented`.
 - Record types: `SensorFrame`, `ProcessedFrame`, `FeatureVector`, `ModelOutput`, `RiskAssessment`, `EventRecord`, `HealthSnapshot`.
 
+**Current status:** Inventory covers all seven records. Only EventRecord
+JSONL v2 is encoded and round-trip/bounds tested. Remaining records, CSV and
+binary codecs remain unimplemented; do not describe the general serializer as
+complete.
+
 **Tasks**
-- [ ] Inspect all seven model headers and create `docs/SERIALIZATION_SCHEMA.md` listing every field, type, optionality, validity semantics and version.
-- [ ] Decide which format is required for each use case: operational CSV, event JSONL, or versioned binary. Do not make all formats mandatory without a real consumer.
+- [x] Inventory all seven model headers in `docs/SERIALIZATION_SCHEMA.md`; agree only EventRecord JSONL v2 encoding for this increment. Remaining format requirements are deferred, not approved by implication.
+- [x] Keep operational CSV separate from EventRecord JSONL. Binary and remaining CSV serialization formats stay unsupported.
 - [ ] Keep the existing operational CSV contract unchanged unless a reviewed schema change is approved.
 - [ ] Define stable textual enum names; do not serialize enum ordinal values as a long-term external contract.
 - [ ] For binary, specify magic, format version, record type, length, byte order, integer widths, float representation, field order and checksum policy before implementation.
 - [ ] Implement primitive bounded writer/reader helpers for fixed-width integers and IEEE-754 float32 only after the binary contract is approved.
 - [ ] Check every append/read for bounds and overflow; avoid `capacity - size` underflow by maintaining the invariant `size <= capacity`.
-- [ ] Implement one record type at a time, starting with the smallest stable record, then add round-trip tests.
-- [ ] Implement explicit field-by-field encoding; never `memcpy` a C++ struct to persistent storage.
-- [ ] Validate enum values, record version, length, finite-number policy and validity masks during deserialization.
-- [ ] Add tests for null pointer, zero length, buffer too small, truncated record, trailing bytes, unknown version/type, invalid enum, NaN/Inf and round-trip equality.
+- [x] Implement the approved EventRecord JSONL v2 codec field-by-field; no struct memcpy.
+- [x] Validate supported type/version, length, enums, validity and numeric policy for that codec.
+- [x] Test null/zero/buffer bounds, truncation/trailing bytes, invalid version/type/enum, NaN/Inf policy and round-trip for EventRecord JSONL.
 - [ ] Ensure CSV escaping/decimal formatting is tested separately from binary serialization.
 - [ ] Remove or rename `NotImplemented` helper only after all declared overloads have a defined behavior; do not make unimplemented formats appear successful.
 
 **Documentation**
-- [ ] Add format compatibility/version migration policy to `docs/SERIALIZATION_SCHEMA.md`.
+- [x] Document EventRecord JSONL v2 schema and unsupported codec status in `docs/SERIALIZATION_SCHEMA.md`; migration for future formats remains open.
 - [ ] Link CSV schema to `docs/CSV_LOGGER.md`; keep dataset schema in DSD documents.
 
 **Acceptance**
@@ -234,26 +284,31 @@ Current headers use `bool` or `void` for several operations. This hides the reas
 
 **Current files**
 - `include/project/Storage/StorageManager.h`
-- `src/Storage/StorageManager.cpp` — skeleton only.
+- `src/Storage/StorageManager.cpp` — injected `IStorage` lifecycle with
+  explicit status propagation, append bounds, fault state and logical shutdown.
 - Related: `IStorage`, `CsvLogger`, `EventLogger`, `CsvRecord`.
+
+**Current status:** Responsibility split and fake-backend lifecycle are
+**implemented/host-tested**. No physical backend, storage layout, finite
+backend timeout, close operation, or durability verification exists.
 
 **Tasks**
 - [ ] Inspect `IStorage` and current `CsvLogger` to decide whether StorageManager is a physical backend manager, a record queue facade, or both. Do not duplicate responsibilities already owned by CsvLogger/EventLogger.
-- [ ] Write the responsibility split in `docs/STORAGE_DESIGN.md`.
+- [x] Document the responsibility split in `docs/STORAGE_DESIGN.md`.
 - [ ] Define storage state: uninitialized, ready, degraded, full, I/O fault, not present.
 - [ ] Define bounded append semantics: input ownership, maximum record size, whether call blocks, timeout, and partial-write handling.
 - [ ] Implement a fake in-memory IStorage backend for host tests if no fake already exists.
-- [ ] Implement begin/state transitions against the interface without hard-coding SD/SPI/SDMMC pins.
-- [ ] Implement append with explicit handling for null data, zero length, oversized record, not initialized, backend short write and backend error.
-- [ ] Implement flush with bounded timeout semantics; do not claim durability unless backend/filesystem semantics are verified.
+- [x] Implement begin/state transitions through injected backend without hardware pins. Fake tests cover success/failure/repeated begin.
+- [x] Implement null/zero/oversized/not-initialized/backend-false behavior. Because `IStorage::append()` returns only bool, true short-write length cannot be detected separately; false maps to IoError.
+- [ ] Implement a truly bounded timeout-aware flush only after storage owner provides a compatible backend contract. Current `flush()` is synchronous and has no timeout parameter.
 - [ ] Define whether a single logger task owns physical writes; if so, prohibit direct file I/O from sensor/inference tasks.
-- [ ] Add tests for begin failure, append success, partial write, full media, flush failure, repeated begin, and write after shutdown.
+- [x] Add fake-backend tests for begin success/failure, append, reported partial/backend failure, configured max/full, flush failure, repeated begin, and write-after-shutdown.
 - [ ] Add rotation/recovery only after storage hardware and file format are selected.
 - [ ] On storage failure, raise a health/event condition and follow the approved policy; never discard critical events silently or report successful persistence.
 
 **Documentation**
-- [ ] Create `docs/STORAGE_DESIGN.md` with backend interface, task ownership, buffering, full-media policy, rotation, recovery and durability caveats.
-- [ ] Update `docs/CSV_LOGGER.md` to define logger-vs-storage ownership.
+- [x] Document current backend interface, buffer ownership/blocking, partial-write limitation, shutdown, and durability caveat in `docs/STORAGE_DESIGN.md`; media-specific rotation/recovery remains open.
+- [x] `docs/CSV_LOGGER.md` keeps CsvLogger's independent filesystem/CSV responsibilities distinct from StorageManager.
 
 **Acceptance**
 - Host tests validate lifecycle and error propagation through a fake backend.
@@ -263,22 +318,26 @@ Current headers use `bool` or `void` for several operations. This hides the reas
 
 **Current files**
 - `include/project/Managers/OutputController.h`
-- `src/Managers/OutputController.cpp` — skeleton only.
+- `src/Managers/OutputController.cpp` — pure risk assessment to command
+  mapping; no GPIO operations.
 - Related: `RiskAssessment`, BSP safe-output functions, alarm hardware fields in BoardPins.
+
+**Current status:** Pure policy and feedback-state semantics are
+**host-tested**. GPIO mapping, polarity, physical safe state, and feedback
+hardware are **blocked/not configured**.
 
 **Tasks**
 - [ ] Define an `OutputPolicy` table for every risk/system state, including STARTUP, NORMAL, MONITOR, DANGER_TEST, UNKNOWN and FAULT where supported by the project contracts.
 - [ ] Keep policy data separate from GPIO pin assignments and Arduino APIs.
 - [ ] Define boot/reset/fault safe state from the reviewed electrical design; do not assume active-high/active-low.
-- [ ] Implement pure mapping from `RiskAssessment` to an output command so it can be host-tested.
-- [ ] Treat invalid/unknown assessment as unknown/fault policy, never silently as normal/off.
-- [ ] Separate command status from physical readback. If no feedback circuit exists, return NOT_PRESENT/NOT_VERIFIABLE rather than claiming the alarm is active.
-- [ ] Add output transition tests, repeated-command tests, invalid-input tests and command/readback mismatch tests.
+- [x] Implement pure mapping from `RiskAssessment` to an output command. Evidence: OutputController host tests.
+- [x] Preserve invalid/unknown explicitly and represent feedback absent/unverifiable without claiming actuation.
+- [x] Add state, repeat, invalid-input and feedback tests; no command/readback hardware test is claimed.
 - [ ] Add hardware driver integration only after buzzer/LED/relay presence, pin map, polarity, current and safe-state have been reviewed.
 - [ ] Add startup self-test only if the physical output and test procedure are approved.
 
 **Documentation**
-- [ ] Create `docs/OUTPUT_POLICY.md` with state-to-command table, boot-safe state, fault behavior and feedback limitations.
+- [x] Create `docs/OUTPUT_POLICY.md` with pure mapping, unknown handling and feedback limits; physical boot-safe state remains unconfigured.
 - [ ] Update FMEA/ICD/LLD if physical alarm behavior or safety assumptions change.
 
 **Acceptance**
@@ -289,24 +348,29 @@ Current headers use `bool` or `void` for several operations. This hides the reas
 
 **Current files**
 - `include/project/Managers/RecoveryManager.h`
-- `src/Managers/RecoveryManager.cpp` — skeleton only.
+- `src/Managers/RecoveryManager.cpp` — pure status/context classification and
+  retry decision using injected retry policy.
 - Related: status enums, EventRecord, HealthMonitor, WatchdogSupervisor, SensorManager, StorageManager.
+
+**Current status:** Classification/retry decision is **host-tested**; no
+hardware recovery dispatcher exists. Retry counts are not invented; the
+caller supplies the limit.
 
 **Tasks**
 - [ ] Inventory existing error/status enums and consolidate duplicate meanings before adding new codes.
 - [ ] Define stable `FaultCode`/`RecoveryAction` mapping in `docs/FAULT_RECOVERY_MATRIX.md`.
 - [ ] Include at least configuration, sensor, I2C, calibration, data-quality, schema/model, queue, storage, output, task deadline and internal faults if represented by current architecture.
 - [ ] Define severity, retry allowed, maximum attempts, backoff strategy, recovery action, escalation state and event to log for each fault.
-- [ ] Implement pure `classify(error/status/context)` logic first; no hardware calls inside classification.
+- [x] Implement pure classification with no hardware calls. Evidence: RecoveryManager host tests.
 - [ ] Implement a bounded recovery dispatcher using injected interfaces/callbacks; do not hide I2C or SD operations inside a generic manager.
-- [ ] Ensure schema/model mismatch locks inference until a valid configuration/model is loaded.
+- [x] Return inference-inhibit decision for schema/model mismatch. Runtime enforcement remains the caller's responsibility and is not wired.
 - [ ] Ensure retries cannot loop indefinitely and cannot block acquisition/critical monitoring.
 - [ ] Record recovery attempt count and final result.
-- [ ] Add tests for unknown code, retry limit, successful recovery, failed recovery, backoff boundary and repeated fault.
+- [x] Add tests for known/unknown status, retry disabled/limit/unavailable and mismatch inhibit. Recovery execution, backoff timing, and repeated hardware fault behavior remain unimplemented.
 - [ ] Add hardware-specific recovery (sensor re-init, I2C bus recovery, controlled restart) only after each action is verified on target.
 
 **Documentation**
-- [ ] Create `docs/FAULT_RECOVERY_MATRIX.md`.
+- [x] Create `docs/FAULT_RECOVERY_MATRIX.md` for pure classification/retry decisions; hardware recovery remains blocked.
 - [ ] Update `docs/TASK_RUNTIME_FLOW.md` with recovery ownership and interaction with watchdog.
 
 **Acceptance**
@@ -377,29 +441,27 @@ Current headers use `bool` or `void` for several operations. This hides the reas
 
 ## 3. Documentation update backlog
 
-Create or update these documents as the code contracts become stable. Do not rewrite higher-level requirements merely to match incomplete code.
+Document status as of 2026-11-02. Do not rewrite higher-level requirements merely to match incomplete code.
 
-| Document | Action | Required content | Depends on |
-|---|---|---|---|
-| `README.md` | Update now | Project status, build/test commands, mock vs target, known blockers | Current repo |
-| `ARCHITECTURE.md` | Update now | Actual vs planned modules, dependencies, task ownership, startup/shutdown | Current repo |
-| `PROJECT_TREE.txt` | Update whenever tree changes | Exact file tree; mark planned files explicitly | Code changes |
-| `docs/PLACEHOLDER_STATUS.md` | Create now | Placeholder inventory, file path, behavior, blocker, tests, evidence | Current repo |
-| `docs/MODULE_API_CONTRACTS.md` | Create now | API preconditions, return status, task/ISR, blocking, ownership | Header review |
-| `docs/DATA_CONTRACTS.md` | Create next | Model fields, units, validity, timestamp, enum semantics | Model headers |
-| `docs/SERIALIZATION_SCHEMA.md` | Create before serializer implementation | Field order, format/version, encoding, bounds, migration | Data contracts |
-| `docs/CONFIG_MANIFEST.md` | Create before ConfigManager persistence | Manifest fields, validation, atomic commit, rollback | Config structs |
-| `docs/CALIBRATION_CONTRACT.md` | Create before physical conversion | Raw/processed mapping, units, calibration metadata | Sensor evidence |
-| `docs/SCHEMA_REGISTRY.md` | Create before enabling inference | FSS/model comparison and fail-closed conditions | Released FSS/model |
-| `docs/STORAGE_DESIGN.md` | Create before storage backend | IStorage ownership, queue, flush, rotation, recovery | Storage hardware |
-| `docs/OUTPUT_POLICY.md` | Create before GPIO alarm | Risk-state mapping, safe state, feedback limitations | Electrical review |
-| `docs/FAULT_RECOVERY_MATRIX.md` | Create before recovery actions | Fault severity, retry, action, escalation | Error catalog |
-| `docs/WATCHDOG_POLICY.md` | Create before watchdog enablement | Task progress, timing evidence, timeout, feed ownership | Target timing |
-| `docs/BASELINE_TEST_REPORT.md` | Create now; append results | Build environment, commands, test results, target evidence | Test runs |
-| `docs/RELEASE_CHECKLIST.md` | Create before release | Build/model/config hashes, test evidence, release gates | All above |
+| Document | Current status | Remaining work/dependency |
+|---|---|---|
+| `README.md`, `ARCHITECTURE.md`, `PROJECT_TREE.txt` | Updated 2026-11-02 | Refresh tree/status when source or docs change. |
+| `docs/PLACEHOLDER_STATUS.md`, `docs/MODULE_API_CONTRACTS.md` | Updated 2026-11-02 | API owner review remains; system contract approval is separate. |
+| `docs/DATA_CONTRACTS.md` | **Not created** | Field/unit/validity inventory; depends on model and authoritative system documents. |
+| `docs/SERIALIZATION_SCHEMA.md` | Exists; EventRecord JSONL v2 only | Other records/formats remain explicitly unimplemented; no general wire schema approval. |
+| `docs/CONFIG_MANIFEST.md` | Exists; pure validation and logical slots documented | Concrete persistence encoding/backend and production ownership remain blocked. |
+| `docs/CALIBRATION_CONTRACT.md` | Exists; raw/validity contract | Physical calibration requires approved sensor data and coefficients. |
+| `docs/SCHEMA_REGISTRY.md` | **Not created** | Could document generic checker; production gate requires released FSS/model. |
+| `docs/STORAGE_DESIGN.md` | Exists; fake-backend manager lifecycle | Selected medium, bounded hardware flush, layout and durability remain blocked. |
+| `docs/OUTPUT_POLICY.md` | Exists; pure policy only | Electrical review/output device/feedback required for hardware behavior. |
+| `docs/FAULT_RECOVERY_MATRIX.md` | Exists; pure classification/retry decision | Hardware recovery actions remain unverified. |
+| `docs/WATCHDOG_POLICY.md` | **Not created** | Requires approved task timing and target watchdog/reset evidence. |
+| `docs/BASELINE_TEST_REPORT.md` | Updated with current 71/3 native test evidence | Target build and hardware evidence remain not run. |
+| `docs/REQUIREMENT_TRACEABILITY.md` | Created 2026-11-02 | Controlled DOP/DSD/FSS/ICD/LLD/TCS/GTIS inputs absent. |
+| `docs/RELEASE_CHECKLIST.md` | Created 2026-11-02 | Release disposition remains NOT READY/BLOCKED. |
 
 **Document change rules**
-- [ ] Every changed document has version/date/change summary and owner/reviewer fields where appropriate.
+- [x] Every document changed in this audit has an update date/revision and change history; requirement-owner/reviewer approval remains pending.
 - [ ] A code change that changes a contract must update its owning document in the same work item.
 - [ ] If an implementation contradicts DOP/DSD/FSS/ICD/LLD/TCS/GTIS, stop and raise a design change; do not silently make code the new authority.
 - [ ] Keep operational CSV, mock serial CSV and training dataset schema as three explicitly different artifacts.
@@ -410,25 +472,27 @@ Create or update these documents as the code contracts become stable. Do not rew
 ## 4. Recommended implementation sequence and exit gates
 
 ### Sprint A — repository and contract hygiene [NOW]
-- [ ] Complete sections 0.1–0.4.
+- [ ] Complete sections 0.1–0.4. Documentation synchronization has partial completion; clean-build provenance and complete API/data/error inventories remain open.
 - [ ] Complete data contract/error catalog inventory.
-- [ ] Add placeholder status and API contract documents.
+- [x] Add placeholder status and API contract documents. Evidence:
+  `docs/PLACEHOLDER_STATUS.md` and `docs/MODULE_API_CONTRACTS.md`; module-owner
+  and system-contract approval remain open.
 - [ ] Exit gate: baseline test report + clear source-of-truth for data/status contracts.
 
 ### Sprint B — pure host-testable logic [NOW]
-- [ ] Implement ConfigManager pure manifest validation.
-- [ ] Implement CalibrationService validity/raw pass-through behavior without unapproved physical coefficients.
-- [ ] Implement SchemaRegistry generic descriptor validation using TEST-only descriptors.
-- [ ] Implement OutputController pure risk-to-command policy with no GPIO.
-- [ ] Implement RecoveryManager pure fault classification and bounded retry decision logic.
+- [x] Implement ConfigManager pure manifest validation. Host tests pass; production persistence remains blocked.
+- [x] Implement CalibrationService validity/raw pass-through behavior without unapproved physical coefficients. Host tests pass; physical calibration remains blocked.
+- [x] Implement SchemaRegistry generic descriptor validation using TEST-only descriptors. Host tests pass; production FSS remains blocked.
+- [x] Implement OutputController pure risk-to-command policy with no GPIO. Host tests pass; physical output remains blocked.
+- [x] Implement RecoveryManager pure fault classification and bounded retry decision logic. Host tests pass; hardware actions remain blocked.
 - [ ] Exit gate: unit tests cover success, invalid input, boundary, mismatch and failure paths.
 
 ### Sprint C — persistence and serialization [WAIT for schema freeze; fake backend can start]
-- [ ] Freeze data record field inventory and version policy.
+- [x] Inventory all seven record fields and approve EventRecord JSONL v2 only; remaining serialization formats are deferred.
 - [ ] Freeze operational logging format and any additional record format.
 - [ ] Implement serializers one record at a time.
-- [ ] Implement StorageManager against fake backend, then selected hardware backend.
-- [ ] Implement ConfigManager two-slot persistence/rollback.
+- [x] Implement StorageManager fake-backend lifecycle. Hardware backend not implemented.
+- [x] Implement ConfigManager logical two-slot protocol/fault tests. Concrete adapter/power-loss media test not implemented.
 - [ ] Exit gate: round-trip, truncation, full-media and power-loss fault-injection tests.
 
 ### Sprint D — target integration [HW]
@@ -457,22 +521,27 @@ Create or update these documents as the code contracts become stable. Do not rew
 
 ---
 
-## 5. Current known placeholder inventory (verified against source tree on 2026-10-30)
+## 5. Current implementation and blocker inventory (2026-11-02)
 
-| Module | Current source behavior | Immediate next action |
+| Module | Status from source/tests | Remaining gate |
 |---|---|---|
-| `AppController` | `src/Managers/AppController.cpp` is comment-only skeleton | Define dependency contract and startup state machine; add fake-dependency tests |
-| `ConfigManager` | Three methods return `false` | Implement pure manifest validation before storage activation |
-| `CalibrationService` | `loadCalibration()` returns false; `process()` clears output and returns false | Implement validity propagation/raw preservation; wait for coefficients |
-| `SchemaRegistry` | `validate()` and `compatible()` return false | Implement descriptor comparison; keep production inference locked |
-| `Serialization` | Seven record serializer/deserializer pairs return `NotImplemented` | Inventory fields and freeze wire schema before encoding |
-| `StorageManager` | Source is comment-only skeleton | Clarify role vs CsvLogger/EventLogger; implement fake-backend lifecycle |
-| `OutputController` | Source is comment-only skeleton | Implement pure state-to-command policy; wait for GPIO/electrical review |
-| `RecoveryManager` | Source is comment-only skeleton | Implement pure fault classification/retry matrix |
-| BSP watchdog | `watchdogInit()` and `watchdogFeed()` return `NotConfigured` | Verify framework version and task timing before hardware API |
-| BSP power status | `readPowerStatus()` returns `NotConfigured` | Leave unimplemented unless power monitor hardware is confirmed |
+| `AppController` | Lifecycle protocol, fixed startup sequence, reverse cleanup and status state machine; 7 host tests. | Production phase adapters absent; task stop/drain and timeout-aware storage flush APIs absent. |
+| `ConfigManager` | Pure validation and logical two-slot adapter protocol; fault-injected fake tests. | Concrete adapter/field encoding/media, production startup injection, and target power-loss evidence absent. |
+| `CalibrationService` | Raw/validity propagation and non-finite/version/schema rejection; host tests. | No approved calibration artifact or coefficients; no physical calibrated output. |
+| `SchemaRegistry` | Generic descriptor/vector compatibility with detailed mismatch; synthetic fixture tests. | Released FSS and actual model metadata absent; production inference blocked. |
+| `Serialization` | Seven-record inventory; only EventRecord JSONL v2 codec implemented and tested. | Other six record codecs and CSV/binary formats unsupported. |
+| `StorageManager` | Injected fake-backend lifecycle, bounds/status/error handling; host tests. | No physical backend, finite backend timeout, byte-count result, close, or durability evidence. |
+| `OutputController` | Pure mapping, explicit unknown/invalid and feedback states; host tests. | No GPIO, electrical safe-state, pin/polarity approval, or feedback verification. |
+| `RecoveryManager` | Pure classification and injected bounded retry decision; host tests. | No recovery execution, I2C bus recovery, device restart, or target validation. |
+| `FeaturePipeline` / `RiskManager` | Implemented and host-tested using configured fixtures. | Production FSS/model semantics and risk thresholds/approval absent. |
+| `EdgeImpulseAdapter` | Conditional generated-runtime wrapper with fail-closed missing-header path. | Repository has no actual export/SDK/model metadata or target resource/golden evidence. |
+| `BSP` watchdog/power | `watchdogInit()`, `watchdogFeed()` and `readPowerStatus()` remain `NotConfigured`. | Verified framework API, timing, physical power monitor, and target reset evidence absent. |
+| `Tasks` / `QueueRegistry` | Implemented framework and typed queues. | Runtime sizes/timing unconfigured; stop/drain API and AppController composition absent. |
+| Production `main.cpp` | Early BSP checks then fails closed on default ConfigManager; no AppController/task composition. | Approved persistence, lifecycle adapters, hardware/model config and target evidence. |
 
-**Important distinction:** `EdgeImpulseAdapter` is not wholly a placeholder. It contains fail-closed checks, but the actual generated Edge Impulse deployment/model integration still needs to be supplied and verified. `FeaturePipeline` and `RiskManager` already contain logic; they require contract/model/risk-policy review rather than being treated as empty stubs.
+For detailed requirements-to-test links, see
+`docs/REQUIREMENT_TRACEABILITY.md`. Release state is
+`docs/RELEASE_CHECKLIST.md`: **NOT READY / BLOCKED**.
 
 ---
 
@@ -690,3 +759,6 @@ Values marked `TBD` must not be copied from unit-test or mock examples.
 - Edge Impulse Studio dataset upload, production inference, production risk
   thresholds, board pin mapping, and FreeRTOS task/queue sizing remain
   unconfigured until their respective approvals/evidence exist.
+- Other runtime gates remain open: no production AppController composition,
+  persistent storage backend, approved calibration/model artifact, or target
+  acceptance evidence is available.

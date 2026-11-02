@@ -1,25 +1,83 @@
-# Config Manifest and Pure Validation
+# Config Manifest and Persistence
+
+**Document revision:** 1.1
+
+**Updated:** 2026-11-02
+**Status:** Host-tested protocol; no production persistence adapter.
 
 ## Scope and status
 
 `ConfigManager::validateManifest(const ConfigManifest&, ValidationReport&)` is
-a pure, host-testable validator. It reads caller-owned data and optional
-caller-owned artifact buffers; it performs no file access, persistence,
-activation, hardware access, allocation, or global-state mutation.
+a pure, host-testable validator. `ConfigManager` also supports two-slot
+candidate persistence through the injected `IConfigManifestPersistence`
+abstraction. The manager performs no file access, hardware access, allocation,
+or mutation of module-owned configuration objects.
 
-The format version currently supported by this in-memory validation contract
-is `ConfigManager::kSupportedManifestVersion` (`1`). This is not a released
-serialized manifest format and does not specify a storage layout.
+The supported manifest schema version is
+`ConfigManager::kSupportedManifestVersion` (`1`). The persistence adapter's
+logical record is a nonzero generation plus the complete version-1
+`ConfigManifest`: purpose and production approval, the values of each
+referenced module configuration, and the exact bytes of each supplied
+artifact. The adapter must encode each field explicitly; it must not persist
+C++ struct bytes or pointers. The format is specific to ConfigManager and
+does not change the general `Serialization` schema.
 
-The existing no-argument methods remain unchanged and fail closed:
+The record body and commit marker are distinct. A body is not selectable until
+the adapter reports it as `Committed`; slot selection never relies on a
+separate mutable active-slot pointer. Physical encoding and durability remain
+the responsibility of a concrete adapter and have not been verified for
+hardware.
 
-- `loadLastValid()` returns `false`.
-- `validateManifest()` returns `false`.
-- `activateAtomically()` returns `false`.
+The default-constructed manager has no adapter and all persistence/activation
+methods fail closed. The production startup caller still uses this constructor,
+so production startup remains blocked until an approved adapter is integrated.
 
-The production caller still uses those methods, so production startup remains
-blocked. A successful pure validation, including a `Production`-purpose
-manifest, does not authorize or perform activation.
+`activeManifest()` exposes the selected manifest only after
+`activateAtomically()` accepts a valid `Production` manifest. This is a
+ConfigManager-level selection only; it does not apply configuration to runtime
+modules or authorize hardware operation.
+
+## Persistence adapter contract
+
+`IConfigManifestPersistence` exposes two slots and separates these operations:
+
+1. `writeCandidate(slot, generation, manifest)` invalidates any old marker in
+   the target slot before changing its body. The caller chooses only the slot
+   opposite the newest valid committed record.
+2. `flushCandidate(slot)` completes the candidate body write.
+3. `readSlot(...)` reads the body back. A candidate is returned as `Candidate`
+   before commit and as `Committed` only after a valid marker. `Corrupt` is
+   distinct from `IoError`; only known-corrupt records may be skipped during
+   fallback. The adapter owns decoded configurations and artifact bytes for
+   the lifetime of returned views.
+4. The manager validates the read-back manifest with the same pure validator.
+   Invalid input or read-back never receives a commit marker.
+5. `writeCommitMarker(slot, generation)` followed by
+   `flushCommitMarker(slot)` completes the commit boundary. The adapter must
+   bind the marker to the slot generation and make torn/partial markers
+   unreadable as committed.
+6. On load, the manager selects the highest-generation committed record that
+   passes validation. A tie, adapter I/O error, or absence of a valid record
+   fails closed. Empty, uncommitted, and corrupt slots are ignored, allowing a
+   valid previous slot to be selected after an interrupted or corrupt newer
+   candidate.
+
+Before commit, the selected slot is never the write target, so failures while
+writing, flushing, reading back, validating, or writing/flushing the marker
+leave the prior valid record eligible. A power loss during the commit boundary
+may leave either the prior record or the fully committed candidate selectable;
+the adapter must never expose a partial marker as committed. These guarantees
+are protocol requirements, not durability claims about a hardware medium.
+
+`storeCandidate()` rejects a candidate that fails validation before writing,
+then executes the full write/flush/read-back/validate/commit sequence. A valid
+candidate can be stored without being activated. `loadLastValid()` and
+`storeCandidate()` clear any previous runtime activation when changing the
+selected manifest. `activateAtomically()` requires a selected, valid
+`Production` manifest; the existing validator enforces production approval,
+model approval/verification, artifact hashes, and FSS/model compatibility.
+Test-only manifests can be validated and persisted for host tests but cannot be
+activated.
 
 ## Configuration ownership
 
@@ -121,9 +179,10 @@ Production-purpose validation additionally requires:
 - actual schema, model, and risk artifact bytes whose SHA-256 values match the
   hashes in their existing owner configs.
 
-Even when these checks pass, `activateAtomically()` remains a stub returning
-`false`. No persistence, two-slot activation, rollback, or power-loss behavior
-is implemented by this task.
+`activateAtomically()` returns true only for a selected manifest that passes
+all these checks. It only exposes the selected view through `activeManifest()`;
+it does not copy values into live module configuration or provide atomic
+runtime reconfiguration.
 
 ## Test evidence and limitations
 
@@ -131,11 +190,24 @@ The `TestManifestFixture` in
 `test/test_system_contracts/test_system_contracts.cpp` is explicitly
 test-only. It covers valid test input, missing fields, unsupported version,
 invalid enum, NaN/Inf, out-of-range dimensions, model/FSS mismatch, supplied
-artifact hashes, and the production activation gate.
+artifact hashes, and the production activation gate. A fake
+`IConfigManifestPersistence` additionally injects failures at candidate write,
+candidate flush, read-back, commit-marker write, and commit-marker flush;
+reboot-style manager recreation verifies the old committed record remains
+selectable. Tests also cover invalid candidates, successful commit, and
+fallback from an invalid newest record.
 
 `native-unit-tests` has an explicit source filter that does not include
 `src/Managers/ConfigManager.cpp`. To exercise the real implementation without
 changing the out-of-scope `platformio.ini`, that test translation unit includes
 the `.cpp` under a `TEST ONLY` marker. Production firmware does not compile
-tests. No hardware, persistent-storage, authenticity/signature, or production
-approval claim follows from these host tests.
+tests. No concrete persistent-storage adapter, hardware durability,
+authenticity/signature, or production activation claim follows from these host
+tests.
+
+## Change history
+
+| Revision | Date | Change |
+|---|---|---|
+| 1.1 | 2026-11-02 | Added audit status/date and clarified production adapter remains absent. |
+| 1.0 | 2026-11-02 | Documented ConfigManager logical two-slot protocol and fake fault-injection evidence. |

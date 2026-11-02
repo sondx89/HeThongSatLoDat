@@ -329,18 +329,148 @@ void validateSensorManagerConfig(
     }
 }
 
+struct SelectedConfigSlot {
+    std::uint8_t slot{0U};
+    std::uint64_t generation{0U};
+    ConfigManifest manifest{};
+};
+
+bool selectNewestCommitted(IConfigManifestPersistence& persistence,
+                           SelectedConfigSlot& selected,
+                           bool& found) noexcept {
+    found = false;
+    for (std::uint8_t slot = 0U; slot < 2U; ++slot) {
+        std::uint64_t generation = 0U;
+        ConfigManifest manifest{};
+        const ConfigSlotReadStatus readStatus =
+            persistence.readSlot(slot, generation, manifest);
+        switch (readStatus) {
+            case ConfigSlotReadStatus::Empty:
+            case ConfigSlotReadStatus::Candidate:
+            case ConfigSlotReadStatus::Corrupt:
+                continue;
+            case ConfigSlotReadStatus::Committed:
+                break;
+            case ConfigSlotReadStatus::IoError:
+            default:
+                return false;
+        }
+
+        ValidationReport report{};
+        if (generation == 0U ||
+            ConfigManager::validateManifest(manifest, report) !=
+                project::models::ApiStatus::Ok) {
+            continue;
+        }
+        if (found && generation == selected.generation) {
+            return false;
+        }
+        if (!found || generation > selected.generation) {
+            selected = {slot, generation, manifest};
+            found = true;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
+ConfigManager::ConfigManager(
+    IConfigManifestPersistence& persistence) noexcept
+    : persistence_(&persistence) {}
+
 bool ConfigManager::loadLastValid() {
-    return false;
+    hasSelection_ = false;
+    activated_ = false;
+    selectedManifest_ = {};
+    if (persistence_ == nullptr) {
+        return false;
+    }
+
+    SelectedConfigSlot selected{};
+    bool found = false;
+    if (!selectNewestCommitted(*persistence_, selected, found) || !found) {
+        return false;
+    }
+    selectedManifest_ = selected.manifest;
+    hasSelection_ = true;
+    return true;
+}
+
+bool ConfigManager::storeCandidate(const ConfigManifest& candidate) {
+    if (persistence_ == nullptr) {
+        return false;
+    }
+    ValidationReport candidateReport{};
+    if (validateManifest(candidate, candidateReport) !=
+        project::models::ApiStatus::Ok) {
+        return false;
+    }
+
+    SelectedConfigSlot current{};
+    bool hasCurrent = false;
+    if (!selectNewestCommitted(*persistence_, current, hasCurrent)) {
+        return false;
+    }
+    if (hasCurrent &&
+        current.generation == std::numeric_limits<std::uint64_t>::max()) {
+        return false;
+    }
+
+    const std::uint8_t targetSlot =
+        hasCurrent ? static_cast<std::uint8_t>(1U - current.slot) : 0U;
+    const std::uint64_t generation =
+        hasCurrent ? current.generation + 1U : 1U;
+    if (!persistence_->writeCandidate(targetSlot, generation, candidate) ||
+        !persistence_->flushCandidate(targetSlot)) {
+        return false;
+    }
+
+    std::uint64_t readBackGeneration = 0U;
+    ConfigManifest readBack{};
+    if (persistence_->readSlot(targetSlot, readBackGeneration, readBack) !=
+            ConfigSlotReadStatus::Candidate ||
+        readBackGeneration != generation) {
+        return false;
+    }
+    ValidationReport readBackReport{};
+    if (validateManifest(readBack, readBackReport) !=
+        project::models::ApiStatus::Ok) {
+        return false;
+    }
+    if (!persistence_->writeCommitMarker(targetSlot, generation) ||
+        !persistence_->flushCommitMarker(targetSlot)) {
+        return false;
+    }
+
+    return loadLastValid();
 }
 
 bool ConfigManager::validateManifest() {
-    return false;
+    if (!hasSelection_) {
+        return false;
+    }
+    ValidationReport report{};
+    return validateManifest(selectedManifest_, report) ==
+           project::models::ApiStatus::Ok;
 }
 
 bool ConfigManager::activateAtomically() {
-    return false;
+    if (!validateManifest() ||
+        selectedManifest_.purpose != ManifestPurpose::Production) {
+        activated_ = false;
+        return false;
+    }
+    activated_ = true;
+    return true;
+}
+
+const ConfigManifest* ConfigManager::selectedManifest() const noexcept {
+    return hasSelection_ ? &selectedManifest_ : nullptr;
+}
+
+const ConfigManifest* ConfigManager::activeManifest() const noexcept {
+    return activated_ ? &selectedManifest_ : nullptr;
 }
 
 project::models::ApiStatus ConfigManager::validateManifest(

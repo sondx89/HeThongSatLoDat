@@ -61,8 +61,8 @@ inline SerializationStatus notImplemented(std::uint8_t* output,
     if (output == nullptr && capacity != 0) {
         return SerializationStatus::InvalidArgument;
     }
-    // TODO(TBD): implement only after canonical formats, bounds, and versions
-    // are approved. Never serialize raw struct memory.
+    // Used only for record/format combinations without an approved codec.
+    // Never serialize raw struct memory.
     return SerializationStatus::NotImplemented;
 }
 
@@ -71,30 +71,58 @@ inline SerializationStatus notImplemented(const std::uint8_t* input,
     if (input == nullptr && size != 0) {
         return SerializationStatus::InvalidArgument;
     }
-    // TODO(TBD): reject unknown schema versions and invalid/non-finite fields.
+    // Used only for record/format combinations without an approved codec.
     return SerializationStatus::NotImplemented;
 }
 }  // namespace serialization_detail
 
-#define PROJECT_DECLARE_SERIALIZATION(Type, prefix)                                         \
-    inline SerializationStatus serialize##prefix(                                         \
-        const Type&, SerializationFormat, std::uint8_t* output, std::size_t capacity,     \
-        std::size_t& bytesWritten) noexcept {                                             \
-        return serialization_detail::notImplemented(output, capacity, bytesWritten);     \
-    }                                                                                     \
-    inline SerializationStatus deserialize##prefix(                                      \
-        SerializationFormat, const std::uint8_t* input, std::size_t size, Type&) noexcept { \
-        return serialization_detail::notImplemented(input, size);                         \
-    }
+SerializationStatus serializeSensorFrame(
+    const SensorFrame&, SerializationFormat, std::uint8_t* output,
+    std::size_t capacity, std::size_t& bytesWritten) noexcept;
+SerializationStatus deserializeSensorFrame(
+    SerializationFormat, const std::uint8_t* input, std::size_t size,
+    SensorFrame&) noexcept;
 
-PROJECT_DECLARE_SERIALIZATION(SensorFrame, SensorFrame)
-PROJECT_DECLARE_SERIALIZATION(ProcessedFrame, ProcessedFrame)
-PROJECT_DECLARE_SERIALIZATION(FeatureVector, FeatureVector)
-PROJECT_DECLARE_SERIALIZATION(ModelOutput, ModelOutput)
-PROJECT_DECLARE_SERIALIZATION(RiskAssessment, RiskAssessment)
-PROJECT_DECLARE_SERIALIZATION(EventRecord, EventRecord)
-PROJECT_DECLARE_SERIALIZATION(HealthSnapshot, HealthSnapshot)
+SerializationStatus serializeProcessedFrame(
+    const ProcessedFrame&, SerializationFormat, std::uint8_t* output,
+    std::size_t capacity, std::size_t& bytesWritten) noexcept;
+SerializationStatus deserializeProcessedFrame(
+    SerializationFormat, const std::uint8_t* input, std::size_t size,
+    ProcessedFrame&) noexcept;
 
-#undef PROJECT_DECLARE_SERIALIZATION
+SerializationStatus serializeFeatureVector(
+    const FeatureVector&, SerializationFormat, std::uint8_t* output,
+    std::size_t capacity, std::size_t& bytesWritten) noexcept;
+SerializationStatus deserializeFeatureVector(
+    SerializationFormat, const std::uint8_t* input, std::size_t size,
+    FeatureVector&) noexcept;
+
+SerializationStatus serializeModelOutput(
+    const ModelOutput&, SerializationFormat, std::uint8_t* output,
+    std::size_t capacity, std::size_t& bytesWritten) noexcept;
+SerializationStatus deserializeModelOutput(
+    SerializationFormat, const std::uint8_t* input, std::size_t size,
+    ModelOutput&) noexcept;
+
+SerializationStatus serializeRiskAssessment(
+    const RiskAssessment&, SerializationFormat, std::uint8_t* output,
+    std::size_t capacity, std::size_t& bytesWritten) noexcept;
+SerializationStatus deserializeRiskAssessment(
+    SerializationFormat, const std::uint8_t* input, std::size_t size,
+    RiskAssessment&) noexcept;
+
+SerializationStatus serializeEventRecord(
+    const EventRecord&, SerializationFormat, std::uint8_t* output,
+    std::size_t capacity, std::size_t& bytesWritten) noexcept;
+SerializationStatus deserializeEventRecord(
+    SerializationFormat, const std::uint8_t* input, std::size_t size,
+    EventRecord&) noexcept;
+
+SerializationStatus serializeHealthSnapshot(
+    const HealthSnapshot&, SerializationFormat, std::uint8_t* output,
+    std::size_t capacity, std::size_t& bytesWritten) noexcept;
+SerializationStatus deserializeHealthSnapshot(
+    SerializationFormat, const std::uint8_t* input, std::size_t size,
+    HealthSnapshot&) noexcept;
 
 }  // namespace project::models

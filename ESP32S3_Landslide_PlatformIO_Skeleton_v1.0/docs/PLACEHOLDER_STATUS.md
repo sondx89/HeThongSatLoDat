@@ -1,63 +1,58 @@
-# Placeholder and Implementation Status
+# Implementation and Blocker Status
 
-**Audit date:** 2026-10-30  
-**Evidence:** Current headers, sources, callers, `platformio.ini` source filters,
-and the two existing test suites. Absence of a caller/test means none was found
-in the inspected project source/tests; it does not prove a future integration
-cannot exist.
+**Document revision:** 1.0
 
-## Placeholder inventory
+**Audit date:** 2026-11-02
+**Evidence:** Current headers/sources, callers, PlatformIO test filters, and
+the native unit/integration test runs recorded below. A module is not called
+production-ready merely because its source or host tests exist.
 
-| Module / files | Current behavior in source | Callers | Tests | Dependencies and blockers |
-|---|---|---|---|---|
-| `Managers/AppController` — `include/project/Managers/AppController.h`, `src/Managers/AppController.cpp` | Header declares `begin()`, `runHealthChecks()`, and `requestShutdown()`; source is comment-only and defines none of them. | No caller found. Production `main.cpp` does not instantiate it. | None. | Only a forward declaration of BSP exists. Composition, lifecycle contract, approved startup configuration, dependencies, and tests are not implemented. |
-| `Managers/ConfigManager` — `include/project/Managers/ConfigManager.h`, `src/Managers/ConfigManager.cpp` | `loadLastValid()`, `validateManifest()`, and `activateAtomically()` each return `false`. | Non-mock `setup()` in `src/main.cpp` calls them in a short-circuit chain; the first false result blocks startup, so later calls are not reached. | None. Neither test environment selects this source. | No manifest/persistence implementation or storage injection is present. The production startup path is deliberately fail-closed. |
-| `Services/CalibrationService` — `include/project/Services/CalibrationService.h`, `src/Services/CalibrationService.cpp` | `loadCalibration()` returns false. `process()` clears the output to its default-invalid state and returns false. | `TaskFeature::onStart()` calls `loadCalibration()` and fails startup; `TaskFeature::runOne()` calls `process()` and reports a calibration rejection on failure. | None. It is not in either test source filter. | Uses `SensorFrame` and `ProcessedFrame`; calibration schema, units, coefficients, validity policy, and approved source are absent. |
-| `AI/SchemaRegistry` — `include/project/AI/SchemaRegistry.h`, `src/AI/SchemaRegistry.cpp` | `validate()` and `compatible()` return false. | `TaskInference::onStart()` sets schema compatibility from `compatible()`; `runOne()` rejects input when `validate()` is false and produces a version-mismatch output. | None. It is not in either test source filter. | Takes `FeatureVector`; released FSS/schema descriptor and compatibility rules are missing. |
-| `Models/Serialization` — `include/project/Models/Serialization.h` (header-only) | `BoundedByteWriter` performs bounded byte appends with argument/capacity checks. All seven record serialize/deserialize pairs return `NotImplemented` for otherwise valid arguments; serialization sets `bytesWritten` to zero. No struct-memory dump is performed. | No production caller found. | None. | Depends on the seven model record types and serialization status/format enums. Canonical field/byte order, encoding, versioning, and wire formats are not approved. |
-| `Storage/StorageManager` — `include/project/Storage/StorageManager.h`, `src/Storage/StorageManager.cpp` | Header declares `begin()`, `appendRecord()`, and `flush()`; source is comment-only and defines none. | No caller found. | None. It is not in either test source filter. | Includes `IStorage`, whose interface uses `append()` rather than `appendRecord()`; no interface is injected into `StorageManager`. Storage hardware/layout, lifecycle, error policy, and ownership remain unresolved. `CsvLogger` is a separate implemented component and does not call `StorageManager`. |
-| `Managers/OutputController` — `include/project/Managers/OutputController.h`, `src/Managers/OutputController.cpp` | `apply()` and `setFaultIndication()` are declared; source is comment-only. | No caller found. | None. | Accepts `RiskAssessment`; approved risk-to-output mapping, safe state, GPIO/electrical review, and output hardware are absent. |
-| `Managers/RecoveryManager` — `include/project/Managers/RecoveryManager.h`, `src/Managers/RecoveryManager.cpp` | `classifyError()` and `executeRecovery()` are declared; source is comment-only. | No caller found. | None. | No fault/retry/recovery contract or implementation dependency is wired. Fault taxonomy and bounded recovery policy need approval. |
-| BSP watchdog — `include/project/BSP/BoardSupportPackage.h`, `src/BSP/BoardSupportPackage.cpp` | `watchdogInit()` and `watchdogFeed()` return `BspStatus::NotConfigured`. | `WatchdogSupervisor::begin()` calls init; `checkTaskProgress()` calls feed only after required task heartbeats pass. A non-`Ok` result is treated as platform unavailable/failure. | None in configured test environments. | Framework/SoC integration, monitored task set, deadlines, timeout, and feed policy are explicitly TBD. The application supervisor is not a configured hardware watchdog. |
-| BSP power status — same BSP header/source | `readPowerStatus()` clears the output to its default state (`valid == false`) and returns `NotConfigured`. | No caller found. | None in configured test environments. | No confirmed power-monitor hardware, measurement contract, or reviewed electrical setup. |
-| `AI/EdgeImpulseAdapter` — `include/project/AI/EdgeImpulseAdapter.h`, `src/AI/EdgeImpulseAdapter.cpp` | This is not wholly a placeholder. It validates configured schema/model/output metadata and input provenance/shape/finiteness. Without `PROJECT_EDGE_IMPULSE_MODEL_HEADER`, initialization returns false and `run()` reports `ModelError`; with a generated export it conditionally calls `run_classifier()`. Config hash/approval provenance is trusted from the caller, not cryptographically verified here. | `TaskInference` accepts an injected `IInferenceEngine`; no current composition instantiates `EdgeImpulseAdapter`. | No direct adapter test; not in the host test source filters. | No generated export/header or verified deployment manifest is in the project configuration. Actual model dimensions, FSS, output semantics, and generated SDK memory behavior remain blocked. |
-| `Services/FeaturePipeline` — `include/project/Services/FeaturePipeline.h`, `src/Services/FeaturePipeline.cpp` | Implemented fixed-capacity configuration checks, frame validation, sequence/time/calibration discontinuity handling, sliding window/stride, and `FeatureVector` metadata. Supported extraction is acceleration magnitude (explicit conversion required) and candidate tilt formulas (approval required). Raw accelerator, soil, YL-83, and HX710B feature IDs are rejected as unsupported. Default configuration is not ready. | `TaskFeature` owns/uses it after quality and calibration processing. | Unit: `testFeaturePipelineBuildsApprovedWindow`, `testFeaturePipelineFailsClosedForTbdRawFeature`. Integration exercises a test-only approved fixture. | `ProcessedFrame`/`FeatureVector`; production use blocked on released FSS/hash, eligible feature indexes/order, units/preprocessing, and approved sample/window/stride/model metadata. |
-| `Managers/RiskManager` — `include/project/Managers/RiskManager.h`, `src/Managers/RiskManager.cpp` | Implemented risk-config validation, model/tilt candidate classification, quality/health/provenance gates, separate risk/health output, and promotion/recovery hysteresis. Invalid/unconfigured inputs do not become `SAFE`; the default config is invalid. No production thresholds are embedded. | `TaskRisk` calls the `ProcessedFrame`/`HealthSnapshot` overload. | Unit: `testRiskManagerFusesApprovedScoreAndAppliesHysteresis`, `testRiskManagerReturnsUnknownForInvalidQualityOrModel`, `testRiskManagerHealthFaultBlocksModelRisk`, `testRiskManagerRejectsMismatchedModelProvenance`, `testRiskManagerFusesApprovedTiltWithModelScore`. Integration uses test-only configurations and model output. | Depends on `ModelOutput`, `ProcessedFrame`, `HealthSnapshot`, and `RiskAssessment`. Production classification is blocked on approved/hash-verified target semantics, thresholds, fallback/tilt policy, and evidence. `OutputController` is not wired. |
+## Status definitions
 
-## Coverage and integration observations
+- **Implemented:** source behavior is present.
+- **Partial:** a defined subset exists; required behavior/artifacts remain.
+- **Host-tested:** named tests exercise the listed behavior on the host.
+- **Mock/test-only:** tests use synthetic fixtures or fakes, not field inputs.
+- **Blocked:** a required artifact, approval, or API is absent.
+- **Not configured:** required hardware/policy value remains unset.
 
-- The native unit environment covers `FeaturePipeline` and `RiskManager`, but
-  does not compile/test the placeholder modules or `EdgeImpulseAdapter`.
-- The native integration environment covers the sensor/feature/test-model/risk/
-  `CsvLogger` path. It does not exercise `CalibrationService`, `SchemaRegistry`,
-  `ConfigManager`, `StorageManager`, `OutputController`, `RecoveryManager`, or
-  the generated Edge Impulse runtime.
-- The production `TaskFeature` path is currently blocked at calibration startup
-  because `CalibrationService::loadCalibration()` returns false. The
-  `TaskInference` schema gate is blocked because `SchemaRegistry::compatible()`
-  returns false. The non-mock `setup()` is blocked by `ConfigManager`.
-- `CsvLogger` is a separately implemented CSV component behind its own file
-  system contract; it is not evidence that the generic `StorageManager` or a
-  concrete production storage backend is implemented.
+## Module inventory
 
-## API contract status
+| Module/files | Current behavior | Tests/evidence | Status and blockers |
+|---|---|---|---|
+| `Managers/AppController` — `include/project/Managers/AppController.h`, `src/Managers/AppController.cpp` | Dependency-injected startup/shutdown state machine, ten ordered phases, reverse cleanup, inference gate, bounded-port config, health checks and status results. It has no production module adapter and is not used by `main.cpp`. | AppController tests in `test/test_system_contracts/test_system_contracts.cpp`: phase order, every startup-phase failure/reverse cleanup, inference-gate failure, shutdown order/repeat, flush failure, health failure/bounds, and unconfigured timeout. | **Implemented/host-tested protocol; production integration blocked.** TaskFramework has no stop/drain operation; StorageManager exposes no timeout-bearing flush. Adapter must enforce bounds; synchronous calls are not preempted. |
+| `Managers/ConfigManager` — header/source | Pure manifest validation and injected two-slot logical persistence: write candidate, flush, read back, validate, commit marker, select newest valid committed generation. Default constructor remains without persistence. `activeManifest()` exposes a selected Production manifest only after manager-level gate; no runtime module application occurs. | ConfigManager tests in system-contract suite: validation errors, hash checks, production fail-closed, each write/commit fault boundary, invalid candidate, successful commit, newest-corrupt fallback. | **Implemented/host-tested protocol; production persistence blocked.** No concrete adapter/field encoder/media, production composition, or hardware durability proof. |
+| `Services/CalibrationService` | Propagates frame metadata, raw values, and channel validity without applying calibration coefficients; calibration load remains not initialized. | CalibrationService tests in system-contract suite: raw/validity propagation, non-finite handling, version/schema rejection, partial-channel behavior. | **Partial/host-tested.** No approved calibration artifact, coefficients, or calibrated production output. |
+| `AI/SchemaRegistry` | Compares descriptors and vectors across schema identity/hash, feature count/order/units, preprocessing, window/stride/rate and validity. Production compatibility rejects test-only descriptors. | SchemaRegistry test group in system-contract suite. | **Implemented/host-tested generic validation.** Synthetic descriptors only; released FSS and actual model metadata absent, so production compatibility is blocked. |
+| `Models/Serialization` — header/source | Field-by-field bounded EventRecord JSONL v2 encode/decode. Other record types and CSV/binary serializer operations report unsupported/not implemented. No raw struct dump. | EventRecord JSONL tests in system-contract suite: round-trip, invalid args/bounds, truncation/trailing bytes, invalid type/version/enums, non-finite policy and boundary values. | **Partial/host-tested.** Six record codecs and other formats are not implemented. See `SERIALIZATION_SCHEMA.md`. |
+| `Storage/StorageManager` — header/source | Injected `IStorage` lifecycle; bounded by a configured maximum record length, synchronous borrowed input; backend false maps to I/O error and Faulted; logical shutdown. No storage layout or hardware operations. | StorageManager lifecycle/fake-backend tests in system-contract suite include begin failures/retry, append validation, partial-write error, flush failure, capacity, shutdown and write-after-shutdown. | **Implemented/host-tested lifecycle.** `IStorage` returns only bool, has no timeout/byte count/close; physical backend and durability remain blocked. |
+| `Managers/OutputController` — header/source | Pure risk-assessment-to-output-command policy; no GPIO or electrical assumptions. Unknown/invalid stays explicit; feedback absent/unverifiable is not claimed active. | Output policy tests in system-contract suite cover all states, invalid inputs, feedback, and repeat behavior. | **Implemented/host-tested pure policy.** Physical actuation, pin/polarity, safe-state and feedback are not configured/verified. |
+| `Managers/RecoveryManager` — header/source | Pure status/context classification and bounded retry decisions requiring injected retry policy. Schema/model mismatch inhibits inference. No device recovery/restart. | Recovery tests in system-contract suite cover known/unknown status, retry bounds, mismatch inhibit. | **Implemented/host-tested pure policy.** Hardware action dispatcher and target recovery validation are blocked. |
+| `Services/DataQualityService` | Classifies configured channel state and produces processed frames without converting invalid values to valid zero. | Data-quality test group in system-contract suite. | **Implemented/host-tested.** Production ranges, freshness bounds and required-channel policy remain unconfigured. |
+| `Services/FeaturePipeline` | Fixed-capacity window/stride extraction with schema/config/provenance checks; supports only approved/configured feature paths. | FeaturePipeline unit tests plus synthetic integration fixture. | **Partial/host-tested.** Production FSS, input ordering, units/preprocessing and model metadata absent. |
+| `Managers/RiskManager` | Configured model/tilt classification, data-quality/health/provenance gates and hysteresis. Default configuration is invalid and does not infer a normal state. | RiskManager test group in system-contract suite; synthetic integration fixture. | **Implemented/host-tested with test configuration.** Production policy thresholds/fallback approval and validated model semantics remain blocked. |
+| `AI/EdgeImpulseAdapter` | Conditional `run_classifier()` integration; checks configured metadata/input when generated header is enabled; without it initialization fails closed. | No direct adapter test and no generated model build evidence. | **Partial/blocked.** Actual deployment export, SDK, model metadata, released FSS, golden vectors, target build and resource measurements absent. |
+| `AI/MockModelRuntime`, `Drivers/MockSensors`, mock telemetry | Deterministic host/mock fixtures; MockModelRuntime explicitly emits model error rather than fabricated inference. | Native integration tests, including synthetic sensor/model path and fail-closed model case. | **Mock/test-only.** Never a production sensor/model or dataset evidence. |
+| `Managers/SensorManager` and drivers | Sequential sensor manager with configured retry/time checks and invalid-channel reporting; concrete drivers have configuration/electrical gates. | SensorManager unit group and sensor-to-feature integration test. | **Implemented/host-tested; target configuration not verified.** Hardware identity, pin/bus settings and sensor calibration need target evidence. |
+| `Tasks/TaskFramework`, `Queues/QueueRegistry`, `ApplicationTasks` | Task startup gate, typed queues, configured task classes and heartbeat framework exist. | Not included as a full production-runtime target integration in the present native evidence. | **Implemented/partial.** Queue depths/task priority/stack/timeouts remain unconfigured. No stop/drain API; runtime composition not wired. |
+| `Storage/CsvLogger` | Separate six-column CSV logger with injected filesystem interface and CSV-specific ownership. | Native integration suite uses a fake/test logger path. | **Implemented/partial.** No production filesystem/media adapter or durability evidence; not the same interface as StorageManager. |
+| BSP watchdog and power status | `watchdogInit()`, `watchdogFeed()`, and `readPowerStatus()` remain `NotConfigured` absent approved target configuration/hardware. | No target verification. | **Not configured/blocked.** Do not claim hardware watchdog or power monitoring is operational. |
+| `main.cpp` production composition | Performs early BSP checks, then default-constructs ConfigManager and stays fail-closed when production config is unavailable. It does not construct AppController or start runtime tasks. | Source review. | **Partial, deliberately blocked.** Requires production persistence, adapters, measured runtime configuration, and approved model/FSS/hardware. |
 
-Method-level preconditions, current results, side effects, blocking/context,
-ownership/thread-safety, error cases, and minimum dependency-injection seams
-for the seven requested modules are recorded in
-[MODULE_API_CONTRACTS.md](./MODULE_API_CONTRACTS.md).
+## Current test evidence
 
-The current `bool` and `void` signatures were retained because the definitions
-for the used APIs (`ConfigManager`, `CalibrationService`, and `SchemaRegistry`)
-and their callers are outside the header-only implementation scope for that
-contract pass. A header-only `bool`-to-`ApiStatus` change would make those
-declarations incompatible with their definitions and would break callers that
-use boolean conditions. The contract document lists each affected call site
-and the explicit `ApiStatus::Ok` comparison required in a future coordinated
-signature migration.
+On 2026-11-02:
 
-No new status enum or model struct was introduced. The remaining signatures
-whose methods have no inputs/results (`runHealthChecks`, `requestShutdown`,
-`setFaultIndication`, `classifyError`, `executeRecovery`) and storage/output
-failure reporting are documented as contract blockers where the existing API
-cannot represent the required outcome.
+- `pio test -e native-unit-tests`: 71 passed, 0 failed.
+- `pio test -e native-integration-tests`: 3 passed, 0 failed.
+- No ESP32-S3 target build, hardware-in-loop, power-loss-on-device, or
+  deployed-model test is evidenced.
+
+See `BASELINE_TEST_REPORT.md` and `REQUIREMENT_TRACEABILITY.md` for limits and
+test-to-requirement links.
+
+## Change history
+
+| Revision | Date | Change |
+|---|---|---|
+| 1.0 | 2026-11-02 | Replaced the stale 2026-10-30 skeleton inventory with source/test-backed implementation states and current blockers. |

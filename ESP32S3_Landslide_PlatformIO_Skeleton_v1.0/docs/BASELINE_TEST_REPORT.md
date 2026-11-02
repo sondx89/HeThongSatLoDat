@@ -1,8 +1,10 @@
 # Baseline Test Report
 
-**Audit date:** 2026-10-30  
+**Audit date:** 2026-11-02
+
 **Project:** ESP32-S3 Landslide Monitoring PlatformIO skeleton  
-**Scope:** Existing host tests and test/build configuration only. No source, header, or test files were changed.
+**Scope:** Host tests and test/build configuration. This report is evidence for
+the current worktree, not a clean release build or target/hardware acceptance.
 
 ## Environment observed
 
@@ -24,8 +26,9 @@ not a version constraint in the repository.
 
 | Environment | Exact command | Result |
 |---|---|---|
-| Native unit tests | `Set-Location 'C:\Users\DINH XUAN SON\OneDrive\ドキュメント\GitHub\HeThongSatLoDat\ESP32S3_Landslide_PlatformIO_Skeleton_v1.0'; $env:PATH = 'C:\msys64\ucrt64\bin;' + $env:PATH; pio test -e native-unit-tests` | **PASS** — 16 test cases succeeded; 0 failed. |
-| Native integration tests | `Set-Location 'C:\Users\DINH XUAN SON\OneDrive\ドキュメント\GitHub\HeThongSatLoDat\ESP32S3_Landslide_PlatformIO_Skeleton_v1.0'; $env:PATH = 'C:\msys64\ucrt64\bin;' + $env:PATH; pio test -e native-integration-tests` | **PASS** — 3 test cases succeeded; 0 failed. |
+| Native unit tests (2026-11-02 rerun) | `Set-Location 'C:\Users\DINH XUAN SON\OneDrive\ドキュメント\GitHub\HeThongSatLoDat\ESP32S3_Landslide_PlatformIO_Skeleton_v1.0'; $env:PATH = 'C:\msys64\ucrt64\bin;' + $env:PATH; pio test -e native-unit-tests` | **PASS** — 71 test cases succeeded; 0 failed. Includes AppController, ConfigManager fake persistence, OutputController, RecoveryManager, EventRecord JSONL, and StorageManager tests. |
+| Native integration tests (2026-11-02 rerun) | `Set-Location 'C:\Users\DINH XUAN SON\OneDrive\ドキュメント\GitHub\HeThongSatLoDat\ESP32S3_Landslide_PlatformIO_Skeleton_v1.0'; $env:PATH = 'C:\msys64\ucrt64\bin;' + $env:PATH; pio test -e native-integration-tests` | **PASS** — 3 test cases succeeded; 0 failed. |
+| Earlier native unit test run (2026-10-30) | Historical result recorded by prior baseline | **PASS** — 16 test cases succeeded; 0 failed at that earlier revision. Superseded by current rerun above. |
 | Native unit tests, initial direct attempt | `pio test -e native-unit-tests` from the project directory without changing `PATH` | **ERROR before tests ran** — `gcc` and `g++` were not recognized. |
 | Native integration tests, initial direct attempt | `pio test -e native-integration-tests` from the project directory without changing `PATH` | **ERROR before tests ran** — `gcc` and `g++` were not recognized. |
 
@@ -35,15 +38,19 @@ contains a check that adds this same directory when it exists.
 
 ## Test selection and coverage boundary
 
-- `native-unit-tests` selects `test_system_contracts` and builds
-  `SensorManager`, `RiskManager`, `DataQualityService`, `FeaturePipeline`, and
-  `ReplayEngine`.
+- `native-unit-tests` selects `test_system_contracts` and compiles the configured
+  source filter plus source files directly included by the test translation
+  unit under `TEST ONLY` markers. This lets host tests exercise additional
+  modules without changing the configured production source filter.
 - `native-integration-tests` selects `test_system_flow` and builds
   `SensorManager`, `RiskManager`, `DataQualityService`, `FeaturePipeline`,
   `MockModelRuntime`, `MockCsvTelemetry`, and `CsvLogger`.
-- Neither test environment directly tests the listed placeholders,
-  `EdgeImpulseAdapter`, BSP watchdog/power calls, or the real generated Edge
-  Impulse model.
+- The unit suite includes fake/test-only coverage of AppController,
+  ConfigManager persistence protocol, CalibrationService, SchemaRegistry,
+  OutputController, RecoveryManager, EventRecord JSONL, and StorageManager.
+- Neither suite tests an actual EdgeImpulseAdapter generated-model build,
+  BSP watchdog/power operation, production persistence backend, or physical
+  hardware.
 
 ## Not run
 
@@ -61,3 +68,10 @@ These results establish only the repeatability of the two native test
 environments with the stated host toolchain. They do not establish ESP32-S3
 compilation, peripheral operation, model compatibility, risk-policy approval,
 or product safety.
+
+## Change history
+
+| Revision | Date | Change |
+|---|---|---|
+| 1.1 | 2026-11-02 | Added current 71-unit/3-integration rerun and corrected unit source-filter coverage description. |
+| 1.0 | 2026-10-30 | Initial host-test baseline report. |

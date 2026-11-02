@@ -1,9 +1,19 @@
 # ESP32-S3 Landslide Monitoring — PlatformIO Skeleton
 
-**Status:** Skeleton / DRAFT. MPU9250, soil-moisture, rain, and raw HX710B
-acquisition drivers plus a synthetic sensor environment exist, but hardware
-configuration and validation remain open; storage and inference logic are
-incomplete, and risk policy thresholds/integration still require approval.
+**Document revision:** 1.1
+
+**Updated:** 2026-11-02
+
+**Status:** Development skeleton / not release-ready. The repository contains
+implemented drivers, managers, task/queue infrastructure, diagnostics, CSV
+logging, and several host-tested pure policies. Configuration, physical
+hardware, calibration, model/FSS, target runtime composition, and safety
+acceptance are not complete. Host test success is not target or product
+acceptance.
+
+**Documentation audit:** 2026-11-02. This update corrects implementation
+status and records traceability/release gates; it does not revise DOP, DSD,
+FSS, ICD, LLD, TCS, or GTIS requirements.
 
 ## Fixed baseline
 - MCU family: ESP32-S3
@@ -41,11 +51,14 @@ independent. A regression output is not a landslide probability unless separatel
 
 ## Production startup gate
 
-The non-mock `setup()` validates early board configuration and safe bus setup, then remains
-fail-closed because `ConfigManager`, approved queue sizing, runtime adapters and task settings
-are not yet released. It does not start application tasks. Do not treat this skeleton as a
-deployable firmware image. Runtime startup must be wired transactionally after board/model
-artifacts and measured task/queue/watchdog limits are approved.
+The non-mock `setup()` performs early BSP/configuration/safe-bus checks and
+remains fail-closed when production configuration is unavailable; it does not
+start application tasks. `AppController` now implements and host-tests a
+dependency-injected lifecycle protocol, but no concrete production lifecycle
+adapter or composition wires it to the firmware modules. The controller's
+inference gate and bounded-operation guarantees therefore describe its port
+contract, not verified runtime enforcement. Do not treat this skeleton as a
+deployable firmware image.
 
 ## Data contracts
 
@@ -56,10 +69,12 @@ raw/calibrated values, and health/risk state separate.
 
 `RiskState`, `HealthState`, and `EventSeverity` numeric codes now match the ICD registry.
 Internal aliases (`Safe`/`Normal`, `HighRiskTest`/`DangerTest`, `Warning`/`Warn`) do not add
-serialized states. Fault-flag bits and model/feature metadata remain TBD. Model dimensions,
-feature ordering, calibration units, event string limits, and serializer wire formats are not
-frozen. Serialization therefore returns `NotImplemented`; do not persist a C++ struct memory
-dump.
+serialized states. Fault-flag bits and production model/feature metadata remain TBD. Model
+dimensions, feature ordering, and calibration units are not released. The
+general serializer supports only the approved EventRecord JSONL v2 codec;
+other record/format operations return an explicit unsupported/not-implemented
+status. Do not persist a C++ struct memory dump. See
+[docs/SERIALIZATION_SCHEMA.md](docs/SERIALIZATION_SCHEMA.md).
 
 `ModelOutput` carries source boot/sequence, feature-window bounds/count and schema identity.
 `RiskManager` rejects mismatched provenance; `HealthState::FAULT` suppresses model-derived
@@ -398,6 +413,12 @@ semantics require an approved storage/reset policy.
 3. Confirm the physical board ID, then update `platformio.ini` if needed.
 4. Run PlatformIO: **Build**.
 
-This skeleton still contains declarations and placeholder translation units in other
-subsystems. A successful compile only checks the project/toolchain setup, not hardware
-operation or architecture acceptance.
+Several subsystems remain partial or blocked by missing configuration and
+integration evidence. A successful compile only checks the project/toolchain
+setup, not hardware operation or architecture acceptance.
+
+## Change history
+
+| Revision | Date | Change |
+|---|---|---|
+| 1.1 | 2026-11-02 | Reconciled implementation status and blockers with current source/test evidence; added traceability and release-gate references. |

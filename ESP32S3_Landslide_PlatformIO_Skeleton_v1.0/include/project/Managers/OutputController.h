@@ -1,12 +1,38 @@
 #pragma once
+
+#include <cstdint>
+
 #include "Models/RiskAssessment.h"
 
 namespace project::managers {
-// Current signatures and output-policy blockers are documented in
-// docs/MODULE_API_CONTRACTS.md.
+
+enum class OutputCommandKind : std::uint8_t {
+    None,
+    Startup,
+    Normal,
+    Monitor,
+    DangerTest,
+    Unknown
+};
+
+enum class OutputCommandStatus : std::uint8_t {
+    Valid,
+    InvalidAssessment,
+    InvalidRiskState,
+    InvalidFeedbackState
+};
+
+struct OutputCommand {
+    OutputCommandKind kind{OutputCommandKind::None};
+    OutputCommandStatus status{OutputCommandStatus::InvalidAssessment};
+    project::models::AlarmOutputState feedback{
+        project::models::AlarmOutputState::NotVerifiable};
+};
+
 class OutputController {
 public:
-    bool apply(const project::models::RiskAssessment& risk);
-    void setFaultIndication();
+    static OutputCommand deriveCommand(
+        const project::models::RiskAssessment& assessment) noexcept;
 };
+
 }  // namespace project::managers

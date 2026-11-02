@@ -1,115 +1,91 @@
-# Project Audit Report
+# Project Implementation Audit
 
-**Audit date:** 2026-10-30  
-**Project baseline:** ESP32-S3 / Arduino / PlatformIO / C++17; MPU9250 over I2C; offline Edge Impulse intended, but no deployment artifact configured.  
-**Change boundary:** Audit only. No source, header, or test files were modified.
+**Audit date:** 2026-11-02
 
-## Repository and project tree
+**Project baseline:** ESP32-S3 / Arduino / PlatformIO / C++17.
+**Change boundary:** Documentation-only synchronization. No source, header,
+test, BSP, or system-requirement file was changed by this audit.
 
-The repository root contains a top-level `README.md` and the project directory
-`ESP32S3_Landslide_PlatformIO_Skeleton_v1.0`. The project has the expected
-`include/project/` layer tree, matching `src/` implementation tree, two Unity
-test directories, 17 topic-specific Markdown documents under `docs/`, and
-design/support material under `Document/`.
+## Result summary
 
-Observed project inventory:
+The project is a development skeleton with implemented drivers, services,
+task/queue infrastructure, diagnostics, CSV logging, and several
+host-testable policies. It is not a production-ready firmware release. Current
+host tests pass, but production integration remains blocked by missing
+controlled requirements, board configuration/evidence, production lifecycle
+composition, persistent backend, calibration approval, actual Edge Impulse
+export/released FSS, and target measurements.
 
-| Area | Observed contents |
-|---|---|
-| `include/project/` | 55 headers across AI, BSP, Diagnostics, Drivers, Managers, Models, Queues, Replay, Services, Storage, and Tasks |
-| `src/` | 51 `.cpp` files, including `main.cpp` and `mock_host_main.cpp` |
-| `test/` | `test_system_contracts` and `test_system_flow` |
-| `docs/` | 17 existing Markdown guides; the three audit report paths created for this task were absent before the audit |
-| Build output | `platformio.ini` sets `build_dir = build_output`; observed host-test build directories are generated output, not source |
+Current detailed records:
 
-The module-by-module header/source, current behavior, callers, test coverage,
-dependencies, and blockers are recorded in
-[PLACEHOLDER_STATUS.md](./PLACEHOLDER_STATUS.md).
+- `PLACEHOLDER_STATUS.md` — module behavior, tests, and blockers.
+- `MODULE_API_CONTRACTS.md` — current API/result/ownership boundaries.
+- `REQUIREMENT_TRACEABILITY.md` — requirement intent → module → test/evidence.
+- `RELEASE_CHECKLIST.md` — open release gates.
+- `BASELINE_TEST_REPORT.md` — current host runs and evidence limitations.
 
-## Configuration and build workflow
+## Test evidence
 
-- `platformio.ini` sets C++17, Arduino, the default environment
-  `esp32-s3-devkitc-1`, and also defines `esp32-s3-mock`, `mock-native`,
-  `native-unit-tests`, and `native-integration-tests`.
-- The ESP32 platform is specified as `espressif32` without a pinned version;
-  PlatformIO resolved 8.0.0 in this environment.
-- Native unit tests select `test_system_contracts` and a restricted source
-  filter; native integration tests select `test_system_flow` and a different
-  restricted source filter. See
-  [BASELINE_TEST_REPORT.md](./BASELINE_TEST_REPORT.md) for exact commands,
-  toolchain, pass counts, initial errors, and validation boundaries.
-- `build_project.bat` supports `tests`, `build`, `upload`,
-  `production-build`, and `all`. Its default `all` action runs native tests,
-  builds/uploads the mock firmware, then opens a serial monitor. `tests` runs
-  the two native test environments only. `production-build` attempts the
-  non-mock ESP32 environment and is not equivalent to deployment acceptance.
-- The configured production `setup()` in `src/main.cpp` performs the early BSP
-  checks, then calls the stub `ConfigManager`; it reports `BOOT BLOCKED` when
-  configuration is unavailable and does not start application tasks.
-- No target build or hardware test is claimed in this audit.
+On 2026-11-02, from the project directory with the existing MSYS2 UCRT64
+compiler on `PATH`:
 
-## Implemented logic versus incomplete integration
+- `pio test -e native-unit-tests`: 71 passed, 0 failed.
+- `pio test -e native-integration-tests`: 3 passed, 0 failed.
+- Strict standalone C++17 compile of `AppController.cpp` with
+  `-Wall -Wextra -Wpedantic -Werror`: passed.
+- `git diff --check`: passed for the documentation/source worktree.
 
-- `FeaturePipeline` and `RiskManager` contain operational, fixed-storage
-  logic with fail-closed configuration/data gates. Their host tests pass with
-  test fixture configurations only. FSS feature eligibility, dimensions,
-  rates/window/stride, units, and risk thresholds are not thereby approved.
-- `EdgeImpulseAdapter` contains conditional generated-runtime integration and
-  metadata/input checks. No generated model header or deployment is configured;
-  without the model macro initialization fails closed. It is not exercised by
-  the current tests.
-- Sensor drivers, `SensorManager`, `QueueRegistry`, task framework, diagnostics,
-  event handling, and `CsvLogger` have source implementations. This does not
-  establish verified hardware setup, runtime composition, real storage media,
-  deployed inference, or production-ready policies.
-- `AppController`, `StorageManager`, `OutputController`, and `RecoveryManager`
-  are comment-only source skeletons. `ConfigManager`, `CalibrationService`, and
-  `SchemaRegistry` explicitly fail closed. Serialization entry points are
-  `NotImplemented`.
-- `WatchdogSupervisor` has application-level task-heartbeat checks and only
-  calls the BSP feed after required task progress checks pass. The BSP hardware
-  watchdog init/feed operations themselves return `NotConfigured`.
-- BSP power status returns `NotConfigured` with an invalid output; no power
-  monitor is assumed.
+No clean-release ESP32-S3 target build, hardware-in-loop, physical storage
+power-loss test, or generated Edge Impulse model test is claimed.
 
-## Documentation/source inconsistencies
+## Implementation status and contradictions corrected
 
-| Document statement | Source evidence | Audit finding |
+| Area | Source/test evidence | Correct status |
 |---|---|---|
-| `ARCHITECTURE.md` §Important says “No sensor driver, task creation, queue, file system, model inference, calibration, or risk algorithm is implemented.” | `src/Drivers/` contains concrete driver implementations; `src/Tasks/TaskFramework.cpp` and `src/Queues/QueueRegistry.cpp` implement framework/queue behavior; `src/Storage/CsvLogger.cpp` implements CSV logging; `src/Managers/RiskManager.cpp` and `src/Services/FeaturePipeline.cpp` contain logic; `src/AI/EdgeImpulseAdapter.cpp` contains conditional runtime integration. | The statement is too broad/stale. Calibration is a stub; no generated Edge Impulse deployment is configured; there is no evidence of a concrete production storage backend or fully composed application. Distinguish an existing implementation from released/verified integration. |
-| `ARCHITECTURE.md` says public methods are intentionally undefined. | The inspected placeholder sources include comment-only translation units and methods without definitions, but other declared methods have definitions that explicitly return false or `NotConfigured`; FeaturePipeline/RiskManager are implemented. | Partly true; not an accurate status for all modules. Use the per-module inventory rather than treating every subsystem alike. |
-| The Edge Impulse and FeaturePipeline guides describe conditional/model- and schema-gated logic. | The adapter has a compile-time generated-header gate; the pipeline validates runtime schema/config and supports only a subset of its candidate feature IDs. | Consistent with source, provided “implemented adapter/pipeline” is not read as a deployed model or released FSS. |
-| `README.md` calls the project a skeleton and describes incomplete storage/inference and the production startup gate. | `main.cpp` blocks on `ConfigManager`; `StorageManager` is empty while `CsvLogger` is separate; no generated model is configured. | Broadly consistent. Its detailed module sections correctly distinguish the existing FeaturePipeline/RiskManager logic from production approvals. |
-| TODO backlog v2.0 §5 calls out the same placeholder set and distinguishes EdgeImpulseAdapter, FeaturePipeline, and RiskManager. | The inspected sources support those distinctions. | Substantially consistent with source; backlog remains untracked in the current worktree and was not edited. |
+| AppController | Injected lifecycle state machine, ten startup phases, reverse cleanup, inference gate and health/shutdown contracts; fake tests cover each phase/failure. | **Implemented/host-tested protocol.** Not wired to main or concrete modules. TaskFramework lacks stop/drain; StorageManager has no timeout flush. |
+| ConfigManager | Pure manifest validation and injected two-slot logical protocol; fault-injected fake tests. | **Implemented/host-tested protocol.** Default main has no adapter; no concrete persistence encoding/backend or runtime configuration application. |
+| CalibrationService | Raw and validity propagation, explicit not-initialized calibration, version/schema/nonfinite rejection; host tests. | **Partial.** No approved artifact/coefficients or calibrated production output. |
+| SchemaRegistry | Generic descriptor/vector compatibility with test fixtures. | **Implemented generic validation; production blocked** by absent released FSS and model metadata. |
+| Serialization | EventRecord JSONL v2 field-by-field implementation and tests. | **Partial.** Other records and formats are explicitly unsupported; not all seven records are serialized. |
+| StorageManager | Injected `IStorage` lifecycle with fake backend and status propagation. | **Implemented/host-tested lifecycle.** No physical backend, finite timeout, byte-count/close semantics, or durability evidence. |
+| OutputController | Pure risk-to-command mapping and explicit unknown/feedback states. | **Implemented/host-tested policy only.** No GPIO/electrical/physical actuation evidence. |
+| RecoveryManager | Pure classification and policy-injected bounded retry decision. | **Implemented/host-tested decision logic.** No hardware recovery action. |
+| EdgeImpulseAdapter | Conditional `run_classifier()` path and fail-closed missing-header logic. | **Partial/blocked.** Repository search found no generated deployment export; adapter is not target/model verified. |
+| FeaturePipeline/RiskManager | Operational implementation and native tests with configured fixtures. | **Implemented logic; production policy blocked** on released FSS/model and approved risk configuration. |
+| Task/queue framework | Framework and queue code exist; configured sizes/timeouts are required. | **Partial/not configured.** AppController not wired; no task stop/drain API; queue/task sizing is not approved. |
+| BSP watchdog/power | Methods return `NotConfigured` absent reviewed configuration/hardware. | **Not configured.** No hardware watchdog/power monitor claim. |
 
-`ARCHITECTURE.md` and other existing documents were not changed because they
-are outside this task's allowed edit list. The inconsistency is recorded for a
-later documentation-synchronization task.
+These updates supersede stale statements that AppController, ConfigManager,
+StorageManager, OutputController, RecoveryManager, SchemaRegistry, and
+Serialization are all comment-only or wholly unimplemented. They do not
+supersede their remaining hardware/model/integration blockers.
 
-## Worktree and TODO status
+## Requirements and traceability
 
-At audit start, `git status --short` reported:
+The repository contains no controlled DOP, DSD, released FSS, ICD, LLD, TCS,
+or GTIS document. The audit therefore does not assert compliance against
+those system-level sources and does not change their requirements. The new
+traceability matrix maps prompt-level intent to modules and host evidence and
+explicitly identifies where an authoritative requirement is missing.
 
-- `ESP32S3_Landslide_PlatformIO_Skeleton_v1.0/TODO_LIST.md` was deleted.
-- `AI_Coding_Prompts_ESP32S3_v1.0.md` and
-  `TODO_LIST_ESP32S3_Implementation_Backlog_v2.0.md` were untracked.
+Open integration/change requests include:
 
-The deleted TODO file and untracked files were pre-existing worktree changes.
-They were preserved. `TODO_LIST.md` was not recreated or changed: doing so
-would overwrite/reverse the existing deletion rather than update the current
-file's status. The v2.0 backlog was read as the stated canonical task reference
-but was not edited because it is not in the allowed edit list.
+1. Provide controlled system documents with versions and approval status.
+2. Provide TaskFramework stop-new-work, bounded drain, and stop APIs.
+3. Define an actually bounded storage flush and backend completion contract.
+4. Provide a ConfigManager persistence adapter with explicit field encoding
+   and stable ownership/lifetime.
+5. Provide an actual Edge Impulse export and released FSS; then validate on
+   target with golden vectors and resource measurements.
+6. Approve physical output safe-state, pins/polarity, and feedback evidence.
+7. Record measured task/queue/stack/heap/latency limits before configuration.
 
-## Overall conclusion and blockers
+No TBD has been replaced with a guessed hardware, model, timing, calibration,
+or policy value by this audit.
 
-The repository is a development skeleton with useful implemented host-testable
-logic and explicit fail-closed gates, not a fully composed or safety-certified
-device. Both native test suites pass with the installed host compiler, as
-recorded in [BASELINE_TEST_REPORT.md](./BASELINE_TEST_REPORT.md). This does not
-verify an ESP32-S3 target build or hardware.
+## Change history
 
-Production integration remains blocked by unverified board/pin/I2C details,
-calibration definitions/coefficients, released FSS and Edge Impulse artifacts,
-approved model-output/risk policy, approved task/queue/watchdog sizing, storage
-hardware/format/durability, and output/recovery contracts. No TBD value was
-filled in during this audit.
+| Revision | Date | Change |
+|---|---|---|
+| 1.1 | 2026-11-02 | Replaced the stale 2026-10-30 implementation inventory with current source/test evidence and explicit target blockers. |
+| 1.0 | 2026-10-30 | Initial source/test audit. |
