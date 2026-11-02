@@ -28,6 +28,12 @@ struct QualityRange {
     bool configured{false};
 };
 
+struct CalibrationQualityPolicy {
+    std::uint32_t approvedVersion{0U};
+    bool required{false};
+    bool approved{false};
+};
+
 struct DataQualityConfig {
     std::array<SensorFreshnessLimit,
                static_cast<std::size_t>(QualitySensor::Count)>
@@ -40,6 +46,10 @@ struct DataQualityConfig {
                static_cast<std::size_t>(
                    project::models::SensorChannel::Count)>
         requiredChannels{};
+    std::array<CalibrationQualityPolicy,
+               static_cast<std::size_t>(
+                   project::models::SensorChannel::Count)>
+        calibrationPolicies{};
     bool requiredChannelsConfigured{false};
 };
 
@@ -67,6 +77,13 @@ public:
         project::models::ProcessedFrame& frame) const noexcept;
     bool validate(
         const project::models::ProcessedFrame& frame) const noexcept;
+
+    static project::models::DataContinuityState classifyContinuity(
+        std::uint64_t previousBootId, std::uint64_t previousSequence,
+        std::uint64_t previousTimestampMs, std::uint64_t currentBootId,
+        std::uint64_t currentSequence, std::uint64_t currentTimestampMs,
+        double expectedSamplePeriodMs,
+        std::uint32_t samplePeriodToleranceMs) noexcept;
 
 private:
     bool validateConfiguration() const noexcept;

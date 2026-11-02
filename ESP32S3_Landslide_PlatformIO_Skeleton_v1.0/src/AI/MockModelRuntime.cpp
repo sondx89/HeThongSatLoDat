@@ -1,41 +1,55 @@
-#include "project/AI/MockModelRuntime.h"
+#if defined(PROJECT_HOST_DATA_TOOLS) && PROJECT_HOST_DATA_TOOLS == 1 && \
+    defined(PROJECT_TEST_ONLY) && PROJECT_TEST_ONLY == 1
+
+#include "project/AI/MockInferenceEngine.h"
 
 #include <cmath>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
+#include <cstring>
 
 namespace project::ai {
+namespace {
 
-bool MockModelRuntime::initialize() {
+bool validForcedStatus(project::models::InferenceStatus status) noexcept {
+    switch (status) {
+        case project::models::InferenceStatus::Ok:
+        case project::models::InferenceStatus::ModelError:
+        case project::models::InferenceStatus::NonFiniteOutput:
+        case project::models::InferenceStatus::VersionMismatch:
+        case project::models::InferenceStatus::Timeout:
+            return true;
+        case project::models::InferenceStatus::InvalidInput:
+            return false;
+    }
+    return false;
+}
+
+}  // namespace
+
+MockInferenceEngine::MockInferenceEngine(
+    const MockInferenceConfig& config) noexcept
+    : config_(config), metadata_(config.metadata) {
+    metadata_.engineKind = InferenceEngineKind::TestOnly;
+}
+
+bool MockInferenceEngine::initialize() {
+    initialized_ = false;
+    if (!metadata_.isComplete() ||
+        config_.outputCount != metadata_.outputCount ||
+        config_.outputCount == 0U ||
+        config_.outputCount > project::models::ModelOutput::kMaxOutputs ||
+        !validForcedStatus(config_.forcedStatus)) {
+        return false;
+    }
+    for (std::uint16_t i = 0U; i < config_.outputCount; ++i) {
+        if (!std::isfinite(config_.rawOutputs[i])) {
+            return false;
+        }
+    }
     initialized_ = true;
     return true;
 }
 
-bool MockModelRuntime::isValidInput(
-    const project::models::FeatureVector& input) noexcept {
-    if (!input.valid || input.count == 0U ||
-        input.count > project::models::FeatureVector::kMaxFeatures) {
-        return false;
-    }
-
-    const std::uint32_t requiredMask =
-        input.count == project::models::FeatureVector::kMaxFeatures
-            ? std::numeric_limits<std::uint32_t>::max()
-            : (std::uint32_t{1} << input.count) - 1U;
-    if (input.featureValidMask != requiredMask) {
-        return false;
-    }
-
-    for (std::size_t i = 0; i < input.count; ++i) {
-        if (!std::isfinite(input.values[i])) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool MockModelRuntime::run(
+bool MockInferenceEngine::run(
     const project::models::FeatureVector& input,
     project::models::ModelOutput& output) {
     output = {};
@@ -46,23 +60,31 @@ bool MockModelRuntime::run(
     output.sourceWindowSampleCount = input.windowSampleCount;
     output.sourceFeatureSchemaVersion = input.schemaVersion;
     output.sourceFeatureSchemaId = input.schemaId;
-    for (std::size_t i = 0U; i < sizeof(input.schemaHashSha256); ++i) {
-        output.sourceFeatureSchemaHashSha256[i] =
-            input.schemaHashSha256[i];
-    }
+    std::memcpy(output.sourceFeatureSchemaHashSha256,
+                input.schemaHashSha256, sizeof(input.schemaHashSha256));
     output.sourceFeatureSchemaHashValid = input.schemaHashValid;
 
     if (!initialized_) {
         output.status = project::models::InferenceStatus::ModelError;
         return false;
     }
-    if (!isValidInput(input)) {
+    if (!matchesInferenceInput(metadata_, input)) {
         output.status = project::models::InferenceStatus::InvalidInput;
         return true;
     }
+    if (config_.forcedStatus != project::models::InferenceStatus::Ok) {
+        output.status = config_.forcedStatus;
+        return true;
+    }
 
-    output.status = project::models::InferenceStatus::ModelError;
+    for (std::uint16_t i = 0U; i < config_.outputCount; ++i) {
+        output.rawOutputs[i] = config_.rawOutputs[i];
+    }
+    output.outputCount = config_.outputCount;
+    output.status = project::models::InferenceStatus::Ok;
     return true;
 }
 
 }  // namespace project::ai
+
+#endif

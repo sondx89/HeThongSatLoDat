@@ -17,8 +17,11 @@ Every `SensorChannel` receives one state in `ProcessedFrame::channelQuality`:
   inclusive range. Endpoints are accepted.
 - `VALID`: the field is present, sensor status is valid, freshness passes, and
   any configured range passes.
+- `CALIBRATION_INVALID`: an explicitly configured calibration policy says the
+  channel requires calibration that is not available/valid.
 
-Checks are ordered as missing, stale, finite, then range. Range and freshness
+Checks are ordered as sensor-status presence, freshness, calibration policy,
+processed-field presence, finite value, then range. Range and freshness
 settings are not inferred from examples in the documents. The ICD labels
 `stale_after_ms=5000` as a proposed value, not an approved production value.
 
@@ -63,3 +66,26 @@ promote an invalid required channel.
 - Sensor timestamps are evaluated independently using the status timestamp and
   the configured sensor freshness limit. The frame-level timestamp is preserved
   as metadata and is not substituted for missing sensor timestamps.
+
+  ## Continuity and window quality
+
+  `DataQualityService::classifyContinuity` is the shared owner of sample
+  continuity classification used by `FeaturePipeline`. It detects boot changes,
+  sequence gaps, out-of-order identity/time, and timestamp discontinuities from
+  explicit input values and caller-supplied period tolerance; it does not guess
+  a sample rate or repair the stream.
+
+  `FeaturePipeline` consumes the quality states already assigned to
+  `ProcessedFrame`; it does not independently classify channel quality.
+  Required feature channels that are missing, stale, invalid, nonfinite,
+  out-of-order, gap-marked, not-ready, sensor-error, or calibration-invalid
+  reject the candidate input. Invalid inputs clear the active window. A detected
+  gap, boot change, or timestamp discontinuity clears the previous window before
+  the current valid sample may begin a new one. Out-of-order input is rejected.
+  No zero-fill, hold-last, interpolation, or imputation is performed.
+
+  The window summary preserves channel quality, eligibility, rejection reason,
+  and continuity boundary; a built `FeatureVector` carries that summary. This
+  approved integration covers sample → window → feature. Prediction and
+  evaluation API propagation remains deferred; these records must not imply
+  eligibility merely because a feature vector was produced.

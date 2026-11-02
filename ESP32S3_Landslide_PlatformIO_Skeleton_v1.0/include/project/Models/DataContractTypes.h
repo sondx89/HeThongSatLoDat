@@ -92,11 +92,47 @@ enum class TimeStatus : std::uint8_t {
 };
 
 enum class DataQualityState : std::uint8_t {
-    MISSING,
-    VALID,
-    STALE,
-    OUT_OF_RANGE,
-    NON_FINITE
+    MISSING = 0,
+    VALID = 1,
+    STALE = 2,
+    OUT_OF_RANGE = 3,
+    NON_FINITE = 4,
+    CALIBRATION_INVALID = 5,
+    OUT_OF_ORDER = 6,
+    GAP_DETECTED = 7,
+    NOT_READY = 8,
+    SENSOR_ERROR = 9
+};
+
+enum class DataContinuityState : std::uint8_t {
+    NotEvaluated,
+    FirstSample,
+    Contiguous,
+    BootChanged,
+    CalibrationChanged,
+    SequenceGap,
+    OutOfOrder,
+    TimestampDiscontinuity
+};
+
+enum class WindowEligibilityState : std::uint8_t {
+    NotEvaluated,
+    Incomplete,
+    Eligible,
+    Rejected
+};
+
+enum class WindowRejectionReason : std::uint8_t {
+    None,
+    InvalidConfiguration,
+    InvalidAggregateStatus,
+    RequiredChannelQuality,
+    NonFiniteFeature,
+    OutOfOrder,
+    SequenceGap,
+    BootChanged,
+    TimestampDiscontinuity,
+    CalibrationChanged
 };
 
 enum class ApiStatus : std::uint8_t {

@@ -1,3 +1,6 @@
+#if (defined(PROJECT_TEST_ONLY) && PROJECT_TEST_ONLY == 1) || \
+    (defined(PROJECT_MOCK_ENVIRONMENT) && PROJECT_MOCK_ENVIRONMENT == 1)
+
 #include "project/Drivers/MockCsvTelemetry.h"
 
 #include <array>
@@ -10,7 +13,8 @@ namespace {
 constexpr char kHeader[] =
     "record_type,sequence_no,timestamp_ms,accel_x_raw,accel_y_raw,"
     "accel_z_raw,soil_raw,rain_raw,hx710b_raw,imu_valid,soil_valid,"
-    "rain_valid,hx710b_valid,dataset_eligible,eligibility_reason\n";
+    "rain_valid,hx710b_valid,dataset_eligible,eligibility_reason,"
+    "data_origin,evidence_class\n";
 
 bool sensorValid(const project::models::SensorStatus& status) noexcept {
     return status.valid &&
@@ -50,7 +54,7 @@ bool serializeMockCsvTelemetry(const project::models::SensorFrame& frame,
     const bool rainValid = sensorValid(frame.rainStatus);
     const bool hx710bValid = sensorValid(frame.hx710bStatus);
     const int prefixLength = std::snprintf(
-        output, capacity, "MOCK_RAW_V1,%llu,%llu",
+        output, capacity, "MOCK_RAW_V2,%llu,%llu",
         static_cast<unsigned long long>(frame.sequence),
         static_cast<unsigned long long>(frame.timestampMs));
     if (prefixLength < 0 ||
@@ -76,7 +80,7 @@ bool serializeMockCsvTelemetry(const project::models::SensorFrame& frame,
     }
     const int statusLength = std::snprintf(
         output + cursor, capacity - cursor,
-        ",%s,%s,%s,%s,false,SYNTHETIC_MOCK\n",
+        ",%s,%s,%s,%s,false,SYNTHETIC_MOCK,SYNTHETIC,GT5\n",
         imuValid ? "true" : "false", soilValid ? "true" : "false",
         rainValid ? "true" : "false", hx710bValid ? "true" : "false");
     if (statusLength < 0 ||
@@ -88,3 +92,5 @@ bool serializeMockCsvTelemetry(const project::models::SensorFrame& frame,
 }
 
 }  // namespace project::drivers
+
+#endif

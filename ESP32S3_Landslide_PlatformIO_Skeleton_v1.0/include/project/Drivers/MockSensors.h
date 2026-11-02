@@ -1,5 +1,11 @@
 #pragma once
 
+#if (!defined(PROJECT_TEST_ONLY) || PROJECT_TEST_ONLY != 1) && \
+    (!defined(PROJECT_MOCK_ENVIRONMENT) || PROJECT_MOCK_ENVIRONMENT != 1) && \
+    (!defined(PROJECT_MOCK_NATIVE) || PROJECT_MOCK_NATIVE != 1)
+#error "MockSensors requires an explicit test or mock build"
+#endif
+
 #include <array>
 #include <cstdint>
 

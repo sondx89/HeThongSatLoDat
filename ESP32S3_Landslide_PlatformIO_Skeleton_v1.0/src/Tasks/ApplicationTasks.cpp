@@ -1,7 +1,5 @@
 #include "project/Tasks/ApplicationTasks.h"
 
-#include <cmath>
-
 namespace project::tasks {
 namespace {
 
@@ -20,18 +18,6 @@ TaskStepResult queueTimeoutResult(
 
 std::uint64_t tickToMillis(TickType_t ticks) noexcept {
     return (static_cast<std::uint64_t>(ticks) * 1000U) / configTICK_RATE_HZ;
-}
-
-bool modelOutputIsFinite(const project::models::ModelOutput& output) noexcept {
-    if (output.outputCount > project::models::ModelOutput::kMaxOutputs) {
-        return false;
-    }
-    for (std::uint16_t i = 0; i < output.outputCount; ++i) {
-        if (!std::isfinite(output.rawOutputs[i])) {
-            return false;
-        }
-    }
-    return !output.predictionValid || std::isfinite(output.predictionValue);
 }
 
 bool isFeatureConfigurationFailure(
@@ -197,7 +183,8 @@ TaskInference::TaskInference(const TaskRuntimeConfig& config,
 
 bool TaskInference::onStart() noexcept {
     schemaCompatible_ = schemas_.compatible();
-    engineReady_ = schemaCompatible_ && inference_.initialize();
+    engineReady_ = schemaCompatible_ && inference_.metadata().isComplete() &&
+                   inference_.initialize();
     return true;
 }
 
@@ -235,17 +222,19 @@ TaskStepResult TaskInference::runOne() noexcept {
                 ? project::models::InferenceStatus::ModelError
                 : output.status;
         createFailureOutput(features, output, failureStatus);
-    } else if (output.status != project::models::InferenceStatus::Ok) {
+    } else {
+        const project::models::InferenceStatus outputValidation =
+            project::ai::validateInferenceOutput(inference_.metadata(), output);
+        if (outputValidation != output.status) {
+            output.status = outputValidation;
+            output.outputCount = 0U;
+        }
         if (output.status == project::models::InferenceStatus::InvalidInput) {
             output.status = project::models::InferenceStatus::ModelError;
         }
-        output.predictionValid = false;
-    } else if (!modelOutputIsFinite(output)) {
-        output.status =
-            output.outputCount > project::models::ModelOutput::kMaxOutputs
-                ? project::models::InferenceStatus::ModelError
-                : project::models::InferenceStatus::NonFiniteOutput;
-        output.predictionValid = false;
+        if (output.status != project::models::InferenceStatus::Ok) {
+            output.predictionValid = false;
+        }
     }
 
     if (output.bootId == 0) {

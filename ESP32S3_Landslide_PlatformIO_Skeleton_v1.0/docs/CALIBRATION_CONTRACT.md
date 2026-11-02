@@ -1,11 +1,12 @@
 # Calibration and raw-data contract
 
-**Status:** Validity propagation only. No calibration artifact, coefficients,
+**Status:** Explicit `RAW_ONLY` mode. No calibration artifact, coefficients,
 sensor identity registry, units approval, or physical conversion is configured.
 This document does not approve production use.
 
 ## Current behavior
 
+`CalibrationService::mode()` reports `CalibrationMode::RawOnly`.
 `CalibrationService::loadCalibrationStatus()` returns
 `ApiStatus::NotInitialized`; the existing `loadCalibration()` bool facade
 therefore returns `false`. There is no configured identity calibration:
@@ -16,18 +17,21 @@ quality and sensor-status bitfields, then classifies channel quality from the
 matching `SensorStatus`. It does not modify the const `SensorFrame`, apply
 coefficients, calculate tilt, or copy any candidate converted value into
 `ProcessedFrame`. With a nonzero frame schema and calibration version zero, it
-returns `ApiStatus::NotInitialized` and exposes raw-channel quality while
-converted channels remain ineligible. The existing `process()` bool facade
-returns `true` only for `ApiStatus::Ok`, so remains fail-closed.
+copies identity/quality metadata, exposes source-channel quality, leaves
+converted channels ineligible, and returns `ApiStatus::NotInitialized`.
+`process()` therefore remains fail-closed. Raw values stay in the unchanged
+caller-owned `SensorFrame`; `ProcessedFrame` does not duplicate raw storage.
+`validMask` remains uninterpreted until its bit mapping is approved.
 
 ## Public method contract
 
 | Method | Preconditions and result | Side effects / execution | Ownership and concurrency | Errors |
 |---|---|---|---|---|
+| `mode()` | No input; returns `CalibrationMode::RawOnly`. | No I/O, waiting, allocation, or state mutation. | Stateless; no shared resources. | No calibrated mode is configured. |
 | `loadCalibration()` | No input; returns `false` because no calibration source or identity profile is configured. | No I/O, waiting, allocation, or state mutation. | Stateless; no shared resources. Task context; ISR use is not promised. | Use `loadCalibrationStatus()` for the explicit `NotInitialized` reason. |
 | `loadCalibrationStatus()` | No input; returns `ApiStatus::NotInitialized`. | No I/O, waiting, allocation, or state mutation. | `const` and stateless; concurrent calls are safe. Task context; ISR use is not promised. | No persistence source exists; no success or identity fallback. |
 | `process(input, output)` | Requires live, distinct input/output objects. Returns `false` for current no-calibration, unsupported-version, or invalid-schema outcomes. | Resets and writes caller-owned `output`; does not modify `input`. Bounded in-memory work only. | Input is borrowed for the call; output is caller-owned. Concurrent use is safe only with distinct output objects. Task context; ISR use is not promised. | Use `processStatus()` to distinguish `InvalidArgument`, `VersionMismatch`, and `NotInitialized`. |
-| `processStatus(input, output)` | Same object preconditions; returns `InvalidArgument` when frame schema version is zero, `VersionMismatch` when input calibration version is nonzero, and `NotInitialized` otherwise. | Copies metadata and classifies source quality; no conversion, I/O, waiting, allocation, or state mutation. Output is written even on non-`Ok`. | Input is borrowed for the call; output is caller-owned. `const`/stateless; concurrent use requires distinct output objects. Task context; ISR use is not promised. | Missing/faulted channels become `MISSING`; available non-finite fields become `NON_FINITE`. No unsupported schema or sensor identity is guessed. |
+| `processStatus(input, output)` | Same object preconditions; returns `InvalidArgument` when frame schema version is zero, `VersionMismatch` when input calibration version is nonzero (no matching artifact is loaded), and `NotInitialized` for valid raw-only input. | Copies metadata and classifies source quality; no conversion, I/O, waiting, allocation, or state mutation. Output is written even on non-`Ok`. | Input is borrowed for the call; output is caller-owned. `const`/stateless; concurrent use requires distinct output objects. Task context; ISR use is not promised. | Missing/faulted channels become `MISSING`; available non-finite fields become `NON_FINITE`. No unsupported schema or sensor identity is guessed. |
 
 The current `TaskFeature` caller continues to use the bool facades, so its
 signature and fail-closed startup/feature rejection behavior are unchanged.
@@ -92,15 +96,19 @@ coefficients, units, and approved conversion equations remain TBD. MPU9250,
 soil-moisture, rain, and HX710B values must not be physically converted until
 their relevant definitions and evidence are approved.
 
-## Feature-window invalidation proposal
+## Feature-window invalidation
 
-Not implemented here. When `FeaturePipeline` is later approved for calibration
-provenance, it should clear its buffered window and reset its sample count when
-the active calibration version changes. A window should be emitted only when
-all contributing samples have the same approved calibration version; a
-version change mid-window should discard the mixed-version window rather than
-combine its samples. Version zero must remain an explicit unconfigured state,
-not an identity calibration.
+`FeaturePipeline` owns the window reset when `ProcessedFrame.calibrationVersion`
+changes. It clears buffered samples before accepting a new-version sample, so
+no window combines calibration versions. In `RAW_ONLY`, version zero remains
+unconfigured and is not an identity calibration. A nonzero input version is
+rejected by this service until an exactly matching approved artifact is
+available.
+
+The service has no calibration artifact model or activation path yet. A future
+calibrated mode must require approved artifact identity/hash, sensor identity,
+unit and transform version, and must reject any mismatch before emitting
+physical values. No fallback conversion is provided.
 
 ## Host tests
 

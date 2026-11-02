@@ -106,33 +106,76 @@ verification gates are configured. Raw sensor channels unavailable in
 `ProcessedFrame` are rejected, and HX710B remains excluded until its transducer
 and feature are approved. See [docs/FEATURE_PIPELINE.md](docs/FEATURE_PIPELINE.md).
 
-## Dataset replay
+## Host-first AI/data pipeline
 
-`project/Replay/ReplayEngine.h` streams six-column CSV logs through a bounded
-reader and emits `FeatureVector` windows using manifest-supplied, approved
-column-to-index mappings. Since the current log omits FSS/schema and capture
-provenance metadata, replay requires externally verified dataset/schema hashes,
-model metadata and layout; defaults fail closed. Empty mapped fields, malformed
-rows and timestamp discontinuities are rejected without imputation. See
-[docs/REPLAY_ENGINE.md](docs/REPLAY_ENGINE.md).
+Until hardware and approved model artifacts are available, development is
+host-first: deterministic synthetic raw observations, quality classification,
+raw-only calibration, bounded DSD raw-core CSV export/validation, and replay
+that remains fail-closed when physical calibration or model schemas are
+unavailable. Synthetic records carry `SYNTHETIC`/`GT5`; they are not physical
+sensor evidence, independent labels, field accuracy, or safety evidence.
+
+`SyntheticSensorGenerator` exposes stable, trend, step, oscillation,
+impulse/noise, saturation, dropout, stale, out-of-order, gap, reboot,
+calibration-change, and mixed-validity scenarios. Its API is exercised by
+native tests; there is no standalone synthetic dataset CLI at present.
+`DsdRawSampleCsvExporter` writes the exact DSD v1.2 raw-core header to a
+caller-owned bounded buffer and returns a typed manifest with uniform
+provenance, channel presence, byte/row counts, and SHA-256.
+`DsdRawSampleCsvParser` and `DatasetValidator` validate the raw archive and
+reject malformed, inconsistent, duplicated, or discontinuous records.
+Raw-only replay cannot make physical features or inference eligible.
+
+There are two distinct replay surfaces:
+
+- `project/Replay/ReplayEngine.h` replays the legacy operational six-column
+  `timestamp,tilt,soil,rain,stress,risk` CSV through its own schema/mapping
+  gates. It cannot recover original sample identity, raw channels, or
+  per-channel quality.
+- The DSD raw-core parser/validator handles the separate dataset artifact.
+  Host integration replays those raw rows through the raw-only quality and
+  calibration path. DSD v1.2 core does not include per-channel acquisition
+  timestamps, so replay cannot reconstruct each channel's stale age.
+
+Document versions and artifact schema versions are distinct. The 36-field
+DSD v1.2 core order is preserved; uniform origin/evidence provenance stays in
+the manifest rather than being inserted into that header. The exporter is
+host-only; calibrated sample, window, feature, annotation, and row-level
+evaluation exporters are not implemented. Operational logger CSV and mock
+serial diagnostics are not DSD training exports. See
+[docs/CSV_DATASET_CONTRACT.md](docs/CSV_DATASET_CONTRACT.md),
+[docs/SYNTHETIC_DATA_POLICY.md](docs/SYNTHETIC_DATA_POLICY.md), and
+[docs/AI_PIPELINE_HOST_TESTING.md](docs/AI_PIPELINE_HOST_TESTING.md).
+
+The existing `ReplayEngine` for operational telemetry is separately
+documented in [docs/REPLAY_ENGINE.md](docs/REPLAY_ENGINE.md).
 
 ## Mock inference runtime
 
-`project/AI/MockModelRuntime.h` implements the inference interface so the task
-and queue path can run before an Edge Impulse export exists. It validates
-basic `FeatureVector` integrity but deliberately emits `ModelError` with no
-prediction for valid inputs: target/output semantics are still DRAFT, so it
-does not fabricate a neutral value or risk score. See
+`project/AI/MockInferenceEngine.h` implements the metadata-bearing inference
+interface only under `PROJECT_HOST_DATA_TOOLS=1` and `PROJECT_TEST_ONLY=1`.
+Tests supply an explicit schema
+and finite raw output vector; the mock copies those values deterministically
+without assigning a target meaning or risk category. Production metadata,
+target semantics, and model integration remain gated. See
 [docs/MOCK_MODEL_RUNTIME.md](docs/MOCK_MODEL_RUNTIME.md).
 
 ## Edge Impulse adapter
 
-`project/AI/EdgeImpulseAdapter.h` implements `IModelRuntime` and calls the
+`project/AI/EdgeImpulseAdapter.h` implements `IInferenceEngine` and calls the
 generated Arduino `run_classifier()` API when an approved Edge Impulse export
 header is configured. Without that export, initialization fails closed. Input
 dimension, schema and output mapping must be populated from verified metadata;
 classification values are not interpreted as risk scores. See
 [docs/EDGE_IMPULSE_ADAPTER.md](docs/EDGE_IMPULSE_ADAPTER.md).
+
+## Host evaluation
+
+`project/Dataset/EvaluationRunner.h` generates bounded quality/provenance and
+feature-distribution reports. Regression metrics require an explicitly
+approved target contract and regression-output approval; synthetic GT5 proxy
+metrics remain separately labeled. See
+[docs/EVALUATION_CONTRACT.md](docs/EVALUATION_CONTRACT.md).
 
 ## One-click mock upload and CSV capture
 
@@ -146,18 +189,38 @@ and [docs/CSV_LOGGER.md](docs/CSV_LOGGER.md).
 ## Unit tests
 
 The Unity native test suite covers SensorManager, DataQualityService,
-FeaturePipeline, RiskManager, and ReplayEngine without physical hardware. Run
-`pio test -e native-unit-tests` from the project directory. See
+FeaturePipeline, RiskManager, ReplayEngine, dataset parsing/validation,
+annotations, splitting, and evaluation without physical hardware. From the
+project directory on Windows, with PlatformIO and MSYS2 UCRT64 compiler
+installed, run:
+
+```powershell
+$env:PATH = 'C:\msys64\ucrt64\bin;' + $env:PATH
+pio test -e native-unit-tests
+```
+
+See
 [docs/UNITY_UNIT_TESTS.md](docs/UNITY_UNIT_TESTS.md).
 
 ## Integration tests
 
-The Unity native integration suite exercises Sensor → Feature → Model → Risk
-→ CSV Logger with fake sensors/storage, a deterministic test-only model, and
-the fail-closed `MockModelRuntime` case. Run
-`pio test -e native-integration-tests`; fixture thresholds and mappings are
-not production approvals. See
+The Unity native integration suite covers synthetic raw export → manifest
+validation → DSD raw parser replay → quality/raw-only calibration, including
+GT5 provenance and closed production inference/risk gates. It also retains a
+separate legacy Sensor → Feature → test-only Model → Risk → operational CSV
+logger wiring test. Run from the project directory:
+
+```powershell
+$env:PATH = 'C:\msys64\ucrt64\bin;' + $env:PATH
+pio test -e native-integration-tests
+```
+
+Fixture thresholds and mappings are not production approvals. See
 [docs/INTEGRATION_TESTS.md](docs/INTEGRATION_TESTS.md).
+
+For exact validation commands, current build blockers, artifact status, and
+evidence limitations, see
+[docs/AI_PIPELINE_HOST_TESTING.md](docs/AI_PIPELINE_HOST_TESTING.md).
 
 ## Risk manager
 
@@ -412,6 +475,12 @@ semantics require an approved storage/reset policy.
 2. Install PlatformIO IDE extension.
 3. Confirm the physical board ID, then update `platformio.ini` if needed.
 4. Run PlatformIO: **Build**.
+
+The compile-only command is `pio run -e esp32-s3-devkitc-1`. The latest
+recorded run reaches source compilation but fails at
+`include/project/BSP/BoardConfig.h:102` because `issueMask` is undeclared.
+Native tests do not resolve this target-build issue. No upload or HIL result
+is implied.
 
 Several subsystems remain partial or blocked by missing configuration and
 integration evidence. A successful compile only checks the project/toolchain

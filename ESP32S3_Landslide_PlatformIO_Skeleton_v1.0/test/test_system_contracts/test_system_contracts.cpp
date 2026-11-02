@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -10,6 +11,15 @@
 
 #include "project/Drivers/ISensor.h"
 #include "project/AI/SchemaRegistry.h"
+#include "project/Dataset/CsvSchemas.h"
+#include "project/Dataset/DataProvenance.h"
+#include "project/Dataset/AnnotationManager.h"
+#include "project/Dataset/DatasetValidator.h"
+#include "project/Dataset/DatasetSplitter.h"
+#include "project/Dataset/EvaluationRunner.h"
+#include "project/Dataset/DsdRawSampleCsvParser.h"
+#include "project/Dataset/Sha256.h"
+#include "project/Dataset/SyntheticSensorGenerator.h"
 #include "project/Managers/AppController.h"
 #include "project/Managers/OutputController.h"
 #include "project/Managers/RecoveryManager.h"
@@ -18,6 +28,7 @@
 #include "project/Managers/ConfigManager.h"
 #include "project/Storage/IStorage.h"
 #include "project/Storage/StorageManager.h"
+#include "project/Dataset/CsvWriter.h"
 #include "project/Models/FeatureVector.h"
 #include "project/Models/ModelOutput.h"
 #include "project/Models/ProcessedFrame.h"
@@ -35,6 +46,9 @@
 #include "../../src/Managers/AppController.cpp"
 // TEST ONLY: the native-unit-tests source filter omits CalibrationService.cpp.
 #include "../../src/Services/CalibrationService.cpp"
+// TEST ONLY: these host-only dataset components are covered by this suite.
+#include "../../src/Dataset/AnnotationManager.cpp"
+#include "../../src/Dataset/DatasetSplitter.cpp"
 // TEST ONLY: the native-unit-tests source filter omits SchemaRegistry.cpp.
 #include "../../src/AI/SchemaRegistry.cpp"
 // TEST ONLY: the native-unit-tests source filter omits OutputController.cpp.
@@ -896,6 +910,7 @@ project::managers::RiskManagerConfig riskConfig() noexcept {
     config.approved = true;
     config.modelRuleEnabled = true;
     config.modelOnlyFallbackApproved = true;
+    config.modelScoreSemanticsApproved = true;
     config.expectedModelOutputCount = 1U;
     config.scoreMinimum = 0.0F;
     config.scoreMaximum = 1.0F;
@@ -1246,6 +1261,56 @@ void testRiskManagerReturnsUnknownForInvalidQualityOrModel() {
         context, result));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(RiskState::Unknown),
                           static_cast<int>(result.risk));
+
+    context.sequenceNo = 3U;
+    invalidModel.status = InferenceStatus::VersionMismatch;
+    invalidModel.predictionValue = 0.8F;
+    invalidModel.rawOutputs[0] = 0.8F;
+    invalidModel.predictionValid = true;
+    TEST_ASSERT_TRUE(manager.evaluate(
+        invalidModel, notApprovedTilt, DataQualityState::VALID,
+        context, result));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(RiskState::Unknown),
+                          static_cast<int>(result.risk));
+    TEST_ASSERT_FALSE(result.riskScoreValid);
+}
+
+void testRiskManagerRequiresApprovedScoreSemanticsAndConsistentOutput() {
+    auto unapprovedConfig = riskConfig();
+    unapprovedConfig.modelScoreSemanticsApproved = false;
+    project::managers::RiskManager unapproved(unapprovedConfig);
+    TEST_ASSERT_FALSE(unapproved.configured());
+
+    project::models::RiskAssessment result{};
+    project::managers::RiskEvaluationContext context{
+        7U, 1U, 1000U, HealthState::Healthy};
+    const project::managers::TiltValidation notApprovedTilt{};
+    TEST_ASSERT_TRUE(unapproved.evaluate(
+        modelOutput(0.1F), notApprovedTilt, DataQualityState::VALID,
+        context, result));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(RiskState::Unknown),
+                          static_cast<int>(result.risk));
+    TEST_ASSERT_FALSE(result.riskScoreValid);
+
+    project::managers::RiskManager manager(riskConfig());
+    auto inconsistentOutput = modelOutput(0.1F);
+    inconsistentOutput.rawOutputs[0] = 0.9F;
+    TEST_ASSERT_TRUE(manager.evaluate(
+        inconsistentOutput, notApprovedTilt, DataQualityState::VALID,
+        context, result));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(RiskState::Unknown),
+                          static_cast<int>(result.risk));
+    TEST_ASSERT_FALSE(result.riskScoreValid);
+
+    auto nonFiniteRawOutput = modelOutput(0.1F);
+    nonFiniteRawOutput.rawOutputs[0] =
+        std::numeric_limits<float>::quiet_NaN();
+    TEST_ASSERT_TRUE(manager.evaluate(
+        nonFiniteRawOutput, notApprovedTilt, DataQualityState::VALID,
+        context, result));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(RiskState::Unknown),
+                          static_cast<int>(result.risk));
+    TEST_ASSERT_FALSE(result.riskScoreValid);
 }
 
 void testRiskManagerHealthFaultBlocksModelRisk() {
@@ -1293,6 +1358,13 @@ void testRiskManagerRejectsMismatchedModelProvenance() {
     TEST_ASSERT_TRUE(manager.evaluate(model, frame, health, result));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(RiskState::HighRiskTest),
                           static_cast<int>(result.risk));
+
+    model.sourceFeatureSchemaHashValid = false;
+    TEST_ASSERT_TRUE(manager.evaluate(model, frame, health, result));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(RiskState::Unknown),
+                          static_cast<int>(result.risk));
+    TEST_ASSERT_FALSE(result.riskScoreValid);
+    model.sourceFeatureSchemaHashValid = true;
 
     model.relatedSequenceNo++;
     TEST_ASSERT_TRUE(manager.evaluate(model, frame, health, result));
@@ -2822,6 +2894,9 @@ void testCalibrationServicePreservesRawInputAndRemainsUncalibrated() {
     project::models::ProcessedFrame output{};
     output.accelXG = 88.0F;
     TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::services::CalibrationMode::RawOnly),
+        static_cast<int>(service.mode()));
+    TEST_ASSERT_EQUAL_INT(
         static_cast<int>(project::models::ApiStatus::NotInitialized),
         static_cast<int>(service.loadCalibrationStatus()));
     TEST_ASSERT_FALSE(service.loadCalibration());
@@ -2831,6 +2906,7 @@ void testCalibrationServicePreservesRawInputAndRemainsUncalibrated() {
 
     TEST_ASSERT_EQUAL_INT32(-123, input.imu.accelX);
     TEST_ASSERT_EQUAL_INT32(456, input.imu.gyroZ);
+    TEST_ASSERT_EQUAL_FLOAT(1.25F, input.imuPhysical.accelXG);
     TEST_ASSERT_EQUAL_UINT32(1U, output.schemaVersion);
     TEST_ASSERT_EQUAL_UINT64(12U, output.bootId);
     TEST_ASSERT_EQUAL_UINT64(34U, output.sequence);
@@ -3145,6 +3221,1844 @@ void testSchemaRegistryRejectsInvalidVectorContents() {
     TEST_ASSERT_EQUAL_UINT32(1U, static_cast<std::uint32_t>(report.featureIndex));
 }
 
+void testDatasetProvenanceRequiresSyntheticGt5() {
+    using project::dataset::DataOrigin;
+    using project::dataset::DataProvenance;
+    using project::dataset::EvidenceClass;
+
+    TEST_ASSERT_FALSE(DataProvenance{}.isValid());
+    TEST_ASSERT_TRUE(
+        (DataProvenance{DataOrigin::Synthetic, EvidenceClass::GT5}.isValid()));
+    TEST_ASSERT_FALSE(
+        (DataProvenance{DataOrigin::Synthetic, EvidenceClass::GT4}.isValid()));
+    TEST_ASSERT_TRUE((DataProvenance{
+                         DataOrigin::Field, EvidenceClass::NotApplicable}
+                         .isValid()));
+    TEST_ASSERT_FALSE((DataProvenance{
+                          static_cast<DataOrigin>(255U), EvidenceClass::GT1}
+                          .isValid()));
+}
+
+void testCsvRowWriterEscapesFieldsAndValidatesUtf8() {
+    using project::dataset::CsvRowWriter;
+    using project::dataset::CsvWriteStatus;
+
+    char output[64]{};
+    CsvRowWriter writer(output, sizeof(output), 1U);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvWriteStatus::Ok),
+        static_cast<int>(writer.appendField("comma,quote\"cr\rlf\n")));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CsvWriteStatus::Ok),
+                          static_cast<int>(writer.finish()));
+    TEST_ASSERT_EQUAL_STRING("\"comma,quote\"\"cr\rlf\n\"\n", output);
+    TEST_ASSERT_EQUAL_PTR(output, writer.data());
+
+    char invalidUtf8[] = {static_cast<char>(0xC0), static_cast<char>(0xAF)};
+    CsvRowWriter invalid(invalidUtf8, sizeof(invalidUtf8), 1U);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvWriteStatus::InvalidUtf8),
+        static_cast<int>(invalid.appendField(
+            std::string_view(invalidUtf8, sizeof(invalidUtf8)))));
+    TEST_ASSERT_NULL(invalid.data());
+}
+
+void testCsvRowWriterFormatsFiniteNumbersAndInvalidAsEmpty() {
+    using project::dataset::CsvRowWriter;
+    using project::dataset::CsvWriteStatus;
+
+    char output[128]{};
+    CsvRowWriter writer(output, sizeof(output), 8U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CsvWriteStatus::Ok),
+                          static_cast<int>(writer.appendNumber(-12.5F)));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CsvWriteStatus::Ok),
+                          static_cast<int>(writer.appendNumber(0.1F)));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CsvWriteStatus::Ok),
+                          static_cast<int>(writer.appendNumber(1.0e20F)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvWriteStatus::Ok),
+        static_cast<int>(writer.appendOptionalNumber(
+            std::numeric_limits<float>::quiet_NaN(), false)));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CsvWriteStatus::Ok),
+                          static_cast<int>(writer.appendBoolean(true)));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CsvWriteStatus::Ok),
+                          static_cast<int>(writer.appendBoolean(false)));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CsvWriteStatus::Ok),
+                          static_cast<int>(writer.appendSigned(-42)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvWriteStatus::Ok),
+        static_cast<int>(writer.appendUnsigned(UINT64_MAX)));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CsvWriteStatus::Ok),
+                          static_cast<int>(writer.finish()));
+    TEST_ASSERT_EQUAL_STRING(
+        "-12.5,0.1,1e+20,,true,false,-42,18446744073709551615\n",
+        output);
+}
+
+void testCsvRowWriterRejectsNonFiniteAndColumnCountErrors() {
+    using project::dataset::CsvRowWriter;
+    using project::dataset::CsvWriteStatus;
+
+    char output[32]{};
+    CsvRowWriter nanWriter(output, sizeof(output), 1U);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvWriteStatus::NonFiniteNumber),
+        static_cast<int>(nanWriter.appendNumber(
+            std::numeric_limits<float>::quiet_NaN())));
+    TEST_ASSERT_NULL(nanWriter.data());
+
+    CsvRowWriter infinityWriter(output, sizeof(output), 1U);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvWriteStatus::NonFiniteNumber),
+        static_cast<int>(
+            infinityWriter.appendNumber(std::numeric_limits<double>::infinity())));
+
+    CsvRowWriter tooFew(output, sizeof(output), 2U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CsvWriteStatus::Ok),
+                          static_cast<int>(tooFew.appendField("only-one")));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvWriteStatus::ColumnCountMismatch),
+        static_cast<int>(tooFew.finish()));
+
+    CsvRowWriter tooMany(output, sizeof(output), 1U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CsvWriteStatus::Ok),
+                          static_cast<int>(tooMany.appendField("first")));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvWriteStatus::ColumnCountExceeded),
+        static_cast<int>(tooMany.appendField("extra")));
+}
+
+void testCsvRowWriterHandlesExactCapacityAndOverflow() {
+    using project::dataset::CsvRowWriter;
+    using project::dataset::CsvWriteStatus;
+
+    char exact[4]{};
+    CsvRowWriter exactWriter(exact, sizeof(exact), 2U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CsvWriteStatus::Ok),
+                          static_cast<int>(exactWriter.appendField("a")));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CsvWriteStatus::Ok),
+                          static_cast<int>(exactWriter.appendField("b")));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CsvWriteStatus::Ok),
+                          static_cast<int>(exactWriter.finish()));
+    TEST_ASSERT_EQUAL_UINT32(4U, static_cast<std::uint32_t>(exactWriter.size()));
+    TEST_ASSERT_EQUAL_MEMORY("a,b\n", exact, sizeof(exact));
+
+    char oneByteShort[3]{};
+    CsvRowWriter shortWriter(oneByteShort, sizeof(oneByteShort), 2U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CsvWriteStatus::Ok),
+                          static_cast<int>(shortWriter.appendField("a")));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CsvWriteStatus::Ok),
+                          static_cast<int>(shortWriter.appendField("b")));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvWriteStatus::CapacityExceeded),
+        static_cast<int>(shortWriter.finish()));
+    TEST_ASSERT_NULL(shortWriter.data());
+
+    char appendOverflow[2]{};
+    CsvRowWriter overflowWriter(appendOverflow, sizeof(appendOverflow), 2U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CsvWriteStatus::Ok),
+                          static_cast<int>(overflowWriter.appendField("a")));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvWriteStatus::CapacityExceeded),
+        static_cast<int>(overflowWriter.appendField("b")));
+    TEST_ASSERT_NULL(overflowWriter.data());
+}
+
+void testDsdV12RawHeaderMatchesCoreSchemaAndFitsBound() {
+    using project::dataset::CsvWriteStatus;
+    using project::dataset::kDsdV1_2RawSampleCoreFields;
+    using project::dataset::writeDsdV1_2RawSampleCoreHeader;
+
+    constexpr char expected[] =
+        "dataset_id,site_id,device_id,sensor_set_id,session_id,boot_id,"
+        "sequence_no,timestamp_ms,utc_time,time_status,firmware_version,"
+        "config_version,calibration_id,sensor_status_bits,accel_x_raw,"
+        "accel_y_raw,accel_z_raw,soil_raw,yl83_raw,hx710b_raw,accel_x_valid,"
+        "accel_y_valid,accel_z_valid,soil_valid,yl83_valid,hx710b_valid,"
+        "accel_x_quality,accel_y_quality,accel_z_quality,soil_quality,"
+        "yl83_quality,hx710b_quality,valid_mask,quality_flags,event_id,"
+        "annotation_id\n";
+    static_assert(kDsdV1_2RawSampleCoreFields.size() == 36U,
+                  "DSD v1.2 raw core field count changed");
+
+    char output[sizeof(expected)]{};
+    std::size_t bytesWritten = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvWriteStatus::Ok),
+        static_cast<int>(writeDsdV1_2RawSampleCoreHeader(
+            output, sizeof(output), bytesWritten)));
+    TEST_ASSERT_EQUAL_UINT32(sizeof(expected) - 1U,
+                             static_cast<std::uint32_t>(bytesWritten));
+    TEST_ASSERT_EQUAL_MEMORY(expected, output, sizeof(expected) - 1U);
+
+    bytesWritten = 99U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvWriteStatus::CapacityExceeded),
+        static_cast<int>(writeDsdV1_2RawSampleCoreHeader(
+            output, sizeof(output) - 2U, bytesWritten)));
+    TEST_ASSERT_EQUAL_UINT32(0U, static_cast<std::uint32_t>(bytesWritten));
+}
+
+struct MemoryDatasetCsvSource final : project::dataset::IDatasetCsvSource {
+    const std::uint8_t* data{nullptr};
+    std::size_t size{0U};
+    std::size_t position{0U};
+    std::size_t maxChunk{13U};
+    std::size_t failAt{std::numeric_limits<std::size_t>::max()};
+    bool rewindFails{false};
+
+    MemoryDatasetCsvSource(const std::uint8_t* input,
+                           std::size_t inputSize) noexcept
+        : data(input), size(inputSize) {}
+
+    project::dataset::DatasetCsvSourceStatus rewind() noexcept override {
+        position = 0U;
+        return rewindFails ? project::dataset::DatasetCsvSourceStatus::IoError
+                           : project::dataset::DatasetCsvSourceStatus::Ok;
+    }
+
+    project::dataset::DatasetCsvSourceStatus read(
+        std::uint8_t* output, std::size_t capacity,
+        std::size_t& bytesRead) noexcept override {
+        bytesRead = 0U;
+        if (position >= failAt) {
+            return project::dataset::DatasetCsvSourceStatus::IoError;
+        }
+        if (position == size) {
+            return project::dataset::DatasetCsvSourceStatus::EndOfFile;
+        }
+        const std::size_t remaining = size - position;
+        const std::size_t beforeFailure = failAt - position;
+        const std::size_t amount =
+            std::min(capacity, std::min(maxChunk,
+                                        std::min(remaining, beforeFailure)));
+        if (amount == 0U) {
+            return project::dataset::DatasetCsvSourceStatus::IoError;
+        }
+        std::memcpy(output, data + position, amount);
+        position += amount;
+        bytesRead = amount;
+        return project::dataset::DatasetCsvSourceStatus::Ok;
+    }
+};
+
+bool appendRawSampleCsvRow(
+    char* output, std::size_t capacity, std::size_t& offset,
+    std::uint64_t sequenceNo, std::uint64_t timestampMs,
+    std::string_view firstRaw = "10",
+    std::string_view eventId = {}) {
+    char row[5000]{};
+    project::dataset::CsvRowWriter writer(
+        row, sizeof(row),
+        project::dataset::kDsdV1_2RawSampleCoreFields.size());
+    const auto append = [&writer](std::string_view value) {
+        return writer.appendField(value) ==
+               project::dataset::CsvWriteStatus::Ok;
+    };
+    const auto appendUnsigned = [&writer](std::uint64_t value) {
+        return writer.appendUnsigned(value) ==
+               project::dataset::CsvWriteStatus::Ok;
+    };
+    const auto appendBoolean = [&writer](bool value) {
+        return writer.appendBoolean(value) ==
+               project::dataset::CsvWriteStatus::Ok;
+    };
+    if (!append("synthetic-dataset") || !append("synthetic-site") ||
+        !append("synthetic-device") || !append("synthetic-sensor-set") ||
+        !append("synthetic-session") || !appendUnsigned(1U) ||
+        !appendUnsigned(sequenceNo) || !appendUnsigned(timestampMs) ||
+        !append("") || !append("UNSYNCED") || !append("host-generator") ||
+        !append("synthetic-config-v1") || !append("NONE") ||
+        !appendUnsigned(0U) || !append(firstRaw) || !append("20") ||
+        !append("30") || !append("") || !append("") || !append("") ||
+        !appendBoolean(true) || !appendBoolean(true) ||
+        !appendBoolean(true) || !appendBoolean(false) ||
+        !appendBoolean(false) || !appendBoolean(false) || !append("VALID") ||
+        !append("VALID") || !append("VALID") || !append("MISSING") ||
+        !append("MISSING") || !append("MISSING") || !appendUnsigned(0U) ||
+        !appendUnsigned(0U) || !append(eventId) || !append("")) {
+        return false;
+    }
+    if (writer.finish() != project::dataset::CsvWriteStatus::Ok ||
+        writer.size() > capacity - offset) {
+        return false;
+    }
+    std::memcpy(output + offset, writer.data(), writer.size());
+    offset += writer.size();
+    return true;
+}
+
+bool createRawSamplesCsv(char* output, std::size_t capacity,
+                         std::size_t& size, std::uint64_t firstSequence = 0U,
+                         std::uint64_t secondSequence = 1U,
+                         std::uint64_t firstTimestamp = 1000U,
+                         std::uint64_t secondTimestamp = 1100U) {
+    size = 0U;
+    char header[1024]{};
+    std::size_t headerSize = 0U;
+    if (project::dataset::writeDsdV1_2RawSampleCoreHeader(
+            header, sizeof(header), headerSize) !=
+        project::dataset::CsvWriteStatus::Ok ||
+        headerSize > capacity) {
+        return false;
+    }
+    std::memcpy(output, header, headerSize);
+    size = headerSize;
+    return appendRawSampleCsvRow(output, capacity, size, firstSequence,
+                                 firstTimestamp) &&
+           appendRawSampleCsvRow(output, capacity, size, secondSequence,
+                                 secondTimestamp);
+}
+
+bool setRawManifestForCsv(const char* data, std::size_t size,
+                          std::uint64_t rowCount,
+                          project::dataset::RawDatasetManifest& manifest) {
+    manifest = {};
+    manifest.datasetId = "synthetic-dataset";
+    manifest.rawSchemaVersion =
+        project::dataset::kRawSampleCoreSchemaVersion;
+    manifest.expectedRows = rowCount;
+    manifest.expectedBytes = size;
+    manifest.provenance = {project::dataset::DataOrigin::Synthetic,
+                           project::dataset::EvidenceClass::GT5};
+    manifest.channelPresence = {{true, true, true, false, false, false}};
+    manifest.channelPresenceConfigured = true;
+    project::dataset::Sha256 hash{};
+    if (!hash.update(reinterpret_cast<const std::uint8_t*>(data), size)) {
+        return false;
+    }
+    return hash.finish(manifest.expectedSha256);
+}
+
+void testSyntheticGeneratorIsDeterministicAndCarriesGt5() {
+    using namespace project::dataset;
+    SyntheticGeneratorConfig config{};
+    config.scenario = SyntheticScenario::ImpulseNoise;
+    config.seed = 1234567U;
+    config.recordCount = 8U;
+    config.firstTimestampMs = 1000U;
+    config.timestampStepMs = 25U;
+    config.parameters.eventSample = 3U;
+    config.parameters.eventLength = 2U;
+    config.parameters.eventDelta = 9;
+    config.parameters.noiseAmplitude = 2;
+
+    SyntheticSensorGenerator first(config);
+    SyntheticSensorGenerator second(config);
+    TEST_ASSERT_EQUAL_UINT32(kSyntheticGeneratorVersion,
+                             first.manifest().generatorVersion);
+    TEST_ASSERT_EQUAL_UINT64(config.seed, first.manifest().seed);
+    TEST_ASSERT_FALSE(first.manifest().proxyTargetPresent);
+    TEST_ASSERT_FALSE(first.manifest().eligibleForFieldClaim);
+    TEST_ASSERT_TRUE(first.manifest().provenance.isValid());
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(EvidenceClass::GT5),
+        static_cast<int>(first.manifest().provenance.evidenceClass));
+
+    for (std::uint64_t index = 0U; index < config.recordCount; ++index) {
+        SyntheticRecord left{};
+        SyntheticRecord right{};
+        TEST_ASSERT_EQUAL_INT(
+            static_cast<int>(SyntheticGeneratorStatus::Ok),
+            static_cast<int>(first.next(left)));
+        TEST_ASSERT_EQUAL_INT(
+            static_cast<int>(SyntheticGeneratorStatus::Ok),
+            static_cast<int>(second.next(right)));
+        TEST_ASSERT_EQUAL_UINT64(left.observation.sequenceNo,
+                                 right.observation.sequenceNo);
+        TEST_ASSERT_EQUAL_UINT64(left.observation.timestampMs,
+                                 right.observation.timestampMs);
+        TEST_ASSERT_EQUAL_INT64(left.observation.rawValues[0],
+                                right.observation.rawValues[0]);
+        TEST_ASSERT_EQUAL_UINT32(left.latent.validChannelMask,
+                                 right.latent.validChannelMask);
+        TEST_ASSERT_TRUE(left.observation.provenance.isValid());
+        TEST_ASSERT_EQUAL_INT(
+            static_cast<int>(EvidenceClass::GT5),
+            static_cast<int>(left.observation.provenance.evidenceClass));
+    }
+    SyntheticRecord exhausted{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(SyntheticGeneratorStatus::EndOfData),
+        static_cast<int>(first.next(exhausted)));
+}
+
+void testSyntheticGeneratorCoversScenarioBoundaries() {
+    using namespace project::dataset;
+    const SyntheticScenario scenarios[] = {
+        SyntheticScenario::Stable,
+        SyntheticScenario::GradualTrend,
+        SyntheticScenario::StepChange,
+        SyntheticScenario::Oscillation,
+        SyntheticScenario::ImpulseNoise,
+        SyntheticScenario::Saturation,
+        SyntheticScenario::Dropout,
+        SyntheticScenario::Stale,
+        SyntheticScenario::OutOfOrder,
+        SyntheticScenario::SequenceGap,
+        SyntheticScenario::Reboot,
+        SyntheticScenario::CalibrationChange,
+        SyntheticScenario::MixedValidity};
+
+    for (const SyntheticScenario scenario : scenarios) {
+        SyntheticGeneratorConfig config{};
+        config.scenario = scenario;
+        config.seed = 7U;
+        config.recordCount = 8U;
+        config.bootId = 4U;
+        config.firstTimestampMs = 1000U;
+        config.timestampStepMs = 10U;
+        config.parameters.eventSample = 4U;
+        config.parameters.eventLength = 2U;
+        config.parameters.eventDelta = 20;
+        config.parameters.oscillationPeriodSamples = 4U;
+        config.parameters.sequenceGapSize = 2U;
+        config.parameters.staleAgeMs = 200U;
+        config.parameters.saturationMinimum = -3;
+        config.parameters.saturationMaximum = 3;
+        config.parameters.baseline = 2;
+        config.parameters.affectedChannel = 2U;
+        SyntheticSensorGenerator generator(config);
+        SyntheticRecord records[8]{};
+        for (auto& record : records) {
+            TEST_ASSERT_EQUAL_INT(
+                static_cast<int>(SyntheticGeneratorStatus::Ok),
+                static_cast<int>(generator.next(record)));
+        }
+        TEST_ASSERT_TRUE(records[0].observation.provenance.isValid());
+        switch (scenario) {
+            case SyntheticScenario::Saturation:
+                TEST_ASSERT_EQUAL_INT64(
+                    config.parameters.saturationMaximum,
+                    records[4].observation.rawValues[0]);
+                break;
+            case SyntheticScenario::Dropout:
+                TEST_ASSERT_FALSE(records[4].observation.channelValid[2U]);
+                TEST_ASSERT_EQUAL_INT64(0,
+                                        records[4].observation.rawValues[2U]);
+                break;
+            case SyntheticScenario::Stale:
+                TEST_ASSERT_TRUE(
+                    records[4].observation.channelTimestampMs[0U] <
+                    records[4].observation.evaluationTimeMs);
+                break;
+            case SyntheticScenario::OutOfOrder:
+                TEST_ASSERT_TRUE(records[4].observation.sequenceNo <=
+                                 records[3].observation.sequenceNo);
+                TEST_ASSERT_TRUE(records[4].observation.timestampMs <=
+                                 records[3].observation.timestampMs);
+                break;
+            case SyntheticScenario::SequenceGap:
+                TEST_ASSERT_TRUE(records[4].observation.sequenceNo >
+                                 records[3].observation.sequenceNo + 1U);
+                TEST_ASSERT_EQUAL_UINT64(
+                    records[4].observation.sequenceNo + 1U,
+                    records[5].observation.sequenceNo);
+                break;
+            case SyntheticScenario::Reboot:
+                TEST_ASSERT_NOT_EQUAL(records[3].observation.bootId,
+                                      records[4].observation.bootId);
+                TEST_ASSERT_EQUAL_UINT64(0U,
+                                         records[4].observation.sequenceNo);
+                TEST_ASSERT_EQUAL_UINT64(0U,
+                                         records[4].observation.timestampMs);
+                break;
+            case SyntheticScenario::CalibrationChange:
+                TEST_ASSERT_NOT_EQUAL(
+                    records[3].observation.calibrationVersion,
+                    records[4].observation.calibrationVersion);
+                break;
+            case SyntheticScenario::MixedValidity:
+                TEST_ASSERT_FALSE(records[0].observation.channelValid[0U]);
+                TEST_ASSERT_TRUE(records[0].observation.channelValid[1U]);
+                break;
+            case SyntheticScenario::Stable:
+            case SyntheticScenario::GradualTrend:
+            case SyntheticScenario::StepChange:
+            case SyntheticScenario::Oscillation:
+            case SyntheticScenario::ImpulseNoise:
+                TEST_ASSERT_TRUE(records[4].observation.channelValid[0U]);
+                break;
+        }
+    }
+}
+
+void testSyntheticGeneratorRejectsInvalidAndOverflowingConfig() {
+    using namespace project::dataset;
+    SyntheticGeneratorConfig invalid{};
+    invalid.recordCount = 1U;
+    invalid.timestampStepMs = 1U;
+    invalid.seed = 1U;
+    invalid.scenario = static_cast<SyntheticScenario>(0xFFU);
+    TEST_ASSERT_FALSE(SyntheticSensorGenerator::validateConfig(invalid));
+
+    invalid.scenario = SyntheticScenario::Stable;
+    invalid.timestampStepMs = 0U;
+    TEST_ASSERT_FALSE(SyntheticSensorGenerator::validateConfig(invalid));
+
+    SyntheticGeneratorConfig overflow{};
+    overflow.scenario = SyntheticScenario::StepChange;
+    overflow.seed = 1U;
+    overflow.recordCount = 1U;
+    overflow.timestampStepMs = 1U;
+    overflow.parameters.baseline = INT64_MAX;
+    overflow.parameters.eventSample = 0U;
+    overflow.parameters.eventDelta = 1;
+    SyntheticSensorGenerator generator(overflow);
+    SyntheticRecord record{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(SyntheticGeneratorStatus::NumericOverflow),
+        static_cast<int>(generator.next(record)));
+    TEST_ASSERT_FALSE(record.observation.provenance.isValid());
+}
+
+void testSha256MatchesKnownVectorAndBoundaryBlocks() {
+    using project::dataset::Sha256;
+    Sha256 hash{};
+    const char input[] = "abc";
+    TEST_ASSERT_TRUE(hash.update(
+        reinterpret_cast<const std::uint8_t*>(input), sizeof(input) - 1U));
+    std::array<std::uint8_t, Sha256::kDigestSize> digest{};
+    TEST_ASSERT_TRUE(hash.finish(digest));
+    const std::uint8_t expected[] = {
+        0xBA, 0x78, 0x16, 0xBF, 0x8F, 0x01, 0xCF, 0xEA,
+        0x41, 0x41, 0x40, 0xDE, 0x5D, 0xAE, 0x22, 0x23,
+        0xB0, 0x03, 0x61, 0xA3, 0x96, 0x17, 0x7A, 0x9C,
+        0xB4, 0x10, 0xFF, 0x61, 0xF2, 0x00, 0x15, 0xAD};
+    TEST_ASSERT_EQUAL_MEMORY(expected, digest.data(), sizeof(expected));
+
+    std::uint8_t block[128]{};
+    hash.reset();
+    TEST_ASSERT_TRUE(hash.update(block, sizeof(block)));
+    TEST_ASSERT_TRUE(hash.finish(digest));
+    TEST_ASSERT_FALSE(hash.finish(digest));
+}
+
+void testDsdRawDatasetValidatorAcceptsExactSchemaAndManifest() {
+    char csv[4096]{};
+    std::size_t csvSize = 0U;
+    TEST_ASSERT_TRUE(createRawSamplesCsv(csv, sizeof(csv), csvSize));
+    project::dataset::RawDatasetManifest manifest{};
+    TEST_ASSERT_TRUE(setRawManifestForCsv(csv, csvSize, 2U, manifest));
+
+    MemoryDatasetCsvSource source{
+        reinterpret_cast<const std::uint8_t*>(csv), csvSize};
+    project::dataset::DatasetValidator validator{};
+    project::dataset::IdentityWorkspaceEntry entries[4]{};
+    std::uint8_t keyBytes[1024]{};
+    project::dataset::DatasetValidationWorkspace workspace{
+        entries, 4U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    project::dataset::QuarantineReference quarantine[2]{};
+    project::dataset::DatasetValidationReport report{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::DatasetValidationStatus::Complete),
+        static_cast<int>(validator.validateRawSamples(
+            source, manifest, workspace, quarantine, 2U, report)));
+    TEST_ASSERT_EQUAL_UINT64(2U, report.acceptedRows);
+    TEST_ASSERT_EQUAL_UINT64(0U, report.rejectedRows);
+    TEST_ASSERT_TRUE(report.hashVerified);
+    TEST_ASSERT_TRUE(report.rowCountVerified);
+    TEST_ASSERT_EQUAL_UINT64(csvSize, report.bytesRead);
+
+    MemoryDatasetCsvSource replaySource{
+        reinterpret_cast<const std::uint8_t*>(csv), csvSize};
+    project::dataset::IdentityWorkspaceEntry replayEntries[4]{};
+    std::uint8_t replayKeyBytes[1024]{};
+    project::dataset::DatasetValidationWorkspace replayWorkspace{
+        replayEntries, 4U, 0U, replayKeyBytes, sizeof(replayKeyBytes), 0U};
+    project::dataset::QuarantineReference replayQuarantine[2]{};
+    project::dataset::DatasetValidationReport replayReport{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::DatasetValidationStatus::Complete),
+        static_cast<int>(validator.validateRawSamples(
+            replaySource, manifest, replayWorkspace, replayQuarantine, 2U,
+            replayReport)));
+    TEST_ASSERT_EQUAL_UINT64(report.acceptedRows, replayReport.acceptedRows);
+    TEST_ASSERT_EQUAL_UINT64(report.rejectedRows, replayReport.rejectedRows);
+    TEST_ASSERT_EQUAL_UINT64(report.bytesRead, replayReport.bytesRead);
+    TEST_ASSERT_EQUAL_MEMORY(report.computedSha256.data(),
+                             replayReport.computedSha256.data(),
+                             report.computedSha256.size());
+}
+
+void testDsdRawDatasetValidatorQuarantinesDuplicatesAndSequenceGaps() {
+    char csv[4096]{};
+    std::size_t csvSize = 0U;
+    char header[1024]{};
+    std::size_t headerSize = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::CsvWriteStatus::Ok),
+        static_cast<int>(project::dataset::writeDsdV1_2RawSampleCoreHeader(
+            header, sizeof(header), headerSize)));
+    std::memcpy(csv, header, headerSize);
+    csvSize = headerSize;
+    TEST_ASSERT_TRUE(appendRawSampleCsvRow(csv, sizeof(csv), csvSize, 1U,
+                                           1000U));
+    TEST_ASSERT_TRUE(appendRawSampleCsvRow(csv, sizeof(csv), csvSize, 3U,
+                                           1200U));
+    TEST_ASSERT_TRUE(appendRawSampleCsvRow(csv, sizeof(csv), csvSize, 1U,
+                                           1300U));
+    project::dataset::RawDatasetManifest manifest{};
+    TEST_ASSERT_TRUE(setRawManifestForCsv(csv, csvSize, 3U, manifest));
+
+    MemoryDatasetCsvSource source{
+        reinterpret_cast<const std::uint8_t*>(csv), csvSize};
+    project::dataset::DatasetValidator validator{};
+    project::dataset::IdentityWorkspaceEntry entries[4]{};
+    std::uint8_t keyBytes[1024]{};
+    project::dataset::DatasetValidationWorkspace workspace{
+        entries, 4U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    project::dataset::QuarantineReference quarantine[4]{};
+    project::dataset::DatasetValidationReport report{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::dataset::DatasetValidationStatus::CompleteWithRejectedRows),
+        static_cast<int>(validator.validateRawSamples(
+            source, manifest, workspace, quarantine, 4U, report)));
+    TEST_ASSERT_EQUAL_UINT64(1U, report.acceptedRows);
+    TEST_ASSERT_EQUAL_UINT64(2U, report.rejectedRows);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::RawRowRejectionReason::SequenceGap),
+        static_cast<int>(quarantine[0U].reason));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::dataset::RawRowRejectionReason::DuplicateIdentity),
+        static_cast<int>(quarantine[1U].reason));
+}
+
+void testDsdRawDatasetValidatorRejectsEncodingQuoteAndTruncation() {
+    char csv[4096]{};
+    std::size_t csvSize = 0U;
+    TEST_ASSERT_TRUE(createRawSamplesCsv(csv, sizeof(csv), csvSize));
+    const char* site = std::strstr(csv, "synthetic-site");
+    TEST_ASSERT_NOT_NULL(site);
+    const auto siteOffset = static_cast<std::size_t>(site - csv);
+    csv[siteOffset] = static_cast<char>(0xC0);
+    csv[siteOffset + 1U] = static_cast<char>(0xAF);
+
+    project::dataset::RawDatasetManifest manifest{};
+    TEST_ASSERT_TRUE(setRawManifestForCsv(csv, csvSize, 2U, manifest));
+    MemoryDatasetCsvSource source{
+        reinterpret_cast<const std::uint8_t*>(csv), csvSize};
+    project::dataset::DatasetValidator validator{};
+    project::dataset::IdentityWorkspaceEntry entries[4]{};
+    std::uint8_t keyBytes[1024]{};
+    project::dataset::DatasetValidationWorkspace workspace{
+        entries, 4U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    project::dataset::QuarantineReference quarantine[2]{};
+    project::dataset::DatasetValidationReport report{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::dataset::DatasetValidationStatus::CompleteWithRejectedRows),
+        static_cast<int>(validator.validateRawSamples(
+            source, manifest, workspace, quarantine, 2U, report)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::RawRowRejectionReason::InvalidUtf8),
+        static_cast<int>(quarantine[0U].reason));
+
+    char malformed[4096]{};
+    std::size_t malformedSize = 0U;
+    TEST_ASSERT_TRUE(createRawSamplesCsv(malformed, sizeof(malformed),
+                                        malformedSize));
+    char* numeric = std::strstr(malformed, ",10,20");
+    TEST_ASSERT_NOT_NULL(numeric);
+    numeric[2] = '"';
+    TEST_ASSERT_TRUE(setRawManifestForCsv(malformed, malformedSize, 2U,
+                                          manifest));
+    MemoryDatasetCsvSource malformedSource{
+        reinterpret_cast<const std::uint8_t*>(malformed), malformedSize};
+    workspace = {entries, 4U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::dataset::DatasetValidationStatus::CompleteWithRejectedRows),
+        static_cast<int>(validator.validateRawSamples(
+            malformedSource, manifest, workspace, quarantine, 2U, report)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::dataset::RawRowRejectionReason::MalformedQuote),
+        static_cast<int>(quarantine[0U].reason));
+
+    char truncated[4096]{};
+    std::size_t truncatedSize = 0U;
+    TEST_ASSERT_TRUE(createRawSamplesCsv(truncated, sizeof(truncated),
+                                        truncatedSize));
+    --truncatedSize;
+    TEST_ASSERT_TRUE(setRawManifestForCsv(truncated, truncatedSize, 2U,
+                                          manifest));
+    MemoryDatasetCsvSource truncatedSource{
+        reinterpret_cast<const std::uint8_t*>(truncated), truncatedSize};
+    workspace = {entries, 4U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::DatasetValidationStatus::TruncatedRecord),
+        static_cast<int>(validator.validateRawSamples(
+            truncatedSource, manifest, workspace, quarantine, 2U, report)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::dataset::RawRowRejectionReason::TruncatedRecord),
+        static_cast<int>(quarantine[0U].reason));
+}
+
+void testDsdRawDatasetValidatorReportsManifestAndInjectedFailures() {
+    char csv[4096]{};
+    std::size_t csvSize = 0U;
+    TEST_ASSERT_TRUE(createRawSamplesCsv(csv, sizeof(csv), csvSize));
+    project::dataset::RawDatasetManifest manifest{};
+    TEST_ASSERT_TRUE(setRawManifestForCsv(csv, csvSize, 2U, manifest));
+
+    project::dataset::DatasetValidator validator{};
+    project::dataset::IdentityWorkspaceEntry entries[4]{};
+    std::uint8_t keyBytes[1024]{};
+    project::dataset::DatasetValidationWorkspace workspace{
+        entries, 4U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    project::dataset::QuarantineReference quarantine[2]{};
+    project::dataset::DatasetValidationReport report{};
+
+    auto badHashManifest = manifest;
+    badHashManifest.expectedSha256[0U] ^= 0x01U;
+    MemoryDatasetCsvSource hashSource{
+        reinterpret_cast<const std::uint8_t*>(csv), csvSize};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::dataset::DatasetValidationStatus::ManifestHashMismatch),
+        static_cast<int>(validator.validateRawSamples(
+            hashSource, badHashManifest, workspace, quarantine, 2U, report)));
+
+    auto badCountManifest = manifest;
+    ++badCountManifest.expectedRows;
+    workspace = {entries, 4U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    MemoryDatasetCsvSource countSource{
+        reinterpret_cast<const std::uint8_t*>(csv), csvSize};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::dataset::DatasetValidationStatus::ManifestRowCountMismatch),
+        static_cast<int>(validator.validateRawSamples(
+            countSource, badCountManifest, workspace, quarantine, 2U,
+            report)));
+
+    workspace = {entries, 1U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    MemoryDatasetCsvSource workspaceSource{
+        reinterpret_cast<const std::uint8_t*>(csv), csvSize};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::DatasetValidationStatus::IdentityWorkspaceExceeded),
+        static_cast<int>(validator.validateRawSamples(
+            workspaceSource, manifest, workspace, quarantine, 2U, report)));
+
+    workspace = {entries, 4U, 0U, keyBytes, 1U, 0U};
+    MemoryDatasetCsvSource keySource{
+        reinterpret_cast<const std::uint8_t*>(csv), csvSize};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::DatasetValidationStatus::IdentityWorkspaceExceeded),
+        static_cast<int>(validator.validateRawSamples(
+            keySource, manifest, workspace, quarantine, 2U, report)));
+
+    workspace = {entries, 4U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    MemoryDatasetCsvSource ioSource{
+        reinterpret_cast<const std::uint8_t*>(csv), csvSize};
+    ioSource.failAt = 30U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::DatasetValidationStatus::SourceError),
+        static_cast<int>(validator.validateRawSamples(
+            ioSource, manifest, workspace, quarantine, 2U, report)));
+
+    MemoryDatasetCsvSource rewindSource{
+        reinterpret_cast<const std::uint8_t*>(csv), csvSize};
+    rewindSource.rewindFails = true;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::DatasetValidationStatus::SourceError),
+        static_cast<int>(validator.validateRawSamples(
+            rewindSource, manifest, workspace, quarantine, 2U, report)));
+}
+
+void testDsdRawDatasetValidatorRejectsBadFieldsAndTimeOrder() {
+    char csv[4096]{};
+    std::size_t csvSize = 0U;
+    TEST_ASSERT_TRUE(createRawSamplesCsv(csv, sizeof(csv), csvSize));
+    char* numeric = std::strstr(csv, ",10,20");
+    TEST_ASSERT_NOT_NULL(numeric);
+    numeric[2] = 'x';
+    project::dataset::RawDatasetManifest manifest{};
+    TEST_ASSERT_TRUE(setRawManifestForCsv(csv, csvSize, 2U, manifest));
+    project::dataset::DatasetValidator validator{};
+    project::dataset::IdentityWorkspaceEntry entries[4]{};
+    std::uint8_t keyBytes[1024]{};
+    project::dataset::DatasetValidationWorkspace workspace{
+        entries, 4U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    project::dataset::QuarantineReference quarantine[4]{};
+    project::dataset::DatasetValidationReport report{};
+    MemoryDatasetCsvSource numericSource{
+        reinterpret_cast<const std::uint8_t*>(csv), csvSize};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::dataset::DatasetValidationStatus::CompleteWithRejectedRows),
+        static_cast<int>(validator.validateRawSamples(
+            numericSource, manifest, workspace, quarantine, 4U, report)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::RawRowRejectionReason::InvalidNumeric),
+        static_cast<int>(quarantine[0U].reason));
+
+    char outOfOrder[4096]{};
+    std::size_t outOfOrderSize = 0U;
+    char header[1024]{};
+    std::size_t headerSize = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::CsvWriteStatus::Ok),
+        static_cast<int>(project::dataset::writeDsdV1_2RawSampleCoreHeader(
+            header, sizeof(header), headerSize)));
+    std::memcpy(outOfOrder, header, headerSize);
+    outOfOrderSize = headerSize;
+    TEST_ASSERT_TRUE(appendRawSampleCsvRow(
+        outOfOrder, sizeof(outOfOrder), outOfOrderSize, 0U, 1000U));
+    TEST_ASSERT_TRUE(appendRawSampleCsvRow(
+        outOfOrder, sizeof(outOfOrder), outOfOrderSize, 1U, 900U));
+    TEST_ASSERT_TRUE(setRawManifestForCsv(outOfOrder, outOfOrderSize, 2U,
+                                          manifest));
+    workspace = {entries, 4U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    MemoryDatasetCsvSource timeSource{
+        reinterpret_cast<const std::uint8_t*>(outOfOrder), outOfOrderSize};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::dataset::DatasetValidationStatus::CompleteWithRejectedRows),
+        static_cast<int>(validator.validateRawSamples(
+            timeSource, manifest, workspace, quarantine, 4U, report)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::RawRowRejectionReason::OutOfOrder),
+        static_cast<int>(quarantine[0U].reason));
+    TEST_ASSERT_EQUAL_UINT64(1U, report.acceptedRows);
+}
+
+void testDsdRawDatasetValidatorReservesIdentityAndFailsClosed() {
+    char csv[4096]{};
+    std::size_t csvSize = 0U;
+    char header[1024]{};
+    std::size_t headerSize = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::CsvWriteStatus::Ok),
+        static_cast<int>(project::dataset::writeDsdV1_2RawSampleCoreHeader(
+            header, sizeof(header), headerSize)));
+    std::memcpy(csv, header, headerSize);
+    csvSize = headerSize;
+    TEST_ASSERT_TRUE(appendRawSampleCsvRow(csv, sizeof(csv), csvSize, 0U,
+                                           1000U, "invalid"));
+    TEST_ASSERT_TRUE(appendRawSampleCsvRow(csv, sizeof(csv), csvSize, 0U,
+                                           1000U));
+
+    project::dataset::RawDatasetManifest manifest{};
+    TEST_ASSERT_TRUE(setRawManifestForCsv(csv, csvSize, 2U, manifest));
+    project::dataset::DatasetValidator validator{};
+    project::dataset::IdentityWorkspaceEntry entries[4]{};
+    std::uint8_t keyBytes[1024]{};
+    project::dataset::DatasetValidationWorkspace workspace{
+        entries, 4U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    project::dataset::QuarantineReference quarantine[4]{};
+    project::dataset::DatasetValidationReport report{};
+    MemoryDatasetCsvSource duplicateSource{
+        reinterpret_cast<const std::uint8_t*>(csv), csvSize};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::DatasetValidationStatus::
+                             CompleteWithRejectedRows),
+        static_cast<int>(validator.validateRawSamples(
+            duplicateSource, manifest, workspace, quarantine, 4U, report)));
+    TEST_ASSERT_EQUAL_UINT64(0U, report.acceptedRows);
+    TEST_ASSERT_EQUAL_UINT64(2U, report.rejectedRows);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::RawRowRejectionReason::InvalidNumeric),
+        static_cast<int>(quarantine[0U].reason));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::dataset::RawRowRejectionReason::DuplicateIdentity),
+        static_cast<int>(quarantine[1U].reason));
+
+    TEST_ASSERT_TRUE(createRawSamplesCsv(csv, sizeof(csv), csvSize));
+    TEST_ASSERT_TRUE(setRawManifestForCsv(csv, csvSize, 2U, manifest));
+    manifest.channelPresence[0U] = false;
+    workspace = {entries, 4U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    MemoryDatasetCsvSource channelSource{
+        reinterpret_cast<const std::uint8_t*>(csv), csvSize};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::DatasetValidationStatus::
+                             CompleteWithRejectedRows),
+        static_cast<int>(validator.validateRawSamples(
+            channelSource, manifest, workspace, quarantine, 4U, report)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::dataset::RawRowRejectionReason::ChannelPresenceMismatch),
+        static_cast<int>(quarantine[0U].reason));
+
+    TEST_ASSERT_TRUE(createRawSamplesCsv(csv, sizeof(csv), csvSize));
+    std::size_t lastDelimiter = csvSize - 2U;
+    while (lastDelimiter > 0U && csv[lastDelimiter] != ',') {
+        --lastDelimiter;
+    }
+    TEST_ASSERT_TRUE(lastDelimiter > 0U);
+    std::memmove(csv + lastDelimiter, csv + lastDelimiter + 1U,
+                 csvSize - lastDelimiter - 1U);
+    --csvSize;
+    TEST_ASSERT_TRUE(setRawManifestForCsv(csv, csvSize, 2U, manifest));
+    workspace = {entries, 4U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    MemoryDatasetCsvSource columnSource{
+        reinterpret_cast<const std::uint8_t*>(csv), csvSize};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::DatasetValidationStatus::
+                             CompleteWithRejectedRows),
+        static_cast<int>(validator.validateRawSamples(
+            columnSource, manifest, workspace, quarantine, 4U, report)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::dataset::RawRowRejectionReason::WrongColumnCount),
+        static_cast<int>(quarantine[0U].reason));
+
+    TEST_ASSERT_TRUE(createRawSamplesCsv(csv, sizeof(csv), csvSize));
+    char* numeric = std::strstr(csv, ",10,20");
+    TEST_ASSERT_NOT_NULL(numeric);
+    numeric[2] = 'x';
+    TEST_ASSERT_TRUE(setRawManifestForCsv(csv, csvSize, 2U, manifest));
+    workspace = {entries, 4U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    MemoryDatasetCsvSource noQuarantineSource{
+        reinterpret_cast<const std::uint8_t*>(csv), csvSize};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::DatasetValidationStatus::
+                             QuarantineCapacityExceeded),
+        static_cast<int>(validator.validateRawSamples(
+            noQuarantineSource, manifest, workspace, nullptr, 0U, report)));
+}
+
+void testDsdRawDatasetValidatorChecksHeaderAndRecordCapacity() {
+    project::dataset::DatasetValidator validator{};
+    project::dataset::IdentityWorkspaceEntry entries[4]{};
+    std::uint8_t keyBytes[12000]{};
+    project::dataset::DatasetValidationWorkspace workspace{
+        entries, 4U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    project::dataset::QuarantineReference quarantine[2]{};
+    project::dataset::DatasetValidationReport report{};
+    project::dataset::RawDatasetManifest manifest{};
+
+    char wrongHeader[1024]{};
+    std::size_t wrongHeaderSize = 0U;
+    TEST_ASSERT_TRUE(createRawSamplesCsv(wrongHeader, sizeof(wrongHeader),
+                                        wrongHeaderSize));
+    wrongHeader[0U] = 'x';
+    TEST_ASSERT_TRUE(setRawManifestForCsv(wrongHeader, wrongHeaderSize, 2U,
+                                          manifest));
+    MemoryDatasetCsvSource headerSource{
+        reinterpret_cast<const std::uint8_t*>(wrongHeader), wrongHeaderSize};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::dataset::DatasetValidationStatus::HeaderSchemaMismatch),
+        static_cast<int>(validator.validateRawSamples(
+            headerSource, manifest, workspace, quarantine, 2U, report)));
+
+    char exact[8192]{};
+    std::size_t exactSize = 0U;
+    char header[1024]{};
+    std::size_t headerSize = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::CsvWriteStatus::Ok),
+        static_cast<int>(project::dataset::writeDsdV1_2RawSampleCoreHeader(
+            header, sizeof(header), headerSize)));
+    std::memcpy(exact, header, headerSize);
+    exactSize = headerSize;
+    char baseRow[5000]{};
+    std::size_t baseRowSize = 0U;
+    TEST_ASSERT_TRUE(appendRawSampleCsvRow(baseRow, sizeof(baseRow),
+                                           baseRowSize, 0U, 1000U));
+    std::array<char, project::dataset::kMaxRawCsvRecordBytes> event{};
+    const std::size_t eventLength =
+        project::dataset::kMaxRawCsvRecordBytes - baseRowSize;
+    event.fill('e');
+    TEST_ASSERT_TRUE(appendRawSampleCsvRow(
+        exact, sizeof(exact), exactSize, 0U, 1000U,
+        "10", std::string_view(event.data(), eventLength)));
+    TEST_ASSERT_EQUAL_UINT32(
+        static_cast<std::uint32_t>(project::dataset::kMaxRawCsvRecordBytes),
+        static_cast<std::uint32_t>(exactSize - headerSize));
+    TEST_ASSERT_TRUE(setRawManifestForCsv(exact, exactSize, 1U, manifest));
+    workspace = {entries, 4U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    MemoryDatasetCsvSource exactSource{
+        reinterpret_cast<const std::uint8_t*>(exact), exactSize};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::DatasetValidationStatus::Complete),
+        static_cast<int>(validator.validateRawSamples(
+            exactSource, manifest, workspace, quarantine, 2U, report)));
+
+    char overlong[8192]{};
+    std::size_t overlongSize = 0U;
+    std::memcpy(overlong, header, headerSize);
+    overlongSize = headerSize;
+    TEST_ASSERT_TRUE(appendRawSampleCsvRow(
+        overlong, sizeof(overlong), overlongSize, 0U, 1000U,
+        "10", std::string_view(event.data(), eventLength + 1U)));
+    TEST_ASSERT_TRUE(setRawManifestForCsv(overlong, overlongSize, 1U,
+                                          manifest));
+    workspace = {entries, 4U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    MemoryDatasetCsvSource overlongSource{
+        reinterpret_cast<const std::uint8_t*>(overlong), overlongSize};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::dataset::DatasetValidationStatus::CompleteWithRejectedRows),
+        static_cast<int>(validator.validateRawSamples(
+            overlongSource, manifest, workspace, quarantine, 2U, report)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::dataset::RawRowRejectionReason::RecordTooLong),
+        static_cast<int>(quarantine[0U].reason));
+}
+
+void testDataQualityClassifiesCalibrationInvalidAndContinuity() {
+    auto config = qualityConfig();
+    const auto channelIndex =
+        static_cast<std::size_t>(SensorChannel::SoilMoisturePct);
+    config.calibrationPolicies[channelIndex] = {0U, true, false};
+    project::services::DataQualityService service(config);
+    auto input = goodSensorFrame();
+    project::models::ProcessedFrame output{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::services::DataQualityServiceStatus::Ok),
+        static_cast<int>(service.process(input, 100U, output)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DataQualityState::CALIBRATION_INVALID),
+        static_cast<int>(output.channelQuality[channelIndex]));
+
+    using project::models::DataContinuityState;
+    const auto classify =
+        project::services::DataQualityService::classifyContinuity;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DataContinuityState::Contiguous),
+        static_cast<int>(classify(1U, 4U, 100U, 1U, 5U, 200U, 100.0, 0U)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DataContinuityState::SequenceGap),
+        static_cast<int>(classify(1U, 4U, 100U, 1U, 6U, 200U, 100.0, 0U)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DataContinuityState::OutOfOrder),
+        static_cast<int>(classify(1U, 4U, 100U, 1U, 4U, 200U, 100.0, 0U)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DataContinuityState::BootChanged),
+        static_cast<int>(classify(1U, 4U, 100U, 2U, 0U, 0U, 100.0, 0U)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DataContinuityState::TimestampDiscontinuity),
+        static_cast<int>(classify(1U, 4U, 100U, 1U, 5U, 201U, 100.0, 0U)));
+}
+
+void testFeaturePipelineRejectsInvalidQualityAndPropagatesWindowSummary() {
+    project::services::FeaturePipeline invalidPipeline(featureConfig());
+    auto invalidFrame = goodProcessedFrame(1U, 1000U, 0.0F, 0.0F, 1.0F);
+    invalidFrame.channelQuality[static_cast<std::size_t>(
+        SensorChannel::AccelYG)] = DataQualityState::CALIBRATION_INVALID;
+    TEST_ASSERT_FALSE(invalidPipeline.push(invalidFrame));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::models::WindowEligibilityState::Rejected),
+        static_cast<int>(invalidPipeline.windowQuality().eligibility));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::models::WindowRejectionReason::RequiredChannelQuality),
+        static_cast<int>(invalidPipeline.windowQuality().rejectionReason));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(SensorChannel::AccelYG),
+        static_cast<int>(invalidPipeline.windowQuality().rejectedChannel));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DataQualityState::CALIBRATION_INVALID),
+        static_cast<int>(
+            invalidPipeline.windowQuality().rejectedChannelQuality));
+
+    project::services::FeaturePipeline gapPipeline(featureConfig());
+    TEST_ASSERT_TRUE(gapPipeline.push(
+        goodProcessedFrame(1U, 1000U, 0.0F, 0.0F, 1.0F)));
+    TEST_ASSERT_TRUE(gapPipeline.push(
+        goodProcessedFrame(3U, 1200U, 0.0F, 1.0F, 1.0F)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::models::DataContinuityState::SequenceGap),
+        static_cast<int>(gapPipeline.windowQuality().boundaryState));
+    TEST_ASSERT_TRUE(gapPipeline.push(
+        goodProcessedFrame(4U, 1300U, 0.0F, 2.0F, 1.0F)));
+    project::models::FeatureVector features{};
+    TEST_ASSERT_TRUE(gapPipeline.build(features));
+    TEST_ASSERT_EQUAL_UINT64(1200U, features.windowStartMs);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::models::WindowEligibilityState::Eligible),
+        static_cast<int>(features.quality.eligibility));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::models::DataContinuityState::SequenceGap),
+        static_cast<int>(features.quality.boundaryState));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DataQualityState::VALID),
+        static_cast<int>(features.quality.channelQuality[static_cast<std::size_t>(
+            SensorChannel::AccelXG)]));
+
+    project::services::FeaturePipeline orderPipeline(featureConfig());
+    TEST_ASSERT_TRUE(orderPipeline.push(
+        goodProcessedFrame(2U, 1100U, 0.0F, 0.0F, 1.0F)));
+    TEST_ASSERT_FALSE(orderPipeline.push(
+        goodProcessedFrame(2U, 1200U, 0.0F, 1.0F, 1.0F)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::models::WindowRejectionReason::OutOfOrder),
+        static_cast<int>(orderPipeline.windowQuality().rejectionReason));
+    TEST_ASSERT_FALSE(orderPipeline.windowReady());
+}
+
+void testFeaturePipelinePinsInputSchemaAndRejectsChanges() {
+    project::services::FeaturePipeline pipeline(featureConfig());
+    auto first = goodProcessedFrame(1U, 1000U, 0.0F, 0.0F, 1.0F);
+    first.schemaVersion = 11U;
+    TEST_ASSERT_TRUE(pipeline.push(first));
+
+    auto changed = goodProcessedFrame(2U, 1100U, 0.0F, 1.0F, 1.0F);
+    changed.schemaVersion = 12U;
+    TEST_ASSERT_FALSE(pipeline.push(changed));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::services::FeaturePipelineStatus::
+                             InvalidConfiguration),
+        static_cast<int>(pipeline.status()));
+    TEST_ASSERT_FALSE(pipeline.windowReady());
+
+    auto sameSchema = goodProcessedFrame(2U, 1100U, 0.0F, 1.0F, 1.0F);
+    sameSchema.schemaVersion = 11U;
+    TEST_ASSERT_TRUE(pipeline.push(sameSchema));
+    auto next = goodProcessedFrame(3U, 1200U, 0.0F, 1.0F, 1.0F);
+    next.schemaVersion = 11U;
+    TEST_ASSERT_TRUE(pipeline.push(next));
+
+    project::models::FeatureVector output{};
+    TEST_ASSERT_TRUE(pipeline.build(output));
+    TEST_ASSERT_EQUAL_UINT64(1100U, output.windowStartMs);
+}
+
+void testFeaturePipelineResetsAtBootCalibrationAndSensorBoundaries() {
+    project::models::FeatureVector output{};
+
+    project::services::FeaturePipeline timestampPipeline(featureConfig());
+    TEST_ASSERT_TRUE(timestampPipeline.push(
+        goodProcessedFrame(1U, 1000U, 0.0F, 0.0F, 1.0F)));
+    TEST_ASSERT_TRUE(timestampPipeline.push(
+        goodProcessedFrame(2U, 1200U, 0.0F, 1.0F, 1.0F)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::models::DataContinuityState::TimestampDiscontinuity),
+        static_cast<int>(timestampPipeline.windowQuality().boundaryState));
+    TEST_ASSERT_TRUE(timestampPipeline.push(
+        goodProcessedFrame(3U, 1300U, 0.0F, 1.0F, 1.0F)));
+    TEST_ASSERT_TRUE(timestampPipeline.build(output));
+    TEST_ASSERT_EQUAL_UINT64(1200U, output.windowStartMs);
+
+    project::services::FeaturePipeline bootPipeline(featureConfig());
+    TEST_ASSERT_TRUE(bootPipeline.push(
+        goodProcessedFrame(10U, 1000U, 0.0F, 0.0F, 1.0F)));
+    auto rebooted = goodProcessedFrame(0U, 0U, 0.0F, 1.0F, 1.0F);
+    rebooted.bootId = 6U;
+    TEST_ASSERT_TRUE(bootPipeline.push(rebooted));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::models::DataContinuityState::BootChanged),
+        static_cast<int>(bootPipeline.windowQuality().boundaryState));
+    auto postReboot = goodProcessedFrame(1U, 100U, 0.0F, 1.0F, 1.0F);
+    postReboot.bootId = 6U;
+    TEST_ASSERT_TRUE(bootPipeline.push(postReboot));
+    TEST_ASSERT_TRUE(bootPipeline.build(output));
+    TEST_ASSERT_EQUAL_UINT64(0U, output.windowStartMs);
+    TEST_ASSERT_EQUAL_UINT64(6U, output.bootId);
+
+    project::services::FeaturePipeline calibrationPipeline(featureConfig());
+    TEST_ASSERT_TRUE(calibrationPipeline.push(
+        goodProcessedFrame(1U, 1000U, 0.0F, 0.0F, 1.0F)));
+    auto recalibrated = goodProcessedFrame(2U, 1100U, 0.0F, 1.0F, 1.0F);
+    recalibrated.calibrationVersion = 2U;
+    TEST_ASSERT_TRUE(calibrationPipeline.push(recalibrated));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::models::DataContinuityState::CalibrationChanged),
+        static_cast<int>(calibrationPipeline.windowQuality().boundaryState));
+    auto postCalibration = goodProcessedFrame(3U, 1200U, 0.0F, 1.0F, 1.0F);
+    postCalibration.calibrationVersion = 2U;
+    TEST_ASSERT_TRUE(calibrationPipeline.push(postCalibration));
+    TEST_ASSERT_TRUE(calibrationPipeline.build(output));
+    TEST_ASSERT_EQUAL_UINT64(1100U, output.windowStartMs);
+
+    project::services::FeaturePipeline restartPipeline(featureConfig());
+    TEST_ASSERT_TRUE(restartPipeline.push(
+        goodProcessedFrame(1U, 1000U, 0.0F, 0.0F, 1.0F)));
+    restartPipeline.resetWindow();
+    TEST_ASSERT_FALSE(restartPipeline.windowReady());
+    TEST_ASSERT_TRUE(restartPipeline.push(
+        goodProcessedFrame(2U, 1100U, 0.0F, 1.0F, 1.0F)));
+    TEST_ASSERT_TRUE(restartPipeline.push(
+        goodProcessedFrame(3U, 1200U, 0.0F, 1.0F, 1.0F)));
+    TEST_ASSERT_TRUE(restartPipeline.build(output));
+    TEST_ASSERT_EQUAL_UINT64(1100U, output.windowStartMs);
+}
+
+void testFeaturePipelineGoldenSyntheticTiltFixture() {
+    auto config = featureConfig();
+    config.featureCount = 1U;
+    config.features[0] = {
+        project::services::FssFeatureId::TiltXDeg, 0U, true};
+    config.windowLengthSamples = 2U;
+
+    project::services::FeaturePipeline pipeline(config);
+    TEST_ASSERT_TRUE(pipeline.push(
+        goodProcessedFrame(20U, 2000U, 1.0F, 0.0F, 1.0F)));
+    TEST_ASSERT_FALSE(pipeline.windowReady());
+    TEST_ASSERT_TRUE(pipeline.push(
+        goodProcessedFrame(21U, 2100U, 1.0F, 1.0F, 1.0F)));
+    TEST_ASSERT_TRUE(pipeline.windowReady());
+
+    project::models::FeatureVector output{};
+    TEST_ASSERT_TRUE(pipeline.build(output));
+    TEST_ASSERT_EQUAL_UINT16(2U, output.count);
+    TEST_ASSERT_FLOAT_WITHIN(0.001F, 0.0F, output.values[0]);
+    TEST_ASSERT_FLOAT_WITHIN(0.02F, 35.26439F, output.values[1]);
+}
+
+project::dataset::AnnotationTargetContract annotationTargetContract() {
+    return {"test-contract", "test-target", "test-unit", 3U, true};
+}
+
+project::dataset::AnnotationRecord independentAnnotation(
+    std::string_view annotationId = "annotation-1") {
+    using namespace project::dataset;
+    AnnotationRecord record{};
+    record.annotationId.assign(annotationId);
+    record.datasetId.assign("dataset-1");
+    record.siteId.assign("site-1");
+    record.sessionId.assign("session-1");
+    record.bootId = 7U;
+    record.intervalStartMs = 100U;
+    record.intervalEndMs = 200U;
+    record.targetName.assign("test-target");
+    record.targetValue = 0.25;
+    record.targetValueValid = true;
+    record.targetUnit.assign("test-unit");
+    record.targetContractId.assign("test-contract");
+    record.targetContractVersion = 3U;
+    record.status = AnnotationStatus::Accepted;
+    record.provenance = {DataOrigin::Field, EvidenceClass::GT2};
+    record.evidenceReference.assign("test-evidence-ref");
+    record.annotator.assign("test-annotator");
+    record.reviewer.assign("test-reviewer");
+    record.confidence = 0.8;
+    record.confidenceValid = true;
+    record.uncertainty = 0.1;
+    record.uncertaintyValid = true;
+    record.labelMethodVersion.assign("test-method-v1");
+    return record;
+}
+
+void testAnnotationManagerKeepsLabelsSeparateAndExportsContractRows() {
+    using namespace project::dataset;
+    AnnotationRecord records[2]{};
+    AnnotationManager manager(records, 2U);
+    const auto contract = annotationTargetContract();
+    const auto annotation = independentAnnotation();
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(AnnotationManagerStatus::Ok),
+        static_cast<int>(manager.add(annotation, contract)));
+    TEST_ASSERT_EQUAL_UINT64(1U, manager.size());
+    TEST_ASSERT_EQUAL_STRING("annotation-1",
+                             manager.record(0U)->annotationId.bytes.data());
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DataOrigin::Field),
+        static_cast<int>(manager.record(0U)->provenance.origin));
+
+    char header[512]{};
+    std::size_t headerSize = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(AnnotationManagerStatus::Ok),
+        static_cast<int>(
+            manager.writeCsvHeader(header, sizeof(header), headerSize)));
+    TEST_ASSERT_TRUE(headerSize > 0U);
+    TEST_ASSERT_EQUAL('\n', header[headerSize - 1U]);
+    TEST_ASSERT_EQUAL_UINT32(
+        static_cast<std::uint32_t>(kAnnotationCsvColumns - 1U),
+        static_cast<std::uint32_t>(
+            std::count(header, header + headerSize, ',')));
+
+    char row[1024]{};
+    std::size_t rowSize = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(AnnotationManagerStatus::Ok),
+        static_cast<int>(manager.writeCsvRow(
+            0U, row, sizeof(row), rowSize)));
+    TEST_ASSERT_TRUE(std::strstr(row, "ACCEPTED,FIELD,GT2") != nullptr);
+    TEST_ASSERT_TRUE(std::strstr(row, "0.25,true") != nullptr);
+    TEST_ASSERT_EQUAL('\n', row[rowSize - 1U]);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(AnnotationManagerStatus::InvalidArgument),
+        static_cast<int>(manager.writeCsvRow(1U, row, sizeof(row), rowSize)));
+
+    const AnnotationWindowInterval overlap{
+        "dataset-1", "site-1", "session-1", 7U, 199U, 250U};
+    const AnnotationWindowInterval endBoundary{
+        "dataset-1", "site-1", "session-1", 7U, 200U, 250U};
+    const AnnotationWindowInterval wrongBoot{
+        "dataset-1", "site-1", "session-1", 8U, 150U, 250U};
+    TEST_ASSERT_TRUE(AnnotationManager::matchesWindow(annotation, overlap));
+    TEST_ASSERT_FALSE(
+        AnnotationManager::matchesWindow(annotation, endBoundary));
+    TEST_ASSERT_FALSE(AnnotationManager::matchesWindow(annotation, wrongBoot));
+
+    AnnotationWindowInterval timestampOnly{
+        "dataset-1", "site-2", "session-1", 7U, 150U, 175U};
+    TEST_ASSERT_FALSE(
+        AnnotationManager::matchesWindow(annotation, timestampOnly));
+}
+
+void testAnnotationManagerRejectsUndefinedTargetAndReportsSyntheticProxy() {
+    using namespace project::dataset;
+    AnnotationRecord records[3]{};
+    AnnotationManager manager(records, 3U);
+    auto annotation = independentAnnotation("undefined-target");
+    const auto unapproved =
+        AnnotationTargetContract{"test-contract", "test-target", "test-unit",
+                                 3U, false};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            AnnotationManagerStatus::TargetContractNotApproved),
+        static_cast<int>(manager.add(annotation, unapproved)));
+    TEST_ASSERT_EQUAL_UINT64(0U, manager.size());
+
+    annotation = independentAnnotation("synthetic-proxy");
+    annotation.provenance = {DataOrigin::Synthetic, EvidenceClass::GT5};
+    annotation.kind = AnnotationKind::SyntheticProxy;
+    annotation.evidenceReference.assign("synthetic-formula-version");
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(AnnotationManagerStatus::Ok),
+        static_cast<int>(
+            manager.add(annotation, annotationTargetContract())));
+    TEST_ASSERT_EQUAL_UINT64(1U, manager.report().syntheticProxy);
+    TEST_ASSERT_EQUAL_UINT64(1U, manager.report().gt5);
+
+    auto invalidSynthetic = independentAnnotation("bad-synthetic");
+    invalidSynthetic.provenance = {DataOrigin::Synthetic, EvidenceClass::GT4};
+    invalidSynthetic.kind = AnnotationKind::SyntheticProxy;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(AnnotationManagerStatus::InvalidAnnotation),
+        static_cast<int>(manager.add(invalidSynthetic,
+                                     annotationTargetContract())));
+
+    auto unlabeled = independentAnnotation("unlabeled");
+    unlabeled.status = AnnotationStatus::Unlabeled;
+    unlabeled.targetName = {};
+    unlabeled.targetValue = 0.0;
+    unlabeled.targetValueValid = false;
+    unlabeled.targetUnit = {};
+    unlabeled.targetContractId = {};
+    unlabeled.targetContractVersion = 0U;
+    unlabeled.provenance = {DataOrigin::Field, EvidenceClass::NotApplicable};
+    unlabeled.evidenceReference = {};
+    unlabeled.labelMethodVersion = {};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(AnnotationManagerStatus::Ok),
+        static_cast<int>(manager.add(unlabeled, {})));
+}
+
+void testAnnotationManagerRejectsDuplicatesBoundsAndNonFiniteValues() {
+    using namespace project::dataset;
+    AnnotationRecord records[1]{};
+    AnnotationManager manager(records, 1U);
+    const auto contract = annotationTargetContract();
+    auto annotation = independentAnnotation();
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(AnnotationManagerStatus::Ok),
+        static_cast<int>(manager.add(annotation, contract)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(AnnotationManagerStatus::DuplicateAnnotation),
+        static_cast<int>(manager.add(annotation, contract)));
+
+    auto second = independentAnnotation("annotation-2");
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(AnnotationManagerStatus::CapacityExceeded),
+        static_cast<int>(manager.add(second, contract)));
+
+    AnnotationRecord bounded{};
+    char oversizedId[65]{};
+    std::memset(oversizedId, 'x', sizeof(oversizedId) - 1U);
+    TEST_ASSERT_FALSE(bounded.annotationId.assign(
+        std::string_view(oversizedId, sizeof(oversizedId) - 1U)));
+    auto nonFinite = independentAnnotation("non-finite");
+    nonFinite.targetValue = std::numeric_limits<double>::quiet_NaN();
+    AnnotationRecord storage2[1]{};
+    AnnotationManager nonFiniteManager(storage2, 1U);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(AnnotationManagerStatus::InvalidAnnotation),
+        static_cast<int>(nonFiniteManager.add(nonFinite, contract)));
+}
+
+void testDatasetSplitterKeepsGroupsTogetherAndExportsAssignments() {
+    using namespace project::dataset;
+    const DatasetSplitPolicy policy{4U, 77U, 7000U, 1500U, 1500U};
+    const DatasetWindowDescriptor windows[] = {
+        {"window-1", "dataset", "site", "session-a", "group-a", 1U, 0U, 9U,
+         {DataOrigin::Field, EvidenceClass::GT2}},
+        {"window-2", "dataset", "site", "session-a", "group-a", 1U, 5U, 14U,
+         {DataOrigin::Field, EvidenceClass::GT2}},
+        {"window-3", "dataset", "site", "session-a", "group-b", 1U, 15U,
+         24U, {DataOrigin::Field, EvidenceClass::GT2}},
+        {"window-4", "dataset", "site", "session-b", "group-c", 1U, 0U, 9U,
+         {DataOrigin::Synthetic, EvidenceClass::GT5}},
+        {"window-5", "dataset", "site", "session-c", "group-d", 1U, 0U, 9U,
+         {DataOrigin::Synthetic, EvidenceClass::GT5}}};
+    DatasetSplitGroupEntry groups[5]{};
+    DatasetSplitWorkspace workspace{groups, 5U, 0U};
+    DatasetWindowSplitAssignment assignments[5]{};
+    DatasetSplitReport report{};
+    DatasetSplitter splitter{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetSplitStatus::Ok),
+        static_cast<int>(splitter.assign(policy, windows, 5U, workspace,
+                                          assignments, 5U, report)));
+    TEST_ASSERT_EQUAL_UINT64(5U, report.windowCount);
+    TEST_ASSERT_EQUAL_UINT64(4U, report.groupCount);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(assignments[0U].split),
+                          static_cast<int>(assignments[1U].split));
+    TEST_ASSERT_EQUAL_UINT32(policy.version, assignments[0U].policyVersion);
+    TEST_ASSERT_EQUAL_UINT64(policy.seed, assignments[0U].seed);
+    std::uint64_t syntheticWindows = 0U;
+    for (std::size_t split = 0U; split < 3U; ++split) {
+        syntheticWindows += report.windowsBySplitAndOrigin[split]
+                                                           [static_cast<std::size_t>(
+                                                               DataOrigin::Synthetic)];
+    }
+    TEST_ASSERT_EQUAL_UINT64(2U, syntheticWindows);
+
+    DatasetSplitGroupEntry repeatGroups[5]{};
+    DatasetSplitWorkspace repeatWorkspace{repeatGroups, 5U, 0U};
+    DatasetWindowSplitAssignment repeated[5]{};
+    DatasetSplitReport repeatedReport{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetSplitStatus::Ok),
+        static_cast<int>(splitter.assign(policy, windows, 5U, repeatWorkspace,
+                                          repeated, 5U, repeatedReport)));
+    for (std::size_t i = 0U; i < 5U; ++i) {
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(assignments[i].split),
+                              static_cast<int>(repeated[i].split));
+    }
+
+    char header[256]{};
+    char row[256]{};
+    std::size_t headerSize = 0U;
+    std::size_t rowSize = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetSplitStatus::Ok),
+        static_cast<int>(DatasetSplitter::writeCsvHeader(
+            header, sizeof(header), headerSize)));
+    TEST_ASSERT_EQUAL_UINT32(
+        static_cast<std::uint32_t>(kDatasetSplitCsvColumns - 1U),
+        static_cast<std::uint32_t>(
+            std::count(header, header + headerSize, ',')));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetSplitStatus::Ok),
+        static_cast<int>(DatasetSplitter::writeCsvRow(
+            assignments[0U], row, sizeof(row), rowSize)));
+    TEST_ASSERT_TRUE(std::strstr(row, "group-a,") != nullptr);
+    TEST_ASSERT_TRUE(std::strstr(row, ",4,77,") != nullptr);
+}
+
+void testDatasetSplitterRejectsLeakageDuplicatesAndCapacityFailures() {
+    using namespace project::dataset;
+    const DatasetSplitPolicy policy{1U, 12U, 6000U, 2000U, 2000U};
+    DatasetSplitGroupEntry groups[4]{};
+    DatasetSplitWorkspace workspace{groups, 4U, 0U};
+    DatasetWindowSplitAssignment assignments[4]{};
+    DatasetSplitReport report{};
+    DatasetSplitter splitter{};
+
+    const DatasetWindowDescriptor overlapping[] = {
+        {"w1", "d", "s", "session", "group-1", 1U, 0U, 10U,
+         {DataOrigin::Field, EvidenceClass::GT1}},
+        {"w2", "d", "s", "session", "group-2", 1U, 10U, 20U,
+         {DataOrigin::Field, EvidenceClass::GT1}}};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetSplitStatus::OverlappingWindowLeakage),
+        static_cast<int>(splitter.assign(policy, overlapping, 2U, workspace,
+                                          assignments, 4U, report)));
+
+    const DatasetWindowDescriptor duplicate[] = {
+        {"same", "d", "s", "session", "group-1", 1U, 0U, 10U,
+         {DataOrigin::Field, EvidenceClass::GT1}},
+        {"same", "d", "s", "session", "group-1", 1U, 11U, 20U,
+         {DataOrigin::Field, EvidenceClass::GT1}}};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetSplitStatus::DuplicateWindow),
+        static_cast<int>(splitter.assign(policy, duplicate, 2U, workspace,
+                                          assignments, 4U, report)));
+
+    const DatasetWindowDescriptor conflictingGroup[] = {
+        {"w1", "d", "s", "session-a", "shared-group", 1U, 0U, 10U,
+         {DataOrigin::Field, EvidenceClass::GT1}},
+        {"w2", "d", "s", "session-b", "shared-group", 1U, 0U, 10U,
+         {DataOrigin::Synthetic, EvidenceClass::GT5}}};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetSplitStatus::InconsistentGroup),
+        static_cast<int>(splitter.assign(policy, conflictingGroup, 2U,
+                                          workspace, assignments, 4U,
+                                          report)));
+
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetSplitStatus::AssignmentCapacityExceeded),
+        static_cast<int>(splitter.assign(policy, overlapping, 2U, workspace,
+                                          assignments, 1U, report)));
+    DatasetSplitWorkspace noGroupSpace{nullptr, 0U, 0U};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetSplitStatus::GroupCapacityExceeded),
+        static_cast<int>(splitter.assign(policy, overlapping, 2U,
+                                          noGroupSpace, assignments, 4U,
+                                          report)));
+    const DatasetSplitPolicy badPolicy{1U, 12U, 5000U, 2500U, 2501U};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetSplitStatus::InvalidPolicy),
+        static_cast<int>(splitter.assign(badPolicy, overlapping, 2U,
+                                          workspace, assignments, 4U,
+                                          report)));
+}
+
+void testDatasetSplitterReportsSyntheticTestSeparatelyFromFieldEvidence() {
+    using namespace project::dataset;
+    constexpr std::size_t count = 64U;
+    DatasetWindowDescriptor synthetic[count]{};
+    DatasetSplitGroupEntry syntheticGroups[count]{};
+    DatasetWindowSplitAssignment syntheticAssignments[count]{};
+    char syntheticSessions[count][24]{};
+    char syntheticWindowIds[count][24]{};
+    char syntheticGroupIds[count][24]{};
+    for (std::size_t i = 0U; i < count; ++i) {
+        std::snprintf(syntheticSessions[i], sizeof(syntheticSessions[i]),
+                      "synthetic-session-%zu", i);
+        std::snprintf(syntheticWindowIds[i], sizeof(syntheticWindowIds[i]),
+                      "synthetic-window-%zu", i);
+        std::snprintf(syntheticGroupIds[i], sizeof(syntheticGroupIds[i]),
+                      "synthetic-group-%zu", i);
+        synthetic[i] = {syntheticWindowIds[i], "dataset", "site",
+                        syntheticSessions[i], syntheticGroupIds[i], 1U, 0U,
+                        10U, {DataOrigin::Synthetic, EvidenceClass::GT5}};
+    }
+    const DatasetSplitPolicy testHeavyPolicy{2U, 5U, 1U, 1U, 9998U};
+    DatasetSplitWorkspace syntheticWorkspace{syntheticGroups, count, 0U};
+    DatasetSplitReport syntheticReport{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetSplitStatus::Ok),
+        static_cast<int>(DatasetSplitter{}.assign(
+            testHeavyPolicy, synthetic, count, syntheticWorkspace,
+            syntheticAssignments, count, syntheticReport)));
+    TEST_ASSERT_TRUE(syntheticReport.hasTestGroups);
+    TEST_ASSERT_TRUE(syntheticReport.testGroupsSyntheticGt5Only);
+    TEST_ASSERT_FALSE(syntheticReport.testContainsFieldGt1ToGt4);
+
+    DatasetWindowDescriptor field{};
+    DatasetSplitGroupEntry fieldGroups[1]{};
+    DatasetWindowSplitAssignment fieldAssignment[1]{};
+    DatasetSplitWorkspace fieldWorkspace{fieldGroups, 1U, 0U};
+    DatasetSplitReport fieldReport{};
+    bool foundFieldTest = false;
+    for (std::size_t i = 0U; i < count && !foundFieldTest; ++i) {
+        char session[24]{};
+        char window[24]{};
+        char group[24]{};
+        std::snprintf(session, sizeof(session), "field-session-%zu", i);
+        std::snprintf(window, sizeof(window), "field-window-%zu", i);
+        std::snprintf(group, sizeof(group), "field-group-%zu", i);
+        field = {window, "field-dataset", "field-site", session, group, 1U,
+                 0U, 10U, {DataOrigin::Field, EvidenceClass::GT2}};
+        fieldWorkspace.groupCount = 0U;
+        TEST_ASSERT_EQUAL_INT(
+            static_cast<int>(DatasetSplitStatus::Ok),
+            static_cast<int>(DatasetSplitter{}.assign(
+                testHeavyPolicy, &field, 1U, fieldWorkspace, fieldAssignment,
+                1U, fieldReport)));
+        foundFieldTest =
+            fieldAssignment[0U].split == DatasetSplit::Test;
+    }
+    TEST_ASSERT_TRUE(foundFieldTest);
+    TEST_ASSERT_TRUE(fieldReport.testContainsFieldGt1ToGt4);
+    TEST_ASSERT_FALSE(fieldReport.testGroupsSyntheticGt5Only);
+}
+
+project::dataset::EvaluationConfig evaluationConfig(
+    bool targetApproved = true) {
+    using namespace project::dataset;
+    EvaluationConfig config{};
+    config.featureSchemaVersion = 1U;
+    config.featureSchemaId = 1U;
+    config.featureSchemaHash[0] = 0xA5U;
+    config.featureCount = 2U;
+    config.featureSchemaHashValid = true;
+    config.featureSchemaApproved = true;
+    config.targetContract = annotationTargetContract();
+    config.targetContract.approved = targetApproved;
+    config.regressionMetricsApproved = true;
+    return config;
+}
+
+project::models::FeatureVector evaluationFeature(float first,
+                                                float second) {
+    project::models::FeatureVector feature{};
+    feature.schemaVersion = 1U;
+    feature.schemaId = 1U;
+    feature.schemaHashSha256[0] = 0xA5U;
+    feature.schemaHashValid = true;
+    feature.bootId = 7U;
+    feature.relatedSequenceNo = 1U;
+    feature.windowStartMs = 100U;
+    feature.windowEndMs = 200U;
+    feature.windowSampleCount = 1U;
+    feature.count = 2U;
+    feature.featureValidMask = 3U;
+    feature.values[0] = first;
+    feature.values[1] = second;
+    feature.quality.eligibility =
+        project::models::WindowEligibilityState::Eligible;
+    feature.quality.rejectionReason =
+        project::models::WindowRejectionReason::None;
+    feature.quality.channelQuality.fill(
+        project::models::DataQualityState::VALID);
+    feature.valid = true;
+    return feature;
+}
+
+project::models::ModelOutput evaluationPrediction(float value) {
+    project::models::ModelOutput prediction{};
+    prediction.status = InferenceStatus::Ok;
+    prediction.outputCount = 1U;
+    prediction.rawOutputs[0] = value;
+    prediction.predictionValue = value;
+    prediction.predictionValid = true;
+    return prediction;
+}
+
+project::dataset::EvaluationWindow evaluationWindow(
+    std::string_view id, const project::models::FeatureVector& features,
+    const project::dataset::AnnotationRecord* annotation,
+    const project::models::ModelOutput* prediction,
+    project::dataset::DataProvenance provenance =
+        {project::dataset::DataOrigin::Field,
+         project::dataset::EvidenceClass::GT2}) {
+    return {id,
+            {"dataset-1", "site-1", "session-1", 7U, 100U, 200U},
+            provenance,
+            project::dataset::DatasetSplit::Test,
+            &features,
+            annotation,
+            prediction};
+}
+
+void testEvaluationRunnerReportsFeatureAndApprovedRegressionMetrics() {
+    using namespace project::dataset;
+    auto featuresA = evaluationFeature(2.0F, 4.0F);
+    auto featuresB = evaluationFeature(4.0F, 6.0F);
+    auto annotationA = independentAnnotation("eval-label-a");
+    auto annotationB = independentAnnotation("eval-label-b");
+    annotationA.targetValue = 1.0;
+    annotationB.targetValue = 3.0;
+    auto predictionA = evaluationPrediction(0.0F);
+    auto predictionB = evaluationPrediction(4.0F);
+    const EvaluationWindow windows[] = {
+        evaluationWindow("eval-window-a", featuresA, &annotationA,
+                         &predictionA),
+        evaluationWindow("eval-window-b", featuresB, &annotationB,
+                         &predictionB)};
+
+    EvaluationReport report{};
+    EvaluationRunner runner(evaluationConfig());
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(EvaluationStatus::Ok),
+        static_cast<int>(runner.evaluate(windows, 2U, report)));
+    const auto& bucket = report.buckets
+        [static_cast<std::size_t>(DataOrigin::Field)]
+        [static_cast<std::size_t>(EvidenceClass::GT2)]
+        [static_cast<std::size_t>(DatasetSplit::Test)];
+    const auto& metrics = report.independentMetrics
+        [static_cast<std::size_t>(DataOrigin::Field)]
+        [static_cast<std::size_t>(EvidenceClass::GT2)]
+        [static_cast<std::size_t>(DatasetSplit::Test)];
+    TEST_ASSERT_EQUAL_UINT64(2U, bucket.windowCount);
+    TEST_ASSERT_EQUAL_UINT64(2U, bucket.featureEligibleCount);
+    TEST_ASSERT_EQUAL_UINT64(2U, bucket.eligibleLabelCount);
+    TEST_ASSERT_EQUAL_UINT64(2U, metrics.predictionPairCount);
+    TEST_ASSERT_TRUE(metrics.targetRangeValid);
+    TEST_ASSERT_FLOAT_WITHIN(
+        0.0001F, 1.0F, static_cast<float>(metrics.targetMinimum));
+    TEST_ASSERT_FLOAT_WITHIN(
+        0.0001F, 3.0F, static_cast<float>(metrics.targetMaximum));
+    TEST_ASSERT_FLOAT_WITHIN(
+        0.0001F, 1.0F, static_cast<float>(metrics.meanAbsoluteError));
+    TEST_ASSERT_FLOAT_WITHIN(
+        0.0001F, 1.0F,
+        static_cast<float>(metrics.rootMeanSquaredError));
+    TEST_ASSERT_TRUE(metrics.rSquaredValid);
+    TEST_ASSERT_FLOAT_WITHIN(
+        0.0001F, 0.0F, static_cast<float>(metrics.rSquared));
+    TEST_ASSERT_EQUAL_UINT64(2U, report.features[0U].finiteCount);
+    TEST_ASSERT_FLOAT_WITHIN(
+        0.0001F, 3.0F, static_cast<float>(report.features[0U].mean));
+    TEST_ASSERT_FLOAT_WITHIN(
+        0.0001F, 1.0F, static_cast<float>(report.features[0U].variance));
+
+    char header[512]{};
+    std::size_t bytesWritten = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(EvaluationStatus::Ok),
+        static_cast<int>(EvaluationRunner::writeSummaryCsvHeader(
+            header, sizeof(header), bytesWritten)));
+    TEST_ASSERT_EQUAL('\n', header[bytesWritten - 1U]);
+    TEST_ASSERT_EQUAL_UINT32(
+        20U, static_cast<std::uint32_t>(
+                 std::count(header, header + bytesWritten, ',')));
+    char summaryRow[1024]{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(EvaluationStatus::Ok),
+        static_cast<int>(EvaluationRunner::writeSummaryCsvRow(
+            report, DataOrigin::Field, EvidenceClass::GT2, DatasetSplit::Test,
+            summaryRow, sizeof(summaryRow), bytesWritten)));
+    TEST_ASSERT_TRUE(std::strstr(summaryRow, "INDEPENDENT,2,2,1,3,1,1,0,true") !=
+                     nullptr);
+    char featureHeader[256]{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(EvaluationStatus::Ok),
+        static_cast<int>(EvaluationRunner::writeFeatureCsvHeader(
+            featureHeader, sizeof(featureHeader), bytesWritten)));
+    TEST_ASSERT_EQUAL_UINT32(
+        9U, static_cast<std::uint32_t>(
+                std::count(featureHeader,
+                           featureHeader + bytesWritten, ',')));
+    char featureRow[256]{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(EvaluationStatus::Ok),
+        static_cast<int>(EvaluationRunner::writeFeatureCsvRow(
+            0U, report.features[0U], featureRow, sizeof(featureRow),
+            bytesWritten)));
+    TEST_ASSERT_TRUE(std::strstr(featureRow, ",2,0,0,2,2,4,3,1\n") != nullptr);
+}
+
+void testEvaluationRunnerDisablesUndefinedTargetsAndSeparatesGt5Proxy() {
+    using namespace project::dataset;
+    auto features = evaluationFeature(1.0F, 2.0F);
+    auto annotation = independentAnnotation("eval-unapproved-label");
+    auto prediction = evaluationPrediction(0.5F);
+    const auto window = evaluationWindow(
+        "eval-window-unapproved", features, &annotation, &prediction);
+    EvaluationReport report{};
+    EvaluationRunner unapproved(evaluationConfig(false));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(EvaluationStatus::Ok),
+        static_cast<int>(unapproved.evaluate(&window, 1U, report)));
+    TEST_ASSERT_FALSE(report.regressionMetricsEnabled);
+    TEST_ASSERT_EQUAL_UINT64(0U, report.independentMetrics
+                                     [static_cast<std::size_t>(DataOrigin::Field)]
+                                     [static_cast<std::size_t>(EvidenceClass::GT2)]
+                                     [static_cast<std::size_t>(DatasetSplit::Test)]
+                                         .predictionPairCount);
+    TEST_ASSERT_EQUAL_UINT64(1U, report.targetExcludedCount);
+
+    annotation.annotationId.assign("eval-synthetic-proxy");
+    annotation.provenance = {DataOrigin::Synthetic, EvidenceClass::GT5};
+    annotation.kind = AnnotationKind::SyntheticProxy;
+    annotation.evidenceReference.assign("test-proxy-formula-v1");
+    auto synthetic = evaluationWindow(
+        "eval-window-synthetic", features, &annotation, &prediction,
+        {DataOrigin::Synthetic, EvidenceClass::GT5});
+    EvaluationRunner approved(evaluationConfig());
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(EvaluationStatus::Ok),
+        static_cast<int>(approved.evaluate(&synthetic, 1U, report)));
+    const auto splitId = static_cast<std::size_t>(DatasetSplit::Test);
+    TEST_ASSERT_EQUAL_UINT64(
+        1U, report.syntheticProxyMetrics[splitId].eligibleLabelCount);
+    TEST_ASSERT_EQUAL_UINT64(
+        1U, report.syntheticProxyMetrics[splitId].predictionPairCount);
+    TEST_ASSERT_EQUAL_UINT64(
+        0U, report.independentMetrics
+               [static_cast<std::size_t>(DataOrigin::Synthetic)]
+               [static_cast<std::size_t>(EvidenceClass::GT5)]
+               [splitId]
+                   .predictionPairCount);
+    char row[1024]{};
+    std::size_t bytesWritten = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(EvaluationStatus::Ok),
+        static_cast<int>(EvaluationRunner::writeSummaryCsvRow(
+            report, DataOrigin::Synthetic, EvidenceClass::GT5,
+            DatasetSplit::Test, row, sizeof(row), bytesWritten)));
+    TEST_ASSERT_TRUE(std::strstr(row, "SYNTHETIC_PROXY,1,1") != nullptr);
+
+    synthetic.prediction = nullptr;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(EvaluationStatus::Ok),
+        static_cast<int>(approved.evaluate(&synthetic, 1U, report)));
+    TEST_ASSERT_EQUAL_UINT64(
+        1U, report.buckets[static_cast<std::size_t>(DataOrigin::Synthetic)]
+                            [static_cast<std::size_t>(EvidenceClass::GT5)]
+                            [splitId]
+                                .missingPredictionCount);
+    TEST_ASSERT_EQUAL_UINT64(
+        0U, report.syntheticProxyMetrics[splitId].predictionPairCount);
+}
+
+void testEvaluationRunnerCountsMissingRejectedAndJoinFailures() {
+    using namespace project::dataset;
+    auto validFeatures = evaluationFeature(2.0F, 4.0F);
+    auto invalidFeatures = evaluationFeature(
+        std::numeric_limits<float>::infinity(), 0.0F);
+    invalidFeatures.featureValidMask = 1U;
+    invalidFeatures.valid = false;
+    invalidFeatures.quality.eligibility =
+        project::models::WindowEligibilityState::Rejected;
+    invalidFeatures.quality.rejectionReason =
+        project::models::WindowRejectionReason::RequiredChannelQuality;
+    auto validAnnotation = independentAnnotation("eval-good");
+    auto mismatchedAnnotation = independentAnnotation("eval-wrong-boot");
+    mismatchedAnnotation.bootId = 8U;
+    auto prediction = evaluationPrediction(1.0F);
+    const EvaluationWindow windows[] = {
+        evaluationWindow("eval-good-window", validFeatures, &validAnnotation,
+                         &prediction),
+        evaluationWindow("eval-rejected-window", invalidFeatures,
+                         &validAnnotation, &prediction),
+        evaluationWindow("eval-join-window", validFeatures,
+                         &mismatchedAnnotation, &prediction)};
+    EvaluationConfig config = evaluationConfig();
+    config.upstreamRejectedCount = 2U;
+    EvaluationReport report{};
+    EvaluationRunner runner(config);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(EvaluationStatus::Ok),
+        static_cast<int>(runner.evaluate(windows, 3U, report)));
+    TEST_ASSERT_EQUAL_UINT64(3U, report.totalWindowCount);
+    TEST_ASSERT_EQUAL_UINT64(3U, report.rejectedCount);
+    TEST_ASSERT_EQUAL_UINT64(0U, report.schemaMismatchCount);
+    TEST_ASSERT_EQUAL_UINT64(1U, report.targetJoinMismatchCount);
+    TEST_ASSERT_EQUAL_UINT64(
+        1U, report.qualityStateCounts[static_cast<std::size_t>(
+                project::models::WindowEligibilityState::Rejected)]);
+    TEST_ASSERT_EQUAL_UINT64(
+        1U, report.rejectionReasonCounts[static_cast<std::size_t>(
+                project::models::WindowRejectionReason::RequiredChannelQuality)]);
+    TEST_ASSERT_EQUAL_UINT64(1U, report.features[0U].missingCount);
+    TEST_ASSERT_EQUAL_UINT64(1U, report.features[0U].nonFiniteCount);
+    TEST_ASSERT_EQUAL_UINT64(1U, report.features[1U].missingCount);
+
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(EvaluationStatus::CapacityExceeded),
+        static_cast<int>(runner.evaluate(
+            windows, kMaximumEvaluationWindows + 1U, report)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(EvaluationStatus::InvalidConfiguration),
+        static_cast<int>(EvaluationRunner(EvaluationConfig{}).evaluate(
+            windows, 1U, report)));
+    char tiny[1]{};
+    std::size_t bytesWritten = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(EvaluationStatus::CsvWriteError),
+        static_cast<int>(EvaluationRunner::writeFeatureCsvHeader(
+            tiny, sizeof(tiny), bytesWritten)));
+
+    auto overflowLabel = independentAnnotation("eval-overflow");
+    overflowLabel.targetValue = 1.0e308;
+    auto overflowPrediction =
+        evaluationPrediction(-std::numeric_limits<float>::max());
+    const auto overflowWindow = evaluationWindow(
+        "eval-overflow-window", validFeatures, &overflowLabel,
+        &overflowPrediction);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(EvaluationStatus::NumericOverflow),
+        static_cast<int>(runner.evaluate(&overflowWindow, 1U, report)));
+    TEST_ASSERT_EQUAL_UINT64(0U, report.totalWindowCount);
+}
+
 }  // namespace
 
 int main() {
@@ -3158,6 +5072,7 @@ int main() {
     RUN_TEST(testFeaturePipelineFailsClosedForTbdRawFeature);
     RUN_TEST(testRiskManagerFusesApprovedScoreAndAppliesHysteresis);
     RUN_TEST(testRiskManagerReturnsUnknownForInvalidQualityOrModel);
+    RUN_TEST(testRiskManagerRequiresApprovedScoreSemanticsAndConsistentOutput);
     RUN_TEST(testRiskManagerHealthFaultBlocksModelRisk);
     RUN_TEST(testRiskManagerRejectsMismatchedModelProvenance);
     RUN_TEST(testRiskManagerFusesApprovedTiltWithModelScore);
@@ -3220,5 +5135,36 @@ int main() {
     RUN_TEST(testSchemaRegistryReportsWindowStrideAndSampleRateMismatches);
     RUN_TEST(testSchemaRegistryRejectsTestIdAsProductionDescriptor);
     RUN_TEST(testSchemaRegistryRejectsInvalidVectorContents);
+    RUN_TEST(testDatasetProvenanceRequiresSyntheticGt5);
+    RUN_TEST(testCsvRowWriterEscapesFieldsAndValidatesUtf8);
+    RUN_TEST(testCsvRowWriterFormatsFiniteNumbersAndInvalidAsEmpty);
+    RUN_TEST(testCsvRowWriterRejectsNonFiniteAndColumnCountErrors);
+    RUN_TEST(testCsvRowWriterHandlesExactCapacityAndOverflow);
+    RUN_TEST(testDsdV12RawHeaderMatchesCoreSchemaAndFitsBound);
+    RUN_TEST(testSyntheticGeneratorIsDeterministicAndCarriesGt5);
+    RUN_TEST(testSyntheticGeneratorCoversScenarioBoundaries);
+    RUN_TEST(testSyntheticGeneratorRejectsInvalidAndOverflowingConfig);
+    RUN_TEST(testSha256MatchesKnownVectorAndBoundaryBlocks);
+    RUN_TEST(testDsdRawDatasetValidatorAcceptsExactSchemaAndManifest);
+    RUN_TEST(testDsdRawDatasetValidatorQuarantinesDuplicatesAndSequenceGaps);
+    RUN_TEST(testDsdRawDatasetValidatorRejectsEncodingQuoteAndTruncation);
+    RUN_TEST(testDsdRawDatasetValidatorReportsManifestAndInjectedFailures);
+    RUN_TEST(testDsdRawDatasetValidatorRejectsBadFieldsAndTimeOrder);
+    RUN_TEST(testDsdRawDatasetValidatorReservesIdentityAndFailsClosed);
+    RUN_TEST(testDsdRawDatasetValidatorChecksHeaderAndRecordCapacity);
+    RUN_TEST(testDataQualityClassifiesCalibrationInvalidAndContinuity);
+    RUN_TEST(testFeaturePipelineRejectsInvalidQualityAndPropagatesWindowSummary);
+    RUN_TEST(testFeaturePipelinePinsInputSchemaAndRejectsChanges);
+    RUN_TEST(testFeaturePipelineResetsAtBootCalibrationAndSensorBoundaries);
+    RUN_TEST(testFeaturePipelineGoldenSyntheticTiltFixture);
+    RUN_TEST(testAnnotationManagerKeepsLabelsSeparateAndExportsContractRows);
+    RUN_TEST(testAnnotationManagerRejectsUndefinedTargetAndReportsSyntheticProxy);
+    RUN_TEST(testAnnotationManagerRejectsDuplicatesBoundsAndNonFiniteValues);
+    RUN_TEST(testDatasetSplitterKeepsGroupsTogetherAndExportsAssignments);
+    RUN_TEST(testDatasetSplitterRejectsLeakageDuplicatesAndCapacityFailures);
+    RUN_TEST(testDatasetSplitterReportsSyntheticTestSeparatelyFromFieldEvidence);
+    RUN_TEST(testEvaluationRunnerReportsFeatureAndApprovedRegressionMetrics);
+    RUN_TEST(testEvaluationRunnerDisablesUndefinedTargetsAndSeparatesGt5Proxy);
+    RUN_TEST(testEvaluationRunnerCountsMissingRejectedAndJoinFailures);
     return UNITY_END();
 }

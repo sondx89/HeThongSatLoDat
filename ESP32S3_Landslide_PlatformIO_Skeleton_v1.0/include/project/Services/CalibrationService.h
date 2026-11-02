@@ -1,13 +1,20 @@
 #pragma once
 
+#include <cstdint>
+
 #include "Models/DataContractTypes.h"
 #include "Models/ProcessedFrame.h"
 #include "Models/SensorFrame.h"
 
 namespace project::services {
 
+enum class CalibrationMode : std::uint8_t {
+    RawOnly
+};
+
 class CalibrationService {
 public:
+    CalibrationMode mode() const noexcept { return CalibrationMode::RawOnly; }
     bool loadCalibration();
     project::models::ApiStatus loadCalibrationStatus() const noexcept;
 

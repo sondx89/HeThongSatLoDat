@@ -47,6 +47,7 @@ struct RiskManagerConfig {
     bool modelRuleEnabled{false};
     bool modelOnlyFallbackApproved{false};
     bool tiltOnlyFallbackApproved{false};
+    bool modelScoreSemanticsApproved{false};
     std::uint16_t expectedModelOutputCount{0};
     RiskScoreDirection scoreDirection{
         RiskScoreDirection::HigherIsMoreSevere};

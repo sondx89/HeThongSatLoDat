@@ -60,11 +60,53 @@ gap/out-of-order record, non-increasing timestamp, calibration change, or
 timestamp delta outside the configured sampling tolerance resets the active
 window. The pipeline does not repair gaps.
 
+The pipeline pins the source `ProcessedFrame.schemaVersion` from its first
+accepted sample. A later source-schema change clears the active window and is
+rejected with `InvalidConfiguration`; construct a new pipeline with the
+reviewed configuration for a schema transition. The pinned source version is
+only a change detector, not schema approval. `FeaturePipelineConfig` is
+immutable for the pipeline lifetime, so configuration changes require a new
+instance and cannot reuse buffered samples.
+
+`SensorFrame`/`ProcessedFrame` currently have no sensor-restart generation
+marker. The owning task must call `resetWindow()` when a sensor restart is
+reported; this clears samples and continuity history before the next accepted
+sample. Boot changes and failed/invalid samples also clear the prior window.
+The pipeline cannot infer a restart that is not represented by input metadata
+or an explicit reset call.
+
 The vector uses the explicitly approved flat layout
 `sample[0].feature[0..N], sample[1].feature[0..N], ...`. The product of sample
 count and feature count must fit `FeatureVector::kMaxFeatures`. A completed
 vector carries the schema version/ID/hash, boot ID, sequence and time range,
 window sample count, and a valid bit for every populated value.
+
+## Quality and eligibility propagation
+
+`DataQualityService` remains the sole owner of per-channel quality
+classification. `FeaturePipeline` consumes those states and records them in
+`WindowQualitySummary`; it does not reclassify channels or make invalid values
+usable. Required input channels must be quality-valid and finite, and aggregate
+frame status must be valid. A rejected required channel or invalid aggregate
+clears the active sample window and records a rejection reason/channel where
+available.
+
+The pipeline uses `DataQualityService::classifyContinuity` for boot, sequence,
+ordering, and timestamp boundaries. Boot changes, sequence gaps, and timestamp
+discontinuities reset the prior window; a valid sample at the new boundary may
+start a fresh window. Out-of-order input is rejected. Calibration changes
+reset the prior window. No window bridges a detected discontinuity, and the
+pipeline performs no zero-fill, hold-last, interpolation, or imputation.
+
+`windowQuality()` reports the active window's eligibility, boundary,
+per-channel quality, and rejection details. A built `FeatureVector` carries
+that summary. Only sample → window → feature propagation is implemented under
+the approved API scope; prediction and evaluation APIs remain deferred.
+
+Host tests use fixed synthetic numeric fixtures to verify feature ordering,
+window count/stride, reset boundaries, and formula tolerances. Those fixtures
+test implementation behavior only; they do not establish physical units,
+sensor calibration, model eligibility, or field accuracy.
 
 Example configuration (placeholders must be replaced with release-approved
 values):

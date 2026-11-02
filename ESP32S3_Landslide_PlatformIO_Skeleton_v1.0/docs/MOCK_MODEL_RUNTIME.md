@@ -1,55 +1,36 @@
-# MockModelRuntime
+# Mock Inference Engine Contract
 
-`project/AI/MockModelRuntime.h` is a fixed-storage implementation of
-`IInferenceEngine` for running and exercising the inference task before an
-Edge Impulse export is available. It has no Edge Impulse dependency, heap
-allocation, or fabricated model parameters.
+`project/AI/IInferenceEngine.h` defines the inference engine metadata, feature
+input, and raw output contract. `IModelRuntime` remains a source-compatible
+alias. Metadata carries the exact feature schema identity and dimensions; the
+engine does not infer a model input shape from `FeatureVector` capacity.
 
-The target contract is still DRAFT and the model output dimension, output
-meaning, range, and interpretation are not approved. Accordingly, a valid
-feature vector produces an explicit `ModelOutput` with
-`InferenceStatus::ModelError`, `predictionValid == false`, `outputCount == 0`,
-and no raw outputs. It does not report a neutral/normal prediction or a
-landslide probability. Returning `true` from `run()` means the mock handled the
-call and populated the output; it does not mean inference succeeded.
+`MockInferenceEngine` is available only when both
+`PROJECT_HOST_DATA_TOOLS=1` and `PROJECT_TEST_ONLY=1` are explicitly defined.
+It cannot be compiled into firmware, including the ESP32 mock firmware
+environment. Its `InferenceEngineKind::TestOnly` metadata is not production
+model metadata and cannot satisfy the Edge Impulse deployment gate.
 
-`initialize()` succeeds so `TaskInference` can exercise its normal queue and
-output path. Malformed feature vectors are returned as
-`InferenceStatus::InvalidInput`. The runtime requires `valid`, a count within
-`FeatureVector::kMaxFeatures`, an exact validity mask for those features, and
-finite feature values. It does not replace `SchemaRegistry` or approve a
-feature schema; the normal task remains responsible for schema validation.
+The mock requires an explicit test configuration containing schema identity,
+input dimension, expected output count, and finite raw output values. For a
+valid input it deterministically copies those configured values into
+`ModelOutput::rawOutputs`. It has no weights, hidden scenario mapping, target
+range, output unit, probability interpretation, risk state, or automatic
+`predictionValue`. Test code may inject an explicit non-success inference
+status to cover failures. An unconfigured mock fails initialization.
 
-## Example
+Before returning configured outputs, the mock uses the shared input validator
+to check validity, exact schema version/ID/hash, configured input dimension,
+complete feature mask, finite values, and window identity. TaskInference
+checks the engine metadata before startup and validates successful output
+status, exact count, and finite values before publishing it. Raw outputs stay
+separate from `RiskAssessment`; this mock does not produce a risk category.
 
-```cpp
-#include "project/AI/MockModelRuntime.h"
+The engine performs no dynamic allocation. Configuration-owned raw outputs
+are fixed capacity and bounded by `ModelOutput::kMaxOutputs`, which is
+storage capacity only. The caller-supplied output count is authoritative for
+the test contract, not a released model dimension.
 
-project::ai::MockModelRuntime runtime;
-if (!runtime.initialize()) {
-    // Handle initialization failure.
-}
-
-project::models::FeatureVector features{};
-// In production, use the FeatureVector provided by the approved pipeline.
-features.values[0] = 0.25F;
-features.count = 1U;
-features.featureValidMask = 1U;
-features.valid = true;
-
-project::models::ModelOutput output{};
-if (!runtime.run(features, output)) {
-    // Runtime was not initialized or could not process the call.
-} else if (output.status ==
-           project::models::InferenceStatus::ModelError) {
-    // Expected for a valid input: no actual model is installed.
-    // Keep the output explicitly unavailable; do not treat it as a prediction.
-}
-```
-
-Replace the example feature with a valid vector from the feature pipeline;
-the literal is only a small standalone interface example, not a sensor value,
-feature definition, or model recommendation. `TaskInference` can be wired to
-this implementation through its existing `IInferenceEngine&` dependency. Swap
-in `EdgeImpulseAdapter` after the exported model and approved schema/output
-contract are available.
+`EdgeImpulseAdapter` exposes the configured metadata but still fails
+initialization without the actual generated export and verified deployment
+metadata. No generated Edge Impulse code is added by this task.

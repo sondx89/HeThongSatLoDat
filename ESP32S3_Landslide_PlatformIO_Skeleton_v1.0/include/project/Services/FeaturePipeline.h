@@ -84,6 +84,9 @@ public:
     bool build(project::models::FeatureVector& output) noexcept;
     void resetWindow() noexcept;
     FeaturePipelineStatus status() const noexcept { return status_; }
+    const project::models::WindowQualitySummary& windowQuality() const noexcept {
+        return windowQuality_;
+    }
 
     static FeaturePipelineStatus validateConfig(
         const FeaturePipelineConfig& config) noexcept;
@@ -94,12 +97,20 @@ private:
         std::uint64_t bootId{0};
         std::uint64_t sequence{0};
         std::uint64_t timestampMs{0};
+        std::array<project::models::DataQualityState,
+                   static_cast<std::size_t>(
+                       project::models::SensorChannel::Count)>
+            channelQuality{};
     };
 
     FeaturePipelineStatus extract(
-        const project::models::ProcessedFrame& frame,
-        FeatureSample& sample) const noexcept;
+        const project::models::ProcessedFrame& frame, FeatureSample& sample,
+        project::models::SensorChannel& rejectedChannel,
+        project::models::DataQualityState& rejectedQuality,
+        project::models::WindowRejectionReason& rejectionReason) const noexcept;
     static bool featureSupported(FssFeatureId id) noexcept;
+    void clearSamples() noexcept;
+    void refreshWindowQuality() noexcept;
 
     const FeaturePipelineConfig config_;
     std::array<FeatureSample, kMaxWindowSamples> samples_{};
@@ -108,6 +119,13 @@ private:
     std::size_t samplesSinceBuild_{0};
     std::uint32_t calibrationVersion_{0};
     bool hasCalibrationVersion_{false};
+    std::uint64_t lastAcceptedBootId_{0U};
+    std::uint64_t lastAcceptedSequence_{0U};
+    std::uint64_t lastAcceptedTimestampMs_{0U};
+    bool hasLastAcceptedSample_{false};
+    std::uint32_t inputSchemaVersion_{0U};
+    bool hasInputSchemaVersion_{false};
+    project::models::WindowQualitySummary windowQuality_{};
     FeaturePipelineStatus status_{FeaturePipelineStatus::NotConfigured};
 };
 

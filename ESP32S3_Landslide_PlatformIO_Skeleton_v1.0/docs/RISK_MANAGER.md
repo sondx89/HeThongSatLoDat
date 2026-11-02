@@ -26,6 +26,9 @@ integrator must provide an approved, hash-verified config with:
 - at least one enabled evidence source (model or tilt);
 - explicit approval flags for model-only or tilt-only fallback when both
   sources are enabled;
+- explicit `modelScoreSemanticsApproved` approval when model scoring is
+  enabled, confirming that the approved target contract and risk policy
+  define how the single raw model output maps to the configured score;
 - finite, strictly ordered model score bounds and safe/monitor boundaries,
   plus the score direction and expected model output count, if model scoring
   is enabled;
@@ -50,11 +53,17 @@ and `MONITOR` candidates are suppressed to `UNKNOWN`. An invalid config,
 zero boot/sequence identity, or invalid/stale/missing input is never converted
 to `SAFE`.
 
-The model rule classifies `ModelOutput::predictionValue` only when status is
-`Ok`, the prediction is valid and finite, output count matches the configured
-count, and the score is inside configured bounds. Boundary comparisons are
-inclusive at the configured safe/monitor boundary; values outside the
-configured score range are rejected as model evidence. The tilt rule accepts
+The model rule is available only for one output and explicit
+`modelScoreSemanticsApproved`. It classifies `ModelOutput::predictionValue`
+only when status is `Ok`, the prediction and sole raw output are finite and
+equal, output count is one, and the score is inside configured bounds.
+`predictionValue` is not independently treated as a risk score, probability,
+or target value. Boundary comparisons are inclusive at the configured
+safe/monitor boundary; values outside the configured score range are rejected
+as model evidence. Exact feature-schema matching remains owned by
+`SchemaRegistry`/inference validation; non-`Ok` results such as
+`VersionMismatch`, or missing model provenance in the compatibility path,
+cannot produce a model-derived safe state. The tilt rule accepts
 only `TiltValidationStatus::Valid` with `definitionApproved == true` and a
 finite deviation in degrees; it compares the absolute deviation. The caller
 must validate its reference pose, axis/frame, formula, calibration and units.
@@ -78,7 +87,9 @@ not imply probability calibration.
 #include "project/Managers/RiskManager.h"
 
 project::managers::RiskManagerConfig config{};
-// Populate fields only from an approved risk config/manifest:
+// Populate fields only from an approved risk config/manifest, including
+// modelScoreSemanticsApproved only after the model target and score mapping
+// are approved:
 // version, hashSha256, hashVerified, approved, enabled rules, thresholds,
 // output count, hysteresisConfigured, promotionSamples, recoverySamples,
 // and recoveryHoldMs.

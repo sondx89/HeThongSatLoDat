@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <limits>
 
+#include "project/Services/DataQualityService.h"
+
 namespace project::services {
 namespace {
 
@@ -31,16 +33,29 @@ bool isKnownFeature(FssFeatureId id) noexcept {
     return false;
 }
 
-bool isFeatureValid(const ProcessedFrame& frame,
-                    SensorChannel channel) noexcept {
-    const std::size_t index = static_cast<std::size_t>(channel);
-    return index < frame.channelQuality.size() &&
-           frame.channelQuality[index] == DataQualityState::VALID;
-}
-
 bool finiteImu(const ProcessedFrame& frame) noexcept {
     return std::isfinite(frame.accelXG) && std::isfinite(frame.accelYG) &&
            std::isfinite(frame.accelZG);
+}
+
+project::models::WindowRejectionReason rejectionForQuality(
+    DataQualityState quality) noexcept {
+    using project::models::WindowRejectionReason;
+    switch (quality) {
+        case DataQualityState::MISSING:
+        case DataQualityState::STALE:
+        case DataQualityState::OUT_OF_RANGE:
+        case DataQualityState::NON_FINITE:
+        case DataQualityState::CALIBRATION_INVALID:
+        case DataQualityState::OUT_OF_ORDER:
+        case DataQualityState::GAP_DETECTED:
+        case DataQualityState::NOT_READY:
+        case DataQualityState::SENSOR_ERROR:
+            return WindowRejectionReason::RequiredChannelQuality;
+        case DataQualityState::VALID:
+            return WindowRejectionReason::None;
+    }
+    return WindowRejectionReason::RequiredChannelQuality;
 }
 
 }  // namespace
@@ -148,11 +163,29 @@ bool FeaturePipeline::featureSupported(FssFeatureId id) noexcept {
 }
 
 FeaturePipelineStatus FeaturePipeline::extract(
-    const ProcessedFrame& frame, FeatureSample& sample) const noexcept {
-    if (!frame.aggregateStatus.valid ||
-        !isFeatureValid(frame, SensorChannel::AccelXG) ||
-        !isFeatureValid(frame, SensorChannel::AccelYG) ||
-        !isFeatureValid(frame, SensorChannel::AccelZG) || !finiteImu(frame)) {
+    const ProcessedFrame& frame, FeatureSample& sample,
+    SensorChannel& rejectedChannel, DataQualityState& rejectedQuality,
+    project::models::WindowRejectionReason& rejectionReason) const noexcept {
+    const SensorChannel requiredChannels[] = {
+        SensorChannel::AccelXG, SensorChannel::AccelYG, SensorChannel::AccelZG};
+    for (const SensorChannel channel : requiredChannels) {
+        const std::size_t index = static_cast<std::size_t>(channel);
+        const DataQualityState quality = frame.channelQuality[index];
+        if (quality != DataQualityState::VALID) {
+            rejectedChannel = channel;
+            rejectedQuality = quality;
+            rejectionReason = rejectionForQuality(quality);
+            return FeaturePipelineStatus::InvalidFeatureData;
+        }
+    }
+    if (!frame.aggregateStatus.valid) {
+        rejectionReason =
+            project::models::WindowRejectionReason::InvalidAggregateStatus;
+        return FeaturePipelineStatus::InvalidFrame;
+    }
+    if (!finiteImu(frame)) {
+        rejectionReason =
+            project::models::WindowRejectionReason::NonFiniteFeature;
         return FeaturePipelineStatus::InvalidFeatureData;
     }
 
@@ -195,55 +228,112 @@ FeaturePipelineStatus FeaturePipeline::extract(
     sample.bootId = frame.bootId;
     sample.sequence = frame.sequence;
     sample.timestampMs = frame.timestampMs;
+    sample.channelQuality = frame.channelQuality;
     return FeaturePipelineStatus::Ok;
 }
 
 bool FeaturePipeline::push(const ProcessedFrame& frame) noexcept {
     const FeaturePipelineStatus configurationStatus = validateConfig(config_);
     if (configurationStatus != FeaturePipelineStatus::Ok) {
+        clearSamples();
+        windowQuality_ = {};
+        windowQuality_.eligibility =
+            project::models::WindowEligibilityState::Rejected;
+        windowQuality_.rejectionReason =
+            project::models::WindowRejectionReason::InvalidConfiguration;
         status_ = configurationStatus;
         return false;
     }
 
+    if (hasInputSchemaVersion_ &&
+        inputSchemaVersion_ != frame.schemaVersion) {
+        clearSamples();
+        windowQuality_ = {};
+        windowQuality_.eligibility =
+            project::models::WindowEligibilityState::Rejected;
+        windowQuality_.rejectionReason =
+            project::models::WindowRejectionReason::InvalidConfiguration;
+        status_ = FeaturePipelineStatus::InvalidConfiguration;
+        return false;
+    }
+
+    const project::models::DataContinuityState calibrationBoundary =
+        hasCalibrationVersion_ &&
+                calibrationVersion_ != frame.calibrationVersion
+            ? project::models::DataContinuityState::CalibrationChanged
+            : project::models::DataContinuityState::NotEvaluated;
     if (hasCalibrationVersion_ &&
         calibrationVersion_ != frame.calibrationVersion) {
-        resetWindow();
-        status_ = FeaturePipelineStatus::SequenceDiscontinuity;
+        clearSamples();
+        windowQuality_ = {};
+        windowQuality_.boundaryState =
+            project::models::DataContinuityState::CalibrationChanged;
     }
     calibrationVersion_ = frame.calibrationVersion;
     hasCalibrationVersion_ = true;
 
     FeatureSample sample{};
-    const FeaturePipelineStatus extractStatus = extract(frame, sample);
+    SensorChannel rejectedChannel = SensorChannel::Count;
+    DataQualityState rejectedQuality = DataQualityState::MISSING;
+    project::models::WindowRejectionReason rejectionReason =
+        project::models::WindowRejectionReason::None;
+    const FeaturePipelineStatus extractStatus =
+        extract(frame, sample, rejectedChannel, rejectedQuality,
+                rejectionReason);
     if (extractStatus != FeaturePipelineStatus::Ok) {
-        resetWindow();
+        clearSamples();
+        windowQuality_ = {};
+        windowQuality_.eligibility =
+            project::models::WindowEligibilityState::Rejected;
+        windowQuality_.rejectionReason = rejectionReason;
+        windowQuality_.boundaryState = calibrationBoundary;
+        windowQuality_.rejectedChannel = rejectedChannel;
+        windowQuality_.rejectedChannelQuality = rejectedQuality;
+        windowQuality_.rejectedChannelValid =
+            rejectedChannel != SensorChannel::Count;
         status_ = extractStatus;
         return false;
     }
 
-    if (sampleCount_ > 0U) {
-        const std::size_t previousIndex =
-            (nextSample_ + kMaxWindowSamples - 1U) % kMaxWindowSamples;
-        const FeatureSample& previous = samples_[previousIndex];
-        if (sample.bootId != previous.bootId ||
-            previous.sequence == std::numeric_limits<std::uint64_t>::max() ||
-            sample.sequence != previous.sequence + 1U ||
-            sample.timestampMs <= previous.timestampMs) {
-            resetWindow();
+    if (hasLastAcceptedSample_) {
+        const double expectedPeriodMs =
+            1000.0 / static_cast<double>(config_.sampleRateHz);
+        const project::models::DataContinuityState continuity =
+            DataQualityService::classifyContinuity(
+                lastAcceptedBootId_, lastAcceptedSequence_,
+                lastAcceptedTimestampMs_, sample.bootId, sample.sequence,
+                sample.timestampMs, expectedPeriodMs,
+                config_.samplePeriodToleranceMs);
+        if (continuity ==
+            project::models::DataContinuityState::OutOfOrder) {
+            clearSamples();
+            windowQuality_ = {};
+            windowQuality_.eligibility =
+                project::models::WindowEligibilityState::Rejected;
+            windowQuality_.rejectionReason =
+                project::models::WindowRejectionReason::OutOfOrder;
+            windowQuality_.boundaryState = continuity;
             status_ = FeaturePipelineStatus::SequenceDiscontinuity;
-        } else {
-            const double expectedPeriodMs =
-                1000.0 / static_cast<double>(config_.sampleRateHz);
-            const double actualPeriodMs =
-                static_cast<double>(sample.timestampMs - previous.timestampMs);
-            if (std::fabs(actualPeriodMs - expectedPeriodMs) >
-                static_cast<double>(config_.samplePeriodToleranceMs)) {
-                resetWindow();
-                status_ = FeaturePipelineStatus::SequenceDiscontinuity;
-            }
+            return false;
         }
+        if (continuity ==
+                project::models::DataContinuityState::BootChanged ||
+            continuity ==
+                project::models::DataContinuityState::SequenceGap ||
+            continuity ==
+                project::models::DataContinuityState::TimestampDiscontinuity) {
+            clearSamples();
+            windowQuality_ = {};
+            windowQuality_.boundaryState = continuity;
+        }
+    } else if (windowQuality_.boundaryState ==
+               project::models::DataContinuityState::NotEvaluated) {
+        windowQuality_.boundaryState =
+            project::models::DataContinuityState::FirstSample;
     }
 
+    calibrationVersion_ = frame.calibrationVersion;
+    hasCalibrationVersion_ = true;
     samples_[nextSample_] = sample;
     nextSample_ = (nextSample_ + 1U) % kMaxWindowSamples;
     if (sampleCount_ < config_.windowLengthSamples) {
@@ -252,6 +342,13 @@ bool FeaturePipeline::push(const ProcessedFrame& frame) noexcept {
     if (samplesSinceBuild_ < config_.strideSamples) {
         ++samplesSinceBuild_;
     }
+    lastAcceptedBootId_ = sample.bootId;
+    lastAcceptedSequence_ = sample.sequence;
+    lastAcceptedTimestampMs_ = sample.timestampMs;
+    hasLastAcceptedSample_ = true;
+    inputSchemaVersion_ = frame.schemaVersion;
+    hasInputSchemaVersion_ = true;
+    refreshWindowQuality();
     status_ = FeaturePipelineStatus::Ok;
     return true;
 }
@@ -317,6 +414,11 @@ bool FeaturePipeline::build(
     output.windowEndMs = last.timestampMs;
     output.windowSampleCount = config_.windowLengthSamples;
     output.count = static_cast<std::uint16_t>(valueCount);
+    output.quality = windowQuality_;
+    output.quality.eligibility =
+        project::models::WindowEligibilityState::Eligible;
+    output.quality.rejectionReason =
+        project::models::WindowRejectionReason::None;
     output.valid = true;
     samplesSinceBuild_ = 0U;
     status_ = FeaturePipelineStatus::Ok;
@@ -324,13 +426,59 @@ bool FeaturePipeline::build(
 }
 
 void FeaturePipeline::resetWindow() noexcept {
+    clearSamples();
+    lastAcceptedBootId_ = 0U;
+    lastAcceptedSequence_ = 0U;
+    lastAcceptedTimestampMs_ = 0U;
+    hasLastAcceptedSample_ = false;
+    windowQuality_ = {};
+    windowQuality_.eligibility =
+        project::models::WindowEligibilityState::Incomplete;
+    windowQuality_.channelQuality.fill(DataQualityState::MISSING);
+    status_ = FeaturePipelineStatus::NotReady;
+}
+
+void FeaturePipeline::clearSamples() noexcept {
     samples_ = {};
     nextSample_ = 0U;
     sampleCount_ = 0U;
     samplesSinceBuild_ = 0U;
     calibrationVersion_ = 0U;
     hasCalibrationVersion_ = false;
-    status_ = FeaturePipelineStatus::NotReady;
+}
+
+void FeaturePipeline::refreshWindowQuality() noexcept {
+    windowQuality_.eligibility = windowReady()
+                                     ? project::models::WindowEligibilityState::Eligible
+                                     : project::models::WindowEligibilityState::Incomplete;
+    windowQuality_.rejectionReason =
+        project::models::WindowRejectionReason::None;
+    windowQuality_.rejectedChannel =
+        project::models::SensorChannel::Count;
+    windowQuality_.rejectedChannelValid = false;
+    windowQuality_.channelQuality.fill(DataQualityState::VALID);
+    if (sampleCount_ == 0U) {
+        windowQuality_.channelQuality.fill(DataQualityState::MISSING);
+        return;
+    }
+    const std::size_t first =
+        (nextSample_ + kMaxWindowSamples - sampleCount_) % kMaxWindowSamples;
+    std::array<bool,
+               static_cast<std::size_t>(SensorChannel::Count)>
+        foundNonValid{};
+    for (std::size_t offset = 0U; offset < sampleCount_; ++offset) {
+        const FeatureSample& sample =
+            samples_[(first + offset) % kMaxWindowSamples];
+        for (std::size_t channel = 0U;
+             channel < sample.channelQuality.size(); ++channel) {
+            const DataQualityState quality = sample.channelQuality[channel];
+            if (!foundNonValid[channel] &&
+                quality != DataQualityState::VALID) {
+                windowQuality_.channelQuality[channel] = quality;
+                foundNonValid[channel] = true;
+            }
+        }
+    }
 }
 
 }  // namespace project::services

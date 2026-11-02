@@ -1,9 +1,25 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
+#include "Models/DataContractTypes.h"
+#include "Models/SensorFrame.h"
+
 namespace project::models {
+struct WindowQualitySummary {
+    WindowEligibilityState eligibility{WindowEligibilityState::NotEvaluated};
+    WindowRejectionReason rejectionReason{WindowRejectionReason::None};
+    DataContinuityState boundaryState{DataContinuityState::NotEvaluated};
+    std::array<DataQualityState,
+               static_cast<std::size_t>(SensorChannel::Count)>
+        channelQuality{};
+    SensorChannel rejectedChannel{SensorChannel::Count};
+    DataQualityState rejectedChannelQuality{DataQualityState::MISSING};
+    bool rejectedChannelValid{false};
+};
+
 struct FeatureVector {
     // Existing skeleton capacity only; this is not the Edge Impulse dimension.
     static constexpr std::size_t kMaxFeatures = 32;
@@ -20,6 +36,7 @@ struct FeatureVector {
     float values[kMaxFeatures]{};
     std::uint16_t count{0};  // Actual count must match frozen model metadata.
     std::uint32_t featureValidMask{0};
+    WindowQualitySummary quality{};
     bool valid{false};
 };
 }  // namespace project::models

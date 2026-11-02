@@ -19,6 +19,24 @@
 namespace project::ai {
 namespace {
 
+InferenceModelMetadata metadataFromConfig(
+    const EdgeImpulseModelConfig& config) noexcept {
+    InferenceModelMetadata metadata{};
+    metadata.engineKind = InferenceEngineKind::EdgeImpulse;
+    metadata.featureSchemaVersion = config.featureSchemaVersion;
+    metadata.featureSchemaId = config.featureSchemaId;
+    metadata.featureSchemaHash = config.featureSchemaHash;
+    metadata.inputDimension = config.inputDimension;
+    metadata.outputCount = config.outputCount;
+    metadata.modelHash = config.modelHash;
+    metadata.featureSchemaHashValid = config.featureSchemaApproved;
+    metadata.featureSchemaVerified = config.featureSchemaApproved;
+    metadata.modelMetadataVerified = config.modelMetadataVerified;
+    metadata.modelHashVerified = config.modelHashVerified;
+    metadata.outputContractApproved = config.outputContractApproved;
+    return metadata;
+}
+
 #if PROJECT_HAS_EDGE_IMPULSE_MODEL
 const project::models::FeatureVector* gActiveInput = nullptr;
 
@@ -40,7 +58,7 @@ public:
 
 EdgeImpulseAdapter::EdgeImpulseAdapter(
     const EdgeImpulseModelConfig& config) noexcept
-    : config_(config) {}
+    : config_(config), metadata_(metadataFromConfig(config)) {}
 
 bool EdgeImpulseAdapter::hasNonZeroHash(
     const std::array<std::uint8_t, EdgeImpulseModelConfig::kHashSize>&
@@ -56,36 +74,7 @@ bool EdgeImpulseAdapter::hasNonZeroHash(
 bool EdgeImpulseAdapter::isValidInput(
     const project::models::FeatureVector& input,
     const EdgeImpulseModelConfig& config) noexcept {
-    if (!input.valid || input.count == 0U ||
-        input.count > project::models::FeatureVector::kMaxFeatures ||
-        input.count != config.inputDimension ||
-        input.schemaVersion != config.featureSchemaVersion ||
-        input.schemaId != config.featureSchemaId ||
-        !input.schemaHashValid ||
-        input.bootId == 0U ||
-        input.relatedSequenceNo == 0U ||
-        input.windowStartMs > input.windowEndMs ||
-        input.windowSampleCount == 0U) {
-        return false;
-    }
-
-    const std::uint32_t expectedMask =
-        input.count == project::models::FeatureVector::kMaxFeatures
-            ? UINT32_MAX
-            : (UINT32_C(1) << input.count) - 1U;
-    if (input.featureValidMask != expectedMask) {
-        return false;
-    }
-    if (std::memcmp(input.schemaHashSha256, config.featureSchemaHash.data(),
-                    config.featureSchemaHash.size()) != 0) {
-        return false;
-    }
-    for (std::size_t i = 0U; i < input.count; ++i) {
-        if (!std::isfinite(input.values[i])) {
-            return false;
-        }
-    }
-    return true;
+    return matchesInferenceInput(metadataFromConfig(config), input);
 }
 
 std::uint64_t EdgeImpulseAdapter::monotonicMillis() noexcept {

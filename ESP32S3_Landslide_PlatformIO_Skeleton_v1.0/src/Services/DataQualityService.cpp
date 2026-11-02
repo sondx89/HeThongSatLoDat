@@ -93,6 +93,12 @@ bool DataQualityService::validateConfiguration() const noexcept {
              range.minimum > range.maximum)) {
             return false;
         }
+        const CalibrationQualityPolicy& calibration =
+            config_.calibrationPolicies[i];
+        if (calibration.required && calibration.approved &&
+            calibration.approvedVersion == 0U) {
+            return false;
+        }
     }
     if (!hasRequiredChannel) {
         return false;
@@ -152,8 +158,9 @@ DataQualityState DataQualityService::classify(
             return DataQualityState::MISSING;
     }
 
-    if (!fieldPresent || status == nullptr || !status->valid ||
-        status->health == project::models::SensorHealth::Fault) {
+    if (status == nullptr || !status->valid ||
+        (status->health != project::models::SensorHealth::Healthy &&
+         status->health != project::models::SensorHealth::Degraded)) {
         return DataQualityState::MISSING;
     }
 
@@ -162,6 +169,16 @@ DataQualityState DataQualityService::classify(
     if (status->timestampMs > nowMs ||
         nowMs - status->timestampMs > freshness.maximumAgeMs) {
         return DataQualityState::STALE;
+    }
+    const CalibrationQualityPolicy& calibration =
+        config_.calibrationPolicies[channelIndex(channel)];
+    if (calibration.required &&
+        (!calibration.approved ||
+         calibration.approvedVersion != frame.calibrationVersion)) {
+        return DataQualityState::CALIBRATION_INVALID;
+    }
+    if (!fieldPresent) {
+        return DataQualityState::MISSING;
     }
     if (!std::isfinite(value)) {
         return DataQualityState::NON_FINITE;
@@ -374,6 +391,37 @@ bool DataQualityService::validate(
     const project::models::ProcessedFrame& frame) const noexcept {
     project::models::ProcessedFrame assessed = frame;
     return validate(assessed);
+}
+
+project::models::DataContinuityState DataQualityService::classifyContinuity(
+    std::uint64_t previousBootId, std::uint64_t previousSequence,
+    std::uint64_t previousTimestampMs, std::uint64_t currentBootId,
+    std::uint64_t currentSequence, std::uint64_t currentTimestampMs,
+    double expectedSamplePeriodMs,
+    std::uint32_t samplePeriodToleranceMs) noexcept {
+    using project::models::DataContinuityState;
+    if (!std::isfinite(expectedSamplePeriodMs) ||
+        expectedSamplePeriodMs <= 0.0) {
+        return DataContinuityState::NotEvaluated;
+    }
+    if (previousBootId != currentBootId) {
+        return DataContinuityState::BootChanged;
+    }
+    if (currentSequence <= previousSequence ||
+        currentTimestampMs <= previousTimestampMs) {
+        return DataContinuityState::OutOfOrder;
+    }
+    if (previousSequence == UINT64_MAX ||
+        currentSequence != previousSequence + 1U) {
+        return DataContinuityState::SequenceGap;
+    }
+    const double actualPeriodMs =
+        static_cast<double>(currentTimestampMs - previousTimestampMs);
+    if (std::fabs(actualPeriodMs - expectedSamplePeriodMs) >
+        static_cast<double>(samplePeriodToleranceMs)) {
+        return DataContinuityState::TimestampDiscontinuity;
+    }
+    return DataContinuityState::Contiguous;
 }
 
 }  // namespace project::services

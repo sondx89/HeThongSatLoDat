@@ -5,8 +5,9 @@
 **Audit date:** 2026-11-02
 **Status:** Conditional adapter exists; actual deployment export is absent.
 
-`project/AI/EdgeImpulseAdapter.h` implements `IModelRuntime` (also exposed
-through the existing `IInferenceEngine` alias). It adapts the approved
+`project/AI/EdgeImpulseAdapter.h` implements `IInferenceEngine`
+(`IModelRuntime` remains a compatibility alias). It exposes
+`InferenceModelMetadata` and adapts the approved
 `FeatureVector` to the Edge Impulse Arduino `signal_t` callback and calls
 `run_classifier()`. Only this adapter includes the generated inference
 header.
@@ -33,6 +34,26 @@ expose the standard Arduino inference API:
 `signal_t`, `ei_impulse_result_t`, `EI_IMPULSE_ERROR`,
 `EI_IMPULSE_OK`, and `run_classifier()`.
 
+Production integration remains blocked. To resume A12, provide and approve:
+
+- the exact generated Arduino deployment package, including its generated
+  inference header/source, model parameters and any generated library files;
+- the export/toolchain/SDK versions and the model artifact SHA-256;
+- generated input shape, input kind, dimension, output count/type, labels or
+  regression output metadata, and the generated preprocessing contract;
+- exact feature order/units and approved FSS/schema version, ID and hash;
+- sample rate, window length, stride and preprocessing version from approved
+  project contracts, matched exactly to the export;
+- the approved regression target/output semantics and output contract, if
+  regression is present; and
+- representative golden input vectors with expected raw outputs, plus build
+  and resource evidence for the actual target.
+
+Do not infer missing values from an example export or choose a convenient
+model version. Until the complete package and matching approvals are
+available, the adapter's no-export `NotConfigured`/`ModelError` behavior is
+the production gate; host mocks remain test-only.
+
 Without `PROJECT_EDGE_IMPULSE_MODEL_HEADER`, the adapter compiles without
 Edge Impulse headers but `initialize()` returns false and `run()` reports
 `ModelError`. This permits the rest of the firmware to build without
@@ -55,7 +76,9 @@ verified deployment manifest:
 - model artifact SHA-256 and externally verified metadata/hash flags;
 - approved output kind/contract and the approval flags.
 
-The adapter checks the compiled input dimension against
+The adapter exposes input schema identity, input dimension, output count,
+model hash, and verification flags through `metadata()`. The adapter checks
+the compiled input dimension against
 `EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE`, the configured output count against
 `EI_CLASSIFIER_LABEL_COUNT` (they must match exactly), and validates each input vector's validity,
 count, schema ID/version/hash, complete feature-valid mask, nonzero boot ID,
@@ -68,7 +91,11 @@ configurations).
 Classification results are copied to `ModelOutput::rawOutputs`; the adapter
 does not select a winning class or reinterpret confidence as landslide risk.
 Regression is accepted only with an approved one-output contract and is
-copied into `predictionValue`. Neither the model hash nor the approval flags
+copied as a raw scalar to `rawOutputs[0]` and `predictionValue`. The
+`RiskAssessment` is produced separately by `RiskManager`; this adapter does not
+map regression output to a risk category. `TaskInference` checks successful
+output count and finite values against the engine metadata before publishing
+the result. Neither the model hash nor the approval flags
 are cryptographically verified by this adapter: their provenance must be
 established by the application manifest/deployment validator. Output values
 must be interpreted only under the approved target contract.

@@ -22,16 +22,17 @@ are supplied.
 The mock firmware streams a distinct, diagnostic-only raw CSV:
 
 ```csv
-record_type,sequence_no,timestamp_ms,accel_x_raw,accel_y_raw,accel_z_raw,soil_raw,rain_raw,hx710b_raw,imu_valid,soil_valid,rain_valid,hx710b_valid,dataset_eligible,eligibility_reason
-MOCK_RAW_V1,1,1000,120,-120,15920,1600,0,4988000,true,true,true,true,false,SYNTHETIC_MOCK
+record_type,sequence_no,timestamp_ms,accel_x_raw,accel_y_raw,accel_z_raw,soil_raw,rain_raw,hx710b_raw,imu_valid,soil_valid,rain_valid,hx710b_valid,dataset_eligible,eligibility_reason,data_origin,evidence_class
+MOCK_RAW_V2,1,1000,120,-120,15920,1600,0,4988000,true,true,true,true,false,SYNTHETIC_MOCK,SYNTHETIC,GT5
 ```
 
 Unavailable sensor values are empty, with the corresponding validity field
 false; they are not replaced with zero. `dataset_eligible` is always `false`
 and `eligibility_reason` is `SYNTHETIC_MOCK`.
-This stream is synthetic diagnostics, not the DSD raw dataset schema and not a
-valid Edge Impulse training upload. Do not feed it to a model or use it as
-field data.
+The row explicitly carries `data_origin=SYNTHETIC` and
+`evidence_class=GT5`. This stream is synthetic diagnostics, not the DSD raw
+dataset schema and not a valid Edge Impulse training upload. Do not feed it to
+a model or use it as field data.
 
 The native integration test checks the mock CSV header, row, and missing-value
 behavior. It separately exercises the sensor-to-feature-to-test-model-to-risk

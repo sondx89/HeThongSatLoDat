@@ -32,12 +32,15 @@ struct EdgeImpulseModelConfig {
     bool outputContractApproved{false};
 };
 
-class EdgeImpulseAdapter final : public IModelRuntime {
+class EdgeImpulseAdapter final : public IInferenceEngine {
 public:
     explicit EdgeImpulseAdapter(
         const EdgeImpulseModelConfig& config =
             EdgeImpulseModelConfig{}) noexcept;
 
+    const InferenceModelMetadata& metadata() const noexcept override {
+        return metadata_;
+    }
     bool initialize() override;
     bool run(const project::models::FeatureVector& input,
              project::models::ModelOutput& output) override;
@@ -61,6 +64,7 @@ private:
 #endif
 
     const EdgeImpulseModelConfig config_;
+    InferenceModelMetadata metadata_{};
     bool initialized_{false};
 };
 

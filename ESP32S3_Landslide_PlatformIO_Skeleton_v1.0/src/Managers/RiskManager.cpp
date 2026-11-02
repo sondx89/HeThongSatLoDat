@@ -49,7 +49,8 @@ bool RiskManager::validateConfig(
     }
 
     if (config.modelRuleEnabled) {
-        if (config.expectedModelOutputCount == 0U ||
+        if (!config.modelScoreSemanticsApproved ||
+            config.expectedModelOutputCount != 1U ||
             config.expectedModelOutputCount >
                 project::models::ModelOutput::kMaxOutputs ||
             !std::isfinite(config.scoreMinimum) ||
@@ -110,7 +111,9 @@ RiskManager::Candidate RiskManager::classifyModel(
         model.status != project::models::InferenceStatus::Ok ||
         !model.predictionValid ||
         model.outputCount != config_.expectedModelOutputCount ||
+        !std::isfinite(model.rawOutputs[0]) ||
         !std::isfinite(model.predictionValue) ||
+        model.rawOutputs[0] != model.predictionValue ||
         model.predictionValue < config_.scoreMinimum ||
         model.predictionValue > config_.scoreMaximum) {
         return Candidate::Unknown;
