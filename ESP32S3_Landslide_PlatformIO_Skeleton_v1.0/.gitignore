@@ -7,3 +7,9 @@ build_output/
 *.elf
 *.bin
 *.map
+
+# Local-only Wi-Fi and Blynk provisioning.
+/include/project/secrets.h
+
+# Local prototype reference contains credential-like literals.
+/final3blynkiot_5259.docx

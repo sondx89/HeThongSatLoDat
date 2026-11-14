@@ -1,10 +1,10 @@
 # Task Framework Runtime Flow
 
-**Document revision:** 1.1
+**Document revision:** 1.2
 
-**Updated:** 2026-11-02
-**Status:** Task framework implemented; application lifecycle integration
-remains partial and blocked by listed API gaps.
+**Updated:** 2026-11-13
+**Status:** PARTIAL — framework lifecycle pieces are available, but production
+composition remains blocked by missing approved runtime inputs and adapters.
 
 ## Application lifecycle orchestration
 
@@ -31,12 +31,15 @@ Startup phases are ordered and fail closed:
 | 10 | `SelfCheck` | Application self-check succeeds. |
 
 The inference gate is explicitly disabled before startup. It remains disabled
-during all phases, including task startup and self-check, and is enabled only
-after every phase succeeds. A failure at any phase or failure to open the gate
-causes reverse cleanup, with inference disabled, new work stopped, and tasks
-drained/stopped before phase cleanup. The failed phase is included in cleanup
-because it may have partially initialized. Storage flush occurs before storage
-cleanup; safe outputs are requested before BSP cleanup.
+during all phases, including task startup and self-check. It is enabled after
+all phases only when `AppControllerConfig::inferenceApproved` is true; this
+field defaults false and may only be set after the production manifest, schema,
+and actual model gates pass. With inference unapproved, startup may still run
+in a degraded/no-inference mode. A failure at any phase or failure to open an
+approved gate causes reverse cleanup, with inference disabled, new work
+stopped, and tasks drained/stopped before phase cleanup. The failed phase is
+included in cleanup because it may have partially initialized. Storage flush
+occurs before storage cleanup; safe outputs are requested before BSP cleanup.
 
 `AppControllerConfig` requires nonzero health-check, task-drain, and storage
 flush bounds supplied by the integrator from approved target policy. The port
@@ -57,9 +60,10 @@ This change provides the orchestrator and a fake lifecycle port, not a
 production composition or concrete phase adapter. The following module
 contracts currently block a complete firmware wiring:
 
-- `TaskFramework` has `startAll()` but no stop-new-work, bounded drain, or
-  stop API. Task Framework owner must provide these operations and ensure task
-  startup stays gated until AppController enables inference.
+- `TaskFramework::stopAll(timeoutTicks)` now requests cooperative task exit and
+  reports a bounded timeout. The integrator must choose a bound covering each
+  task's longest blocking operation and call it from the lifecycle adapter.
+  The framework does not forcibly delete a task on timeout.
 - `StorageManager::flush()` has no timeout argument, and its backend interface
   does not specify a finite bound. Storage owner must supply a genuinely
   bounded flush adapter before AppController's flush contract can be met.
@@ -76,6 +80,23 @@ contracts currently block a complete firmware wiring:
 Until these gaps are resolved, AppController host tests prove sequencing and
 failure behavior only; they do not prove that the ESP32-S3 application starts,
 stops, gates inference, flushes durably, or drives safe physical outputs.
+
+`SensorManagerConfig::availability` now selects `present` and `required`
+independently for each slot. Defaults preserve the former all-present and
+all-required behavior. An absent optional sensor is not initialized or read;
+its frame status remains invalid/unknown and its zero-initialized data is not a
+measurement. A required-but-absent sensor or a configuration with no required
+sensor is rejected. An optional sensor that is present but fails initialization
+does not block required sensors; its measurements remain invalid. Manifest
+validation requires read timeouts only for present sensors.
+
+The production branch in `src/main.cpp` remains fail-closed and does not yet
+instantiate `AppController` or the task graph. It first requires approved BSP
+configuration, then tries to load a production manifest. No production
+`IConfigManifestPersistence`, `IStorage`/`ICsvFileSystem` backend, or concrete
+application task-port adapters are currently supplied. Queue depths,
+task/runtime bounds, storage limits and board approval are therefore still
+unset; no production task startup or inference enablement is claimed.
 
 Priority, stack words, cycle periods, queue wait times and heartbeat timeouts are
 runtime configuration inputs. They default to unconfigured values and must be
@@ -191,6 +212,12 @@ progress. A stale or exited
 essential task degrades the emitted health snapshot. Watchdog feeding is outside
 this framework and must remain conditional on the approved supervisor policy.
 
+Queue ownership, immutable snapshot semantics, bounded waits/drop accounting,
+freshness propagation and the future ISR contract are specified in
+[`QUEUE_SNAPSHOT_CONTRACT.md`](QUEUE_SNAPSHOT_CONTRACT.md). Queue depths remain
+unconfigured until measured producer/consumer rates and target RAM budgets are
+approved.
+
 EventLogger producers copy records to `Q_EVENT`; only TaskLogger consumes them.
 The CSV serializer writes field-by-field into caller-owned bounded storage, and its
 same escaped row is offered to the CSV sink and the T-DIAG-owned Serial route.
@@ -218,12 +245,23 @@ fault sink so each distinct watchdog task fault contributes to
 `heartbeatTimeoutTicks` is required for every task. The proposal's 1 Hz sensor
 aggregate cadence and 1–10 second diagnostics cadence are not compiled defaults;
 convert only approved, measured periods to FreeRTOS ticks during application
-composition.
+composition. Sensor acquisition and per-slot requiredness must come from the
+approved sensor-set manifest; optional channels remain invalid when absent.
+
+## P04 verification
+
+- Native unit tests: 123/123 passed, including sensor-set validation,
+  AppController rollback, and inference-disabled-by-default behavior.
+- Native integration tests: 7/7 passed.
+- ESP32-S3 target build and image generation passed through a temporary `Z:`
+  alias for the project path. No firmware flash or physical/hardware-in-the-loop
+  test was performed.
 
 ## Change history
 
 | Revision | Date | Change |
 |---|---|---|
+| 1.2 | 2026-11-13 | Added per-sensor presence/required policy, cooperative task stop, inference approval gate, and current P04 integration blockers/evidence. |
 | 1.1 | 2026-11-02 | Added host-tested AppController lifecycle sequence and explicit TaskFramework/storage/production-wiring gaps. |
 | 1.0 | 2026-11-02 | Documented existing task and queue runtime flow. |
 

@@ -1,7 +1,7 @@
 # AI/Data Host-First Workflow
 
 **Status:** Host software validation only; field release is NOT READY.  
-**Updated:** 2026-11-02
+**Updated:** 2026-11-13
 
 ## Scope and evidence boundary
 
@@ -44,9 +44,11 @@ needed if exact per-channel timing must be replayed.
 - `raw_samples.csv`: bounded DSD v1.2 core export; the current artifact schema
   constant is `kRawSampleCoreSchemaVersion=1`. Provenance for a uniform-origin
   export is in the typed manifest, not an added CSV column.
-- `calibrated_samples.csv`, `windows.csv`, `features.csv`, `annotations.csv`,
-  and row-level `evaluation.csv`: separate artifact contracts; corresponding
-  general-purpose exporters are not implemented.
+- `calibrated_samples.csv`, `windows.csv`, and `features.csv`: bounded
+  host-only exporters exist. Physical calibration and production feature/model
+  eligibility remain gated.
+- `annotations.csv` and row-level `evaluation.csv`: separate artifact
+  contracts; general-purpose exporters are not implemented.
 - `evaluation_summary.csv` and `feature_distributions.csv`: bounded aggregate
   reports from `EvaluationRunner`, not substitutes for row-level evaluation.
 - Operational six-column `CsvLogger` output and mock serial diagnostics stay
@@ -58,30 +60,31 @@ infer approval from an implementation version.
 
 ## Commands and latest recorded evidence
 
-Run commands from `ESP32S3_Landslide_PlatformIO_Skeleton_v1.0`. In the observed
+Native commands below were run from the repository root. In the observed
 Windows environment, PlatformIO Core 6.2.0 and MSYS2 UCRT64 GCC/G++ 16.2.0 were
 used; prepend the compiler directory if it is not already on `PATH`:
 
 ```powershell
 $env:PATH = 'C:\msys64\ucrt64\bin;' + $env:PATH
-pio test -e native-unit-tests
-pio test -e native-integration-tests
-pio run -e esp32-s3-devkitc-1
+$project = 'ESP32S3_Landslide_PlatformIO_Skeleton_v1.0'
+pio test -d $project -e native-unit-tests
+pio test -d $project -e native-integration-tests
 ```
 
-Latest recorded validation for the A14 exporter/replay changes:
+Latest validation executed on 2026-11-13 after P02:
 
 | Command | Exit | Result |
 |---|---:|---|
-| `pio test -e native-unit-tests` | 0 | 103 test cases passed |
-| `pio test -e native-integration-tests` | 0 | 7 test cases passed |
+| `pio test -d ESP32S3_Landslide_PlatformIO_Skeleton_v1.0 -e native-unit-tests` | 0 | 116/116 test cases passed |
+| `pio test -d ESP32S3_Landslide_PlatformIO_Skeleton_v1.0 -e native-integration-tests` | 0 | 7/7 test cases passed |
 | `git diff --check` | 0 | No whitespace errors |
-| `pio run -e esp32-s3-devkitc-1` | 1 | Target compilation blocked at `include/project/BSP/BoardConfig.h:102`: `issueMask` undeclared |
+| `subst Z: "<project path>"; pio run -d Z:\ -e esp32-s3-devkitc-1; subst Z: /d` | 0 | Compile, link, and firmware image generation succeeded. |
 
 The target environment resolved PlatformIO `espressif32` 8.0.0, Arduino
 framework 3.3.12, and Xtensa toolchain 14.2.0+20260121. No firmware upload
-was attempted. The compile blocker is not evidence that the A14 host code
-failed; nor is it evidence that the target build otherwise passes.
+was attempted. Direct invocation under the Unicode workspace path failed to
+open the linker map file; the build passed through the temporary ASCII `Z:`
+alias. Native tests are host-only, and no physical hardware or HIL test was run.
 
 `pio run -e mock-native -t exec` runs the separate sensor-only mock acquisition
 demo. It is not a DSD exporter or the synthetic scenario pipeline.
@@ -94,7 +97,8 @@ demo. It is not a DSD exporter or the synthetic scenario pipeline.
   feature contract are absent; feature-to-inference integration is blocked.
 - The target/regression contract and approved `RiskConfig` are absent; no
   operational risk threshold or field-accuracy claim is supported.
-- JSON manifest/sidecar persistence, calibrated/window/feature/annotation
+- Versioned bounded JSON persistence for the raw dataset manifest is
+  implemented; sidecar persistence, calibrated/window/feature/annotation
   exporters, and row-level evaluation export are not implemented.
 - No physical hardware, HIL, model golden-vector, target resource, or field
   safety evidence is available.

@@ -1,11 +1,19 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <cmath>
 
 #include "BSP/BoardPins.h"
 #include "Drivers/ISensor.h"
 
 namespace project::drivers {
+
+inline constexpr std::int32_t kHx710bSigned24Minimum = -8388608;
+inline constexpr std::int32_t kHx710bSigned24Maximum = 8388607;
+inline constexpr std::uint8_t kHx710bDataBitCount = 24;
+inline constexpr std::uint8_t kHx710bTrailingClockPulses = 25;
+inline constexpr std::uint32_t kHx710bMaximumReadyTimeoutUs = 200000;
 
 struct Hx710bProtocolConfig {
     std::uint32_t readyTimeoutUs{0};
@@ -58,7 +66,45 @@ struct Hx710bCalibration {
     float factor{0.0F};
     std::uint32_t version{0};
     bool configured{false};
+    std::uint32_t transducerIdentityId{0};
+    std::int32_t rawZeroCount{0};
+    std::int32_t rawFullScaleCount{0};
+    float zeroPressureKpa{0.0F};
+    float fullScalePressureKpa{0.0F};
+    float minimumPressureKpa{0.0F};
+    float maximumPressureKpa{0.0F};
+    bool pressureCalibrationConfigured{false};
+    bool transducerIdentityVerified{false};
+    bool transducerRangeVerified{false};
+    bool pressureCalibrationApproved{false};
 };
+
+inline bool isApprovedHx710bPressureCalibration(
+    const Hx710bCalibration& calibration) noexcept {
+    return calibration.pressureCalibrationConfigured &&
+           calibration.pressureCalibrationApproved &&
+           calibration.transducerIdentityVerified &&
+           calibration.transducerRangeVerified &&
+           calibration.transducerIdentityId != 0U &&
+           calibration.version != 0U &&
+           calibration.rawZeroCount >= kHx710bSigned24Minimum &&
+           calibration.rawZeroCount <= kHx710bSigned24Maximum &&
+           calibration.rawFullScaleCount >= kHx710bSigned24Minimum &&
+           calibration.rawFullScaleCount <= kHx710bSigned24Maximum &&
+           calibration.rawZeroCount != calibration.rawFullScaleCount &&
+           std::isfinite(calibration.zeroPressureKpa) &&
+           std::isfinite(calibration.fullScalePressureKpa) &&
+           std::isfinite(calibration.minimumPressureKpa) &&
+           std::isfinite(calibration.maximumPressureKpa) &&
+           calibration.fullScalePressureKpa >
+               calibration.zeroPressureKpa &&
+           calibration.minimumPressureKpa <=
+               calibration.zeroPressureKpa &&
+           calibration.maximumPressureKpa >=
+               calibration.fullScalePressureKpa &&
+           calibration.minimumPressureKpa <=
+               calibration.maximumPressureKpa;
+}
 
 enum class Hx710bQualityFlag : std::uint32_t {
     None = 0,
@@ -67,7 +113,10 @@ enum class Hx710bQualityFlag : std::uint32_t {
     CalibrationUnavailable = 1U << 2U,
     CalibrationInvalid = 1U << 3U,
     FactorScaledRawValid = 1U << 4U,
-    FactorScaledRawOverflow = 1U << 5U
+    FactorScaledRawOverflow = 1U << 5U,
+    PartialSampleCount = 1U << 6U,
+    PressureCalibrationApproved = 1U << 7U,
+    PressureCalibrationUnavailable = 1U << 8U
 };
 
 constexpr std::uint32_t hx710bQualityMask(
@@ -102,9 +151,12 @@ struct Hx710bDiagnostics {
 
 struct Hx710bSample {
     std::int32_t rawValue{0};
+    std::uint8_t sampleCount{0};
+    std::uint32_t transducerIdentityId{0};
     float calibrationFactor{0.0F};
     float factorScaledRaw{0.0F};
     std::uint32_t calibrationVersion{0};
+    std::uint32_t pressureCalibrationVersion{0};
     std::uint32_t qualityFlags{0};
     bool calibrationFactorValid{false};
     bool factorScaledRawValid{false};
@@ -113,6 +165,8 @@ struct Hx710bSample {
 
 class HX710BDriver final : public ISensor {
 public:
+    static constexpr std::size_t kMaximumReadAttempts = 3;
+
     HX710BDriver(IHx710bTransport& transport,
                  const Hx710bCalibration& calibration) noexcept;
 

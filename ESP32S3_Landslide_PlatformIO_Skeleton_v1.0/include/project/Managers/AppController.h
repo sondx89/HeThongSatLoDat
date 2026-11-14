@@ -46,6 +46,8 @@ struct AppControllerConfig {
     std::uint32_t healthCheckTimeoutMs{0U};
     std::uint32_t taskDrainTimeoutMs{0U};
     std::uint32_t storageFlushTimeoutMs{0U};
+    // Set only after the production schema, model, and manifest gates pass.
+    bool inferenceApproved{false};
 };
 
 class IAppLifecycle {

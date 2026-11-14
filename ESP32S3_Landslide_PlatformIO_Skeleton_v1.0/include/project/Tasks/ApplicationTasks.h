@@ -21,6 +21,8 @@ namespace project::tasks {
 class IRiskTaskContext {
 public:
     virtual ~IRiskTaskContext() = default;
+    // Return frame and health from one coherent snapshot; copy them before
+    // returning and do not expose mutable shared state.
     virtual bool getContext(const project::models::ModelOutput& model,
                             project::models::ProcessedFrame& frame,
                             project::models::HealthSnapshot& health) noexcept = 0;
@@ -55,7 +57,8 @@ enum class FeatureRejectReason : std::uint8_t {
     ProcessedQuality,
     FeatureSchema,
     SensorSequenceGap,
-    FeatureQueueFull
+    FeatureQueueFull,
+    SensorOutOfOrder
 };
 
 class ITaskEventReporter {
@@ -108,6 +111,7 @@ private:
     bool featureConfigurationFailureReported_{false};
     std::uint64_t lastSensorBootId_{0};
     std::uint64_t lastSensorSequence_{0};
+    std::uint64_t lastSensorTimestampMs_{0};
     bool hasLastSensorSequence_{false};
 };
 

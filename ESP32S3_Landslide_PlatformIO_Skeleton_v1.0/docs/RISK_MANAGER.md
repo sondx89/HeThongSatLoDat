@@ -1,9 +1,9 @@
 # RiskManager
 
-`project/Managers/RiskManager.h` fuses an approved scalar model output with an
-independently validated tilt deviation and an explicit data-quality state. It
-produces the four requested outcomes through the existing `RiskAssessment`
-contract:
+`project/Managers/RiskManager.h` validates an approved model output against
+explicit data-quality and provenance state before producing a
+`RiskAssessment`. Production classification is model-only; tilt rules are
+available only in explicit test/replay builds. The existing risk states are:
 
 | Requested level | `RiskAssessment::risk` |
 |---|---|
@@ -20,38 +20,41 @@ score in the configured model's domain; it is not called a probability.
 
 The target contract and risk thresholds remain DRAFT/TBD. The default
 `RiskManagerConfig` is intentionally invalid. Before classification, an
-integrator must provide an approved, hash-verified config with:
+integrator must provide an approved, hash-verified model config with:
 
 - nonzero config version and SHA-256;
-- at least one enabled evidence source (model or tilt);
-- explicit approval flags for model-only or tilt-only fallback when both
-  sources are enabled;
+- the model rule enabled;
 - explicit `modelScoreSemanticsApproved` approval when model scoring is
   enabled, confirming that the approved target contract and risk policy
   define how the single raw model output maps to the configured score;
 - finite, strictly ordered model score bounds and safe/monitor boundaries,
   plus the score direction and expected model output count, if model scoring
   is enabled;
-- nonnegative, ordered absolute tilt-deviation limits, if the tilt rule is
-  enabled; and
 - explicitly configured promotion/recovery sample counts and recovery hold
   duration.
+
+Test/replay builds may additionally exercise a tilt rule with finite,
+ordered limits and an approved tilt definition. Those flags and fallback
+behavior are rejected by production validation.
+
+Production builds additionally require the model rule and reject all tilt-rule
+configurations. Tilt-only or combined model/tilt behavior exists solely in
+explicit `PROJECT_TEST_ONLY=1` builds for host testing/replay; it cannot be
+enabled by a production manifest. A valid production model configuration still
+requires approved target/output semantics, and unavailable or invalid model
+results remain `UNKNOWN`.
 
 Do not copy provisional numbers from older project documents into a released
 configuration without validation and approval. The caller must perform the
 actual manifest/hash/approval verification; the booleans in this C++ config
 are not cryptographic verification.
 
-When both evidence sources are enabled and valid, the more severe candidate
-wins. The aggregate quality state gates model evidence. Tilt is an independent
-rule only when its `TiltValidation` is valid and its definition is approved.
-If either enabled source is unavailable, the other may be used alone only when
-its fallback is explicitly approved. The exception is an independently
-validated `HIGH_RISK_TEST` tilt candidate, which can override invalid aggregate
-quality or unavailable model evidence. With non-`VALID` quality, tilt `SAFE`
-and `MONITOR` candidates are suppressed to `UNKNOWN`. An invalid config,
-zero boot/sequence identity, or invalid/stale/missing input is never converted
-to `SAFE`.
+In test-only configurations, the more severe candidate wins. The aggregate
+quality state gates model evidence. Tilt is an independent rule only in those
+test-only configurations.
+An invalid config, zero boot/sequence identity, or invalid/stale/missing input
+is never converted to `SAFE`. Invalid model evidence remains `UNKNOWN` in
+production; no sensor-only rule may replace it.
 
 The model rule is available only for one output and explicit
 `modelScoreSemanticsApproved`. It classifies `ModelOutput::predictionValue`
@@ -63,18 +66,18 @@ safe/monitor boundary; values outside the configured score range are rejected
 as model evidence. Exact feature-schema matching remains owned by
 `SchemaRegistry`/inference validation; non-`Ok` results such as
 `VersionMismatch`, or missing model provenance in the compatibility path,
-cannot produce a model-derived safe state. The tilt rule accepts
-only `TiltValidationStatus::Valid` with `definitionApproved == true` and a
-finite deviation in degrees; it compares the absolute deviation. The caller
-must validate its reference pose, axis/frame, formula, calibration and units.
+cannot produce a model-derived safe state. In test-only builds, the tilt rule
+accepts only `TiltValidationStatus::Valid` with `definitionApproved == true`
+and a finite deviation in degrees; it compares the absolute deviation. The
+caller must validate its reference pose, axis/frame, formula, calibration and
+units.
 
 Promotions require the configured number of distinct input sequence samples.
 Lower-severity recovery requires its configured sample count and hold time.
 Duplicate sequence IDs do not advance hysteresis. A boot change or out-of-order
 sequence clears the active state to `UNKNOWN`; invalid quality resets the
-state unless the independent validated severe tilt rule is active. The manager
-is stateful and is intended to be owned and called by `TaskRisk`, not shared
-concurrently.
+state. The manager is stateful and is intended to be owned and called by
+`TaskRisk`, not shared concurrently.
 
 `RiskAssessment::health` is copied separately from the risk level. Fault
 flags and reason-code assignments remain TBD and are not fabricated here.
@@ -100,7 +103,7 @@ project::managers::TiltValidation tilt{};
 project::managers::RiskEvaluationContext context{};
 project::models::RiskAssessment assessment{};
 
-// Supply the actual inference result, approved tilt validation and quality.
+// Supply the actual inference result and quality. Tilt input is test-only.
 // The zero-initialized policy above is not approved and yields UNKNOWN.
 const bool produced = riskManager.evaluate(
     model, tilt, project::models::DataQualityState::MISSING,

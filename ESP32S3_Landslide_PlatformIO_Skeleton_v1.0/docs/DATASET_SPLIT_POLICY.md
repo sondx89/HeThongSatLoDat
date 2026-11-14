@@ -47,6 +47,8 @@ from timestamps or sensor values.
 ## Scope limit
 
 This component persists per-window split assignments and reports. It does not
-implement a model-training loader, annotation-to-label join, metrics, or a
-JSON manifest writer. The local schema version is project-specific and does
-not modify controlled DSD/DOP/FSS/GTIS inputs.
+implement a model-training loader, annotation-to-label join, metrics, or
+integration of split artifacts into the raw dataset manifest. The bounded
+raw-manifest JSON contract is documented in `CSV_DATASET_CONTRACT.md`. Local
+schema versions are project-specific and do not modify controlled
+DSD/DOP/FSS/GTIS inputs.

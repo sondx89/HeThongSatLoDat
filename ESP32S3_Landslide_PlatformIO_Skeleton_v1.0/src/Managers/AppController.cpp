@@ -131,11 +131,11 @@ AppControllerStatus AppController::begin() noexcept {
         completedPhaseCount_ = attemptedPhaseCount;
     }
 
-    if (!lifecycle_.initializeInferenceGate(true)) {
+    if (!lifecycle_.initializeInferenceGate(config_.inferenceApproved)) {
         return failStartup(AppControllerStatus::InferenceGateFailed,
                            attemptedPhaseCount);
     }
-    inferenceEnabled_ = true;
+    inferenceEnabled_ = config_.inferenceApproved;
     state_ = AppControllerState::Running;
     lastStatus_ = AppControllerStatus::Ok;
     return lastStatus_;

@@ -41,6 +41,11 @@ RiskManager::RiskManager(const RiskManagerConfig& config) noexcept
 
 bool RiskManager::validateConfig(
     const RiskManagerConfig& config) noexcept {
+#if !defined(PROJECT_TEST_ONLY) || PROJECT_TEST_ONLY != 1
+    if (!config.modelRuleEnabled || config.tiltRuleEnabled) {
+        return false;
+    }
+#endif
     if (!config.approved || !config.hashVerified || config.version == 0U ||
         !hasNonZeroHash(config.hashSha256) || !config.hysteresisConfigured ||
         config.promotionSamples == 0U || config.recoverySamples == 0U ||

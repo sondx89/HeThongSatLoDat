@@ -140,9 +140,11 @@ There are two distinct replay surfaces:
 Document versions and artifact schema versions are distinct. The 36-field
 DSD v1.2 core order is preserved; uniform origin/evidence provenance stays in
 the manifest rather than being inserted into that header. The exporter is
-host-only; calibrated sample, window, feature, annotation, and row-level
-evaluation exporters are not implemented. Operational logger CSV and mock
-serial diagnostics are not DSD training exports. See
+host-only; annotation and row-level evaluation exporters are not implemented.
+Bounded calibrated-sample, window, and feature exporters are host-only; no
+production physical calibration is configured.
+Operational logger CSV and mock serial diagnostics are not DSD training
+exports. See
 [docs/CSV_DATASET_CONTRACT.md](docs/CSV_DATASET_CONTRACT.md),
 [docs/SYNTHETIC_DATA_POLICY.md](docs/SYNTHETIC_DATA_POLICY.md), and
 [docs/AI_PIPELINE_HOST_TESTING.md](docs/AI_PIPELINE_HOST_TESTING.md).
@@ -218,8 +220,10 @@ pio test -e native-integration-tests
 Fixture thresholds and mappings are not production approvals. See
 [docs/INTEGRATION_TESTS.md](docs/INTEGRATION_TESTS.md).
 
-For exact validation commands, current build blockers, artifact status, and
+For exact current validation commands, build blockers, artifact status, and
 evidence limitations, see
+[docs/BASELINE_TEST_REPORT.md](docs/BASELINE_TEST_REPORT.md). The host-first
+workflow description is in
 [docs/AI_PIPELINE_HOST_TESTING.md](docs/AI_PIPELINE_HOST_TESTING.md).
 
 ## Risk manager
@@ -283,13 +287,15 @@ for the contract and calibration procedure.
 ## Rain sensor driver
 
 `project/Drivers/RainSensorDriver.h` and
-`src/Drivers/RainSensorDriver.cpp` read the configured rain ADC pin through the
-shared `IAdcReader`, maintain a bounded moving average, and map two verified
-calibration points to `rainWetnessRelativePct`. ADC range, wetness semantics,
-filter size, and calibration must be provided by the integration layer. The
-result is a relative wetness indicator, not rainfall amount or intensity.
-Driver-local quality flags report ADC/calibration validity, filter warm-up, and
-endpoint clamping. See [docs/RAIN_SENSOR_DRIVER.md](docs/RAIN_SENSOR_DRIVER.md).
+`src/Drivers/RainSensorDriver.cpp` read AO through the shared `IAdcReader` and
+optionally read the independent active-low DO pin. Each AO value averages
+eight cooperative conversions and maps verified dry/wet calibration endpoints
+to `rainWetnessRelativePct`. A timestamped, time-weighted trailing 120-second
+integral is reported as equivalent wet-seconds only with full configured-gap
+coverage. Pins, ADC settings, wetness semantics, calibration and sampling
+limits remain integration inputs; the DOCX GPIOs/endpoints are not defaults.
+Wetness and accumulation are proxies, not rainfall amount or mm/h. See
+[docs/RAIN_SENSOR_DRIVER.md](docs/RAIN_SENSOR_DRIVER.md).
 
 ## HX710B driver
 
@@ -300,6 +306,11 @@ marked verified against the selected device datasheet. The optional calibration
 factor and its factor-scaled raw count carry no physical unit; the driver never
 sets `hx710bCalibratedValue` or labels data as pressure/load/stress. Until a
 transducer and measurand are approved, use raw values and diagnostics only.
+The optional `CalibrationService` pressure path requires an explicitly
+approved transducer/range/version profile and never installs the DOCX demo
+coefficients. The optional 15-second baseline requires at least three valid
+calibrated samples and an explicit freshness/gap limit; no baseline or risk
+threshold is enabled by default.
 See [docs/HX710B_DRIVER.md](docs/HX710B_DRIVER.md).
 
 ## FreeRTOS queues
@@ -476,11 +487,14 @@ semantics require an approved storage/reset policy.
 3. Confirm the physical board ID, then update `platformio.ini` if needed.
 4. Run PlatformIO: **Build**.
 
-The compile-only command is `pio run -e esp32-s3-devkitc-1`. The latest
-recorded run reaches source compilation but fails at
-`include/project/BSP/BoardConfig.h:102` because `issueMask` is undeclared.
-Native tests do not resolve this target-build issue. No upload or HIL result
-is implied.
+The compile-only command is `pio run -e esp32-s3-devkitc-1`. In the latest
+recorded run (2026-11-13), the native unit and integration suites passed
+116/116 and 7/7 cases, and the ESP32-S3 compile/link completed successfully.
+This Windows workspace's Japanese path caused a linker map-file failure when
+building directly; the successful run used a temporary `subst Z:` drive alias.
+The build is not a flash or physical hardware test. See
+[docs/BASELINE_TEST_REPORT.md](docs/BASELINE_TEST_REPORT.md) for exact commands
+and current evidence.
 
 Several subsystems remain partial or blocked by missing configuration and
 integration evidence. A successful compile only checks the project/toolchain

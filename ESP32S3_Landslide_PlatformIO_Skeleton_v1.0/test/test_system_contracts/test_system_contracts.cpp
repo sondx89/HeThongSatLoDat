@@ -1,5 +1,7 @@
 #include <unity.h>
 
+#include <Arduino.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -10,16 +12,23 @@
 #include <vector>
 
 #include "project/Drivers/ISensor.h"
+#include "project/Drivers/HX710BDriver.h"
 #include "project/AI/SchemaRegistry.h"
+#include "project/BSP/BoardConfig.h"
 #include "project/Dataset/CsvSchemas.h"
+#include "project/Dataset/CsvArtifactExporter.h"
 #include "project/Dataset/DataProvenance.h"
 #include "project/Dataset/AnnotationManager.h"
+#include "project/Dataset/CalibratedSampleCsvExporter.h"
 #include "project/Dataset/DatasetValidator.h"
 #include "project/Dataset/DatasetSplitter.h"
 #include "project/Dataset/EvaluationRunner.h"
+#include "project/Dataset/FeatureCsvExporter.h"
 #include "project/Dataset/DsdRawSampleCsvParser.h"
 #include "project/Dataset/Sha256.h"
 #include "project/Dataset/SyntheticSensorGenerator.h"
+#include "project/Dataset/WindowCsvExporter.h"
+#include "project/Diagnostics/SerialDiagnostics.h"
 #include "project/Managers/AppController.h"
 #include "project/Managers/OutputController.h"
 #include "project/Managers/RecoveryManager.h"
@@ -46,6 +55,8 @@
 #include "../../src/Managers/AppController.cpp"
 // TEST ONLY: the native-unit-tests source filter omits CalibrationService.cpp.
 #include "../../src/Services/CalibrationService.cpp"
+// TEST ONLY: the native-unit-tests source filter omits HX710BDriver.cpp.
+#include "../../src/Drivers/HX710BDriver.cpp"
 // TEST ONLY: these host-only dataset components are covered by this suite.
 #include "../../src/Dataset/AnnotationManager.cpp"
 #include "../../src/Dataset/DatasetSplitter.cpp"
@@ -59,6 +70,80 @@
 #include "../../src/Models/Serialization.cpp"
 // TEST ONLY: the native-unit-tests source filter omits StorageManager.cpp.
 #include "../../src/Storage/StorageManager.cpp"
+// TEST ONLY: the native-unit-tests source filter omits SerialDiagnostics.cpp.
+#include "../../src/Diagnostics/SerialDiagnostics.cpp"
+
+namespace ArduinoFake {
+std::uint32_t nowUs = 0U;
+std::uint8_t dataPin = 0U;
+std::uint8_t clockPin = 0U;
+bool defaultDataHigh = false;
+bool clockHigh = false;
+std::uint32_t risingClockEdges = 0U;
+bool dataLevels[64]{};
+std::size_t dataLevelCount = 0U;
+std::size_t nextDataLevel = 0U;
+
+void reset() noexcept {
+    nowUs = 0U;
+    dataPin = 0U;
+    clockPin = 0U;
+    defaultDataHigh = false;
+    clockHigh = false;
+    risingClockEdges = 0U;
+    dataLevelCount = 0U;
+    nextDataLevel = 0U;
+}
+
+void queueDataLevel(const bool high) noexcept {
+    if (dataLevelCount < sizeof(dataLevels) / sizeof(dataLevels[0])) {
+        dataLevels[dataLevelCount++] = high;
+    }
+}
+}  // namespace ArduinoFake
+
+void pinMode(const std::uint8_t pin, const std::uint8_t mode) {
+    if (mode == OUTPUT) {
+        ArduinoFake::clockPin = pin;
+    } else {
+        ArduinoFake::dataPin = pin;
+    }
+}
+
+void digitalWrite(const std::uint8_t pin, const std::uint8_t level) {
+    if (pin != ArduinoFake::clockPin) {
+        return;
+    }
+    const bool high = level == HIGH;
+    if (high && !ArduinoFake::clockHigh) {
+        ++ArduinoFake::risingClockEdges;
+    }
+    ArduinoFake::clockHigh = high;
+}
+
+int digitalRead(const std::uint8_t pin) {
+    if (pin != ArduinoFake::dataPin) {
+        return ArduinoFake::defaultDataHigh ? HIGH : LOW;
+    }
+    if (ArduinoFake::nextDataLevel < ArduinoFake::dataLevelCount) {
+        return ArduinoFake::dataLevels[ArduinoFake::nextDataLevel++]
+                   ? HIGH
+                   : LOW;
+    }
+    return ArduinoFake::defaultDataHigh ? HIGH : LOW;
+}
+
+std::uint32_t micros() {
+    return ArduinoFake::nowUs;
+}
+
+void delayMicroseconds(const std::uint32_t duration) {
+    ArduinoFake::nowUs += duration;
+}
+
+void yield() {
+    ++ArduinoFake::nowUs;
+}
 
 namespace {
 
@@ -69,6 +154,66 @@ using project::models::RiskState;
 using project::models::SensorChannel;
 using project::models::SensorHealth;
 using project::models::SensorStatus;
+
+project::drivers::Hx710bCalibration approvedHx710bCalibration() {
+    project::drivers::Hx710bCalibration calibration{};
+    calibration.version = 7U;
+    calibration.transducerIdentityId = 42U;
+    calibration.rawZeroCount = 100;
+    calibration.rawFullScaleCount = 200;
+    calibration.zeroPressureKpa = 0.0F;
+    calibration.fullScalePressureKpa = 40.0F;
+    calibration.minimumPressureKpa = 0.0F;
+    calibration.maximumPressureKpa = 50.0F;
+    calibration.pressureCalibrationConfigured = true;
+    calibration.transducerIdentityVerified = true;
+    calibration.transducerRangeVerified = true;
+    calibration.pressureCalibrationApproved = true;
+    return calibration;
+}
+
+project::drivers::Hx710bProtocolConfig verifiedHx710bProtocol() {
+    project::drivers::Hx710bProtocolConfig protocol{};
+    protocol.readyTimeoutUs = 200000U;
+    protocol.conversionTimeoutUs =
+        project::drivers::kHx710bMaximumReadyTimeoutUs - 2U;
+    protocol.clockHalfPeriodUs = 1U;
+    protocol.dataBitCount = project::drivers::kHx710bDataBitCount;
+    protocol.trailingClockPulses =
+        project::drivers::kHx710bTrailingClockPulses;
+    protocol.readyLevelHigh = false;
+    protocol.signedOutput = true;
+    protocol.verifiedAgainstDatasheet = true;
+    return protocol;
+}
+
+class FakeHx710bTransport final
+    : public project::drivers::IHx710bTransport {
+public:
+    project::drivers::Hx710bTransportStatus begin() noexcept override {
+        return beginStatus;
+    }
+
+    project::drivers::Hx710bTransportStatus readRaw(
+        std::int32_t& rawValue) noexcept override {
+        rawValue = 0;
+        if (nextRead >= statuses.size()) {
+            return project::drivers::Hx710bTransportStatus::ReadFailure;
+        }
+        const auto status = statuses[nextRead];
+        if (status == project::drivers::Hx710bTransportStatus::Ok) {
+            rawValue = values[nextRead];
+        }
+        ++nextRead;
+        return status;
+    }
+
+    project::drivers::Hx710bTransportStatus beginStatus{
+        project::drivers::Hx710bTransportStatus::Ok};
+    std::array<project::drivers::Hx710bTransportStatus, 3> statuses{};
+    std::array<std::int32_t, 3> values{};
+    std::size_t nextRead{0U};
+};
 
 project::models::EventRecord serializableEventRecord() {
     project::models::EventRecord event{};
@@ -759,6 +904,7 @@ struct TestSensor final : project::drivers::ISensor {
     TestClock& clock;
     std::uint8_t failedReadsRemaining{0U};
     std::uint32_t readDurationMicros{0U};
+    bool soilPending{false};
 
     TestSensor(char sensorId, SensorCallLog& callLog,
                TestClock& testClock) noexcept
@@ -772,6 +918,16 @@ struct TestSensor final : project::drivers::ISensor {
     SensorStatus read(project::models::SensorFrame& output) override {
         calls.append(id);
         clock.currentMicros += readDurationMicros;
+        if (id == 'S' && soilPending) {
+            output.soilMoistureProbes[0].rawAdcCount = 2100;
+            output.soilMoistureProbes[0].timestampMs =
+                clock.currentMicros / 1000U;
+            output.soilMoistureProbes[0].sampleCount = 2U;
+            output.soilMoistureProbes[0].quality =
+                project::models::SoilMoistureQuality::WarmingUp;
+            output.soilMoistureRequiredChannelCount = 2U;
+            return {SensorHealth::Degraded, false, 0U, 0U, 0U};
+        }
         if (failedReadsRemaining > 0U) {
             --failedReadsRemaining;
             return {SensorHealth::Fault, false, 1U, 0U, 0U};
@@ -791,9 +947,23 @@ struct TestSensor final : project::drivers::ISensor {
                 output.rainRaw = 300;
                 output.rainWetnessRelativePct = 25.0F;
                 output.rainWetnessValid = true;
+                output.rainDigitalWet = true;
+                output.rainDigitalValid = true;
+                output.rainAccEquivalentWetSeconds = 12.5F;
+                output.rainAccCoverageMs = 120000U;
+                output.rainAccValid = true;
+                output.rainAoStatus =
+                    {SensorHealth::Healthy, true, 0U, 0U, 1000U};
+                output.rainDoStatus =
+                    {SensorHealth::Healthy, true, 0U, 0U, 1000U};
+                output.rainAccumulationStatus =
+                    {SensorHealth::Healthy, true, 0U, 0U, 1000U};
                 break;
             case 'H':
                 output.hx710bRaw = 123456;
+                output.hx710bRawSampleCount = 3U;
+                output.hx710bTransducerIdentityId = 42U;
+                output.hx710bCalibrationVersion = 7U;
                 break;
             default:
                 break;
@@ -1024,6 +1194,9 @@ void testSensorManagerReadsSensorsInOrderAndRetries() {
     TEST_ASSERT_TRUE(frame.soilStatus.valid);
     TEST_ASSERT_TRUE(frame.rainStatus.valid);
     TEST_ASSERT_TRUE(frame.hx710bStatus.valid);
+    TEST_ASSERT_EQUAL_UINT8(3U, frame.hx710bRawSampleCount);
+    TEST_ASSERT_EQUAL_UINT32(42U, frame.hx710bTransducerIdentityId);
+    TEST_ASSERT_EQUAL_UINT32(7U, frame.hx710bCalibrationVersion);
     TEST_ASSERT_EQUAL_INT(5, static_cast<int>(calls.count));
     TEST_ASSERT_EQUAL_CHAR('I', calls.values[0]);
     TEST_ASSERT_EQUAL_CHAR('S', calls.values[1]);
@@ -1035,6 +1208,54 @@ void testSensorManagerReadsSensorsInOrderAndRetries() {
 
     TEST_ASSERT_FALSE(manager.pollDue(1099999U));
     TEST_ASSERT_TRUE(manager.pollDue(1100000U));
+}
+
+void testSensorManagerAllowsAbsentOptionalSensorWithoutZeroValidity() {
+    SensorCallLog calls{};
+    TestClock clock{};
+    TestSensor imu('I', calls, clock);
+    TestSensor soil('S', calls, clock);
+    TestSensor hx710b('H', calls, clock);
+    auto config = sensorManagerConfig();
+    const auto rainIndex = static_cast<std::size_t>(
+        project::managers::SensorSlot::Rain);
+    config.availability[rainIndex] = {false, false};
+
+    project::managers::SensorManager manager(
+        &imu, &soil, nullptr, &hx710b, config, clock);
+    TEST_ASSERT_TRUE(manager.beginAll());
+    TEST_ASSERT_EQUAL_UINT(3U, calls.count);
+    TEST_ASSERT_EQUAL_CHAR('I', calls.values[0]);
+    TEST_ASSERT_EQUAL_CHAR('S', calls.values[1]);
+    TEST_ASSERT_EQUAL_CHAR('H', calls.values[2]);
+
+    calls.count = 0U;
+    TEST_ASSERT_TRUE(manager.pollDue(1000000U));
+    project::models::SensorFrame frame{};
+    TEST_ASSERT_TRUE(manager.readSnapshot(frame));
+    TEST_ASSERT_FALSE(frame.rainStatus.valid);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(SensorHealth::Unknown),
+        static_cast<int>(frame.rainStatus.health));
+    TEST_ASSERT_FALSE(frame.rainWetnessValid);
+    TEST_ASSERT_EQUAL_UINT(3U, calls.count);
+}
+
+void testSensorManagerRejectsMissingRequiredSensor() {
+    SensorCallLog calls{};
+    TestClock clock{};
+    TestSensor imu('I', calls, clock);
+    TestSensor soil('S', calls, clock);
+    TestSensor hx710b('H', calls, clock);
+    auto config = sensorManagerConfig();
+    const auto rainIndex = static_cast<std::size_t>(
+        project::managers::SensorSlot::Rain);
+    config.availability[rainIndex] = {false, true};
+
+    project::managers::SensorManager manager(
+        &imu, &soil, nullptr, &hx710b, config, clock);
+    TEST_ASSERT_FALSE(manager.beginAll());
+    TEST_ASSERT_EQUAL_UINT(0U, calls.count);
 }
 
 void testSensorManagerMarksReadTimeoutAndContinuesSnapshot() {
@@ -1096,6 +1317,64 @@ void testSensorManagerKeepsPerSensorReadTimestamps() {
     TEST_ASSERT_EQUAL_UINT64(1012U, frame.hx710bStatus.timestampMs);
 }
 
+void testSensorManagerPreservesDegradedSoilChannelState() {
+    SensorCallLog calls{};
+    TestClock clock{};
+    TestSensor imu('I', calls, clock);
+    TestSensor soil('S', calls, clock);
+    TestSensor rain('R', calls, clock);
+    TestSensor hx710b('H', calls, clock);
+    soil.soilPending = true;
+    auto config = sensorManagerConfig();
+    project::managers::SensorManager manager(
+        imu, soil, rain, hx710b, config, clock);
+
+    TEST_ASSERT_TRUE(manager.beginAll());
+    TEST_ASSERT_TRUE(manager.pollDue(1000000U));
+    project::models::SensorFrame frame{};
+    TEST_ASSERT_TRUE(manager.readSnapshot(frame));
+    TEST_ASSERT_FALSE(frame.soilStatus.valid);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(SensorHealth::Degraded),
+        static_cast<int>(frame.soilStatus.health));
+    TEST_ASSERT_EQUAL_INT32(2100,
+                            frame.soilMoistureProbes[0].rawAdcCount);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::models::SoilMoistureQuality::WarmingUp),
+        static_cast<int>(frame.soilMoistureProbes[0].quality));
+    TEST_ASSERT_FALSE(frame.soilMoistureAverageValid);
+    TEST_ASSERT_EQUAL_UINT32(
+        0U, manager.diagnostics(project::managers::SensorSlot::Soil)
+                .readFailures);
+}
+
+void testSensorManagerPreservesIndependentRainChannels() {
+    SensorCallLog calls{};
+    TestClock clock{};
+    TestSensor imu('I', calls, clock);
+    TestSensor soil('S', calls, clock);
+    TestSensor rain('R', calls, clock);
+    TestSensor hx710b('H', calls, clock);
+    auto config = sensorManagerConfig();
+    project::managers::SensorManager manager(
+        imu, soil, rain, hx710b, config, clock);
+
+    TEST_ASSERT_TRUE(manager.beginAll());
+    TEST_ASSERT_TRUE(manager.pollDue(1000000U));
+    project::models::SensorFrame frame{};
+    TEST_ASSERT_TRUE(manager.readSnapshot(frame));
+    TEST_ASSERT_TRUE(frame.rainWetnessValid);
+    TEST_ASSERT_TRUE(frame.rainAoStatus.valid);
+    TEST_ASSERT_TRUE(frame.rainDigitalValid);
+    TEST_ASSERT_TRUE(frame.rainDigitalWet);
+    TEST_ASSERT_TRUE(frame.rainDoStatus.valid);
+    TEST_ASSERT_TRUE(frame.rainAccValid);
+    TEST_ASSERT_EQUAL_FLOAT(12.5F,
+                            frame.rainAccEquivalentWetSeconds);
+    TEST_ASSERT_EQUAL_UINT32(120000U, frame.rainAccCoverageMs);
+    TEST_ASSERT_TRUE(frame.rainAccumulationStatus.valid);
+}
+
 void testDataQualityClassifiesRequiredChannelStates() {
     project::services::DataQualityService service(qualityConfig());
     const auto source = goodSensorFrame();
@@ -1151,6 +1430,74 @@ void testDataQualityClassifiesRequiredChannelStates() {
         static_cast<int>(DataQualityState::NON_FINITE),
         static_cast<int>(output.channelQuality[static_cast<std::size_t>(
             SensorChannel::AccelXG)]));
+}
+
+void testDataQualityPropagatesRainChannelValidityIndependently() {
+    auto config = qualityConfig();
+    auto& digitalRange = config.ranges[static_cast<std::size_t>(
+        SensorChannel::RainDigitalWet)];
+    digitalRange = {0.0, 1.0, true};
+    auto& accumulationRange = config.ranges[static_cast<std::size_t>(
+        SensorChannel::RainAccumulationEquivalentWetSeconds)];
+    accumulationRange = {0.0, 120.0, true};
+    project::services::DataQualityService service(config);
+
+    auto source = goodSensorFrame();
+    const SensorStatus valid{SensorHealth::Healthy, true, 0U, 0U, 95U};
+    source.rainStatus = valid;
+    source.rainAoStatus = valid;
+    source.rainDoStatus = valid;
+    source.rainAccumulationStatus = valid;
+    source.rainWetnessRelativePct = 25.0F;
+    source.rainWetnessValid = true;
+    source.rainDigitalWet = true;
+    source.rainDigitalValid = true;
+    source.rainAccEquivalentWetSeconds = 35.0F;
+    source.rainAccValid = true;
+
+    project::models::ProcessedFrame output{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::services::DataQualityServiceStatus::Ok),
+        static_cast<int>(service.process(source, 100U, output)));
+    TEST_ASSERT_TRUE(output.rainDigitalWetValid);
+    TEST_ASSERT_TRUE(output.rainDigitalWet);
+    TEST_ASSERT_TRUE(output.rainAccValid);
+    TEST_ASSERT_EQUAL_FLOAT(35.0F,
+                            output.rainAccEquivalentWetSeconds);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DataQualityState::VALID),
+        static_cast<int>(output.channelQuality[static_cast<std::size_t>(
+            SensorChannel::RainDigitalWet)]));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DataQualityState::VALID),
+        static_cast<int>(output.channelQuality[static_cast<std::size_t>(
+            SensorChannel::RainAccumulationEquivalentWetSeconds)]));
+
+    source.rainAoStatus.valid = false;
+    source.rainWetnessValid = false;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::services::DataQualityServiceStatus::Ok),
+        static_cast<int>(service.process(source, 100U, output)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DataQualityState::MISSING),
+        static_cast<int>(output.channelQuality[static_cast<std::size_t>(
+            SensorChannel::RainRaw)]));
+    TEST_ASSERT_TRUE(output.rainDigitalWetValid);
+    TEST_ASSERT_TRUE(output.rainAccValid);
+
+    source.rainAoStatus = valid;
+    source.rainWetnessValid = true;
+    source.rainDoStatus.valid = false;
+    source.rainDigitalValid = false;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::services::DataQualityServiceStatus::Ok),
+        static_cast<int>(service.process(source, 100U, output)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DataQualityState::MISSING),
+        static_cast<int>(output.channelQuality[static_cast<std::size_t>(
+            SensorChannel::RainDigitalWet)]));
+    TEST_ASSERT_FALSE(output.rainDigitalWetValid);
+    TEST_ASSERT_TRUE(output.rainAccValid);
 }
 
 void testDataQualityRejectsUnconfiguredPolicy() {
@@ -2357,6 +2704,35 @@ void testConfigManagerAcceptsValidTestOnlyManifestWithoutArtifacts() {
     TEST_ASSERT_TRUE(report.valid());
 }
 
+void testConfigManagerValidatesOptionalSensorTimeoutsAndRequiredness() {
+    auto fixture = testManifestFixture();
+    fixture.bind();
+    project::managers::SensorManagerConfig sensorManager{};
+    sensorManager.samplePeriodMicros = 100000U;
+    for (auto& policy : sensorManager.readPolicies) {
+    policy.beginTimeoutMicros = 100U;
+    policy.timeoutMicros = 100U;
+    }
+
+    const auto rainIndex = static_cast<std::size_t>(
+    project::managers::SensorSlot::Rain);
+    sensorManager.availability[rainIndex] = {false, false};
+    sensorManager.readPolicies[rainIndex] = {};
+    fixture.manifest.sensorManager = &sensorManager;
+
+    project::managers::ValidationReport report{};
+    TEST_ASSERT_EQUAL_INT(
+    static_cast<int>(project::models::ApiStatus::Ok),
+    static_cast<int>(project::managers::ConfigManager::validateManifest(
+        fixture.manifest, report)));
+
+    sensorManager.availability[rainIndex] = {false, true};
+    TEST_ASSERT_NOT_EQUAL(
+    static_cast<int>(project::models::ApiStatus::Ok),
+    static_cast<int>(project::managers::ConfigManager::validateManifest(
+        fixture.manifest, report)));
+}
+
 void testConfigManagerReportsMissingManifestField() {
     auto fixture = testManifestFixture();
     fixture.bind();
@@ -2541,7 +2917,7 @@ void testConfigManagerKeepsProductionActivationFailClosed() {
 }
 
 project::managers::AppControllerConfig appControllerTestConfig() noexcept {
-    return {40U, 70U, 90U};
+    return {40U, 70U, 90U, true};
 }
 
 void testAppControllerStartsPhasesInOrderAndGatesInference() {
@@ -2648,6 +3024,29 @@ void testAppControllerFailsClosedWhenInferenceGateCannotOpen() {
     }
     TEST_ASSERT_EQUAL_UINT(
         project::managers::AppController::kPhaseCount, startedPhaseCount);
+}
+
+void testAppControllerKeepsInferenceDisabledWithoutApproval() {
+    FakeAppLifecycle lifecycle{};
+    auto config = appControllerTestConfig();
+    config.inferenceApproved = false;
+    project::managers::AppController controller{lifecycle, config};
+
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::managers::AppControllerStatus::Ok),
+        static_cast<int>(controller.begin()));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::managers::AppControllerState::Running),
+        static_cast<int>(controller.state()));
+    TEST_ASSERT_FALSE(controller.inferenceEnabled());
+    TEST_ASSERT_FALSE(lifecycle.inferenceEnabled);
+
+    for (std::size_t index = 0U; index < lifecycle.callCount; ++index) {
+        const auto& call = lifecycle.calls[index];
+        if (call.call == FakeAppLifecycle::Call::InferenceGate) {
+            TEST_ASSERT_FALSE(call.value);
+        }
+    }
 }
 
 void testAppControllerShutdownOrderAndRepeatedCalls() {
@@ -3064,6 +3463,275 @@ void testCalibrationServiceRejectsMissingFrameSchemaVersion() {
     TEST_ASSERT_EQUAL_UINT32(0U, output.validMask);
 }
 
+void testHx710bProtocolSignExtendsAndSendsTwentyFiveTrailingPulses() {
+    ArduinoFake::reset();
+    project::bsp::BoardPins pins{};
+    pins.hx710.clock.number = 4;
+    pins.hx710.data.number = 5;
+    const auto protocol = verifiedHx710bProtocol();
+    project::drivers::ArduinoHx710bTransport transport{pins, protocol};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::drivers::Hx710bTransportStatus::Ok),
+        static_cast<int>(transport.begin()));
+
+    constexpr std::uint32_t minimumSigned24Bits = 0x800000U;
+    ArduinoFake::queueDataLevel(false);
+    for (int bit = 23; bit >= 0; --bit) {
+        ArduinoFake::queueDataLevel(
+            (minimumSigned24Bits & (1U << bit)) != 0U);
+    }
+
+    std::int32_t rawValue = 123;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::drivers::Hx710bTransportStatus::Ok),
+        static_cast<int>(transport.readRaw(rawValue)));
+    TEST_ASSERT_EQUAL_INT32(
+        project::drivers::kHx710bSigned24Minimum, rawValue);
+    TEST_ASSERT_EQUAL_UINT32(49U, ArduinoFake::risingClockEdges);
+
+    ArduinoFake::reset();
+    auto exactBudgetProtocol = protocol;
+    exactBudgetProtocol.conversionTimeoutUs = 98U;
+    project::drivers::ArduinoHx710bTransport exactBudgetTransport{
+        pins, exactBudgetProtocol};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::drivers::Hx710bTransportStatus::Ok),
+        static_cast<int>(exactBudgetTransport.begin()));
+    ArduinoFake::queueDataLevel(false);
+    for (std::uint8_t bit = 0U;
+         bit < project::drivers::kHx710bDataBitCount; ++bit) {
+        ArduinoFake::queueDataLevel(false);
+    }
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::drivers::Hx710bTransportStatus::Ok),
+        static_cast<int>(exactBudgetTransport.readRaw(rawValue)));
+    TEST_ASSERT_EQUAL_UINT32(98U, ArduinoFake::nowUs);
+
+    auto invalidProtocol = protocol;
+    invalidProtocol.trailingClockPulses = 3U;
+    ArduinoFake::reset();
+    project::drivers::ArduinoHx710bTransport invalidTransport{
+        pins, invalidProtocol};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::drivers::Hx710bTransportStatus::InvalidConfiguration),
+        static_cast<int>(invalidTransport.begin()));
+}
+
+void testHx710bReadyTimeoutIsBounded() {
+    ArduinoFake::reset();
+    ArduinoFake::defaultDataHigh = true;
+    project::bsp::BoardPins pins{};
+    pins.hx710.clock.number = 4;
+    pins.hx710.data.number = 5;
+    auto protocol = verifiedHx710bProtocol();
+    protocol.readyTimeoutUs = 10U;
+    project::drivers::ArduinoHx710bTransport transport{pins, protocol};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::drivers::Hx710bTransportStatus::Ok),
+        static_cast<int>(transport.begin()));
+
+    std::int32_t rawValue = 99;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::drivers::Hx710bTransportStatus::NotReady),
+        static_cast<int>(transport.readRaw(rawValue)));
+    TEST_ASSERT_EQUAL_UINT32(10U, ArduinoFake::nowUs);
+    TEST_ASSERT_EQUAL_INT32(0, rawValue);
+}
+
+void testHx710bDriverAveragesValidReadsAndClearsAllFailureOutput() {
+    FakeHx710bTransport partialTransport{};
+    partialTransport.statuses = {
+        project::drivers::Hx710bTransportStatus::Ok,
+        project::drivers::Hx710bTransportStatus::Timeout,
+        project::drivers::Hx710bTransportStatus::Ok};
+    partialTransport.values = {10, 0, 30};
+    project::drivers::HX710BDriver partialDriver{
+        partialTransport, project::drivers::Hx710bCalibration{}};
+    TEST_ASSERT_TRUE(partialDriver.begin().valid);
+
+    project::drivers::Hx710bSample sample{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::drivers::Hx710bStatus::Ok),
+        static_cast<int>(partialDriver.readSample(sample)));
+    TEST_ASSERT_TRUE(sample.valid);
+    TEST_ASSERT_EQUAL_INT32(20, sample.rawValue);
+    TEST_ASSERT_EQUAL_UINT8(2U, sample.sampleCount);
+    TEST_ASSERT_TRUE(
+        (sample.qualityFlags &
+         project::drivers::hx710bQualityMask(
+             project::drivers::Hx710bQualityFlag::PartialSampleCount)) !=
+        0U);
+    partialTransport.nextRead = 0U;
+    project::models::SensorFrame rawFrame{};
+    TEST_ASSERT_TRUE(partialDriver.read(rawFrame).valid);
+    TEST_ASSERT_EQUAL_INT32(20, rawFrame.hx710bRaw);
+    TEST_ASSERT_EQUAL_UINT8(2U, rawFrame.hx710bRawSampleCount);
+    TEST_ASSERT_EQUAL_UINT32(0U, rawFrame.hx710bTransducerIdentityId);
+    TEST_ASSERT_EQUAL_FLOAT(0.0F, rawFrame.hx710bCalibratedValue);
+
+    FakeHx710bTransport failedTransport{};
+    failedTransport.statuses = {
+        project::drivers::Hx710bTransportStatus::Timeout,
+        project::drivers::Hx710bTransportStatus::ReadFailure,
+        project::drivers::Hx710bTransportStatus::NotReady};
+    project::drivers::HX710BDriver failedDriver{
+        failedTransport, project::drivers::Hx710bCalibration{}};
+    TEST_ASSERT_TRUE(failedDriver.begin().valid);
+
+    project::models::SensorFrame frame{};
+    frame.hx710bRaw = 1234;
+    frame.hx710bRawSampleCount = 3U;
+    frame.hx710bTransducerIdentityId = 42U;
+    TEST_ASSERT_FALSE(failedDriver.read(frame).valid);
+    TEST_ASSERT_EQUAL_INT32(0, frame.hx710bRaw);
+    TEST_ASSERT_EQUAL_UINT8(0U, frame.hx710bRawSampleCount);
+    TEST_ASSERT_EQUAL_UINT32(0U, frame.hx710bTransducerIdentityId);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::models::SensorHealth::Fault),
+        static_cast<int>(frame.hx710bStatus.health));
+}
+
+void testHx710bCalibrationRequiresMatchingApprovedProfile() {
+    auto calibration = approvedHx710bCalibration();
+    project::services::Hx710bBaselinePolicy baselinePolicy{};
+    baselinePolicy.maximumSampleAgeMs = 2000U;
+    baselinePolicy.configured = true;
+    project::services::CalibrationService service{
+        calibration, baselinePolicy};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::services::CalibrationMode::Hx710bPressureOnly),
+        static_cast<int>(service.mode()));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::models::ApiStatus::Ok),
+        static_cast<int>(service.loadCalibrationStatus()));
+
+    project::models::SensorFrame input{};
+    input.schemaVersion = 1U;
+    input.timestampMs = 1000U;
+    input.hx710bRaw = 150;
+    input.hx710bRawSampleCount = 3U;
+    input.hx710bTransducerIdentityId = calibration.transducerIdentityId;
+    input.hx710bCalibrationVersion = calibration.version;
+    input.hx710bStatus = {SensorHealth::Healthy, true, 0U, 0U, 1000U};
+    project::models::ProcessedFrame output{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::models::ApiStatus::Ok),
+        static_cast<int>(service.processStatus(input, output)));
+    TEST_ASSERT_TRUE(output.hx710bCalibratedValueValid);
+    TEST_ASSERT_EQUAL_FLOAT(20.0F, output.hx710bCalibratedValue);
+    TEST_ASSERT_EQUAL_UINT32(calibration.transducerIdentityId,
+                             output.hx710bTransducerIdentityId);
+    TEST_ASSERT_EQUAL_UINT32(calibration.version,
+                             output.hx710bCalibrationVersion);
+
+    input.hx710bTransducerIdentityId += 1U;
+    output.hx710bCalibratedValue = 77.0F;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::models::ApiStatus::VersionMismatch),
+        static_cast<int>(service.processStatus(input, output)));
+    TEST_ASSERT_FALSE(output.hx710bCalibratedValueValid);
+    TEST_ASSERT_EQUAL_FLOAT(0.0F, output.hx710bCalibratedValue);
+    TEST_ASSERT_EQUAL(
+        static_cast<int>(DataQualityState::CALIBRATION_INVALID),
+        static_cast<int>(output.channelQuality[static_cast<std::size_t>(
+            SensorChannel::Hx710bCalibratedValue)]));
+
+    calibration.pressureCalibrationApproved = false;
+    project::services::CalibrationService unapprovedService{
+        calibration, baselinePolicy};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::services::CalibrationMode::RawOnly),
+        static_cast<int>(unapprovedService.mode()));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::models::ApiStatus::NotInitialized),
+        static_cast<int>(unapprovedService.processStatus(input, output)));
+    TEST_ASSERT_FALSE(output.hx710bCalibratedValueValid);
+}
+
+void testHx710bBaselineNeedsCoverageAndRejectsInvalidOrStaleSamples() {
+    const auto calibration = approvedHx710bCalibration();
+    project::services::Hx710bBaselinePolicy policy{};
+    project::services::CalibrationService disabledService{
+        calibration, policy};
+    project::models::ProcessedFrame emptyFrame{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::services::Hx710bBaselineStatus::Disabled),
+        static_cast<int>(
+            disabledService.updateHx710bBaseline(emptyFrame, 0U)));
+    policy.windowDurationMs = 10000U;
+    policy.configured = true;
+    policy.maximumSampleAgeMs = 8000U;
+    project::services::CalibrationService invalidPolicyService{
+        calibration, policy};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::services::Hx710bBaselineStatus::Disabled),
+        static_cast<int>(invalidPolicyService.hx710bBaseline(0U).status));
+
+    policy.windowDurationMs = 15000U;
+    policy.maximumSampleAgeMs = 8000U;
+    project::services::CalibrationService service{calibration, policy};
+    project::models::ProcessedFrame frame{};
+    frame.hx710bCalibratedValueValid = true;
+    frame.hx710bTransducerIdentityId = calibration.transducerIdentityId;
+    frame.hx710bCalibrationVersion = calibration.version;
+    frame.channelQuality[static_cast<std::size_t>(
+        SensorChannel::Hx710bCalibratedValue)] = DataQualityState::VALID;
+    frame.hx710bCalibratedValue = 10.0F;
+    frame.hx710bSampleTimestampMs = 1000U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::services::Hx710bBaselineStatus::InsufficientData),
+        static_cast<int>(service.updateHx710bBaseline(frame, 1000U)));
+
+    auto invalidFrame = frame;
+    invalidFrame.hx710bSampleTimestampMs = 7000U;
+    invalidFrame.channelQuality[static_cast<std::size_t>(
+        SensorChannel::Hx710bCalibratedValue)] = DataQualityState::MISSING;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::services::Hx710bBaselineStatus::InsufficientData),
+        static_cast<int>(
+            service.updateHx710bBaseline(invalidFrame, 7000U)));
+    TEST_ASSERT_EQUAL_UINT32(
+        1U, service.hx710bBaseline(7000U).validSampleCount);
+
+    frame.hx710bCalibratedValue = 20.0F;
+    frame.hx710bSampleTimestampMs = 8000U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::services::Hx710bBaselineStatus::InsufficientData),
+        static_cast<int>(service.updateHx710bBaseline(frame, 8000U)));
+    frame.hx710bCalibratedValue = 30.0F;
+    frame.hx710bSampleTimestampMs = 16000U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::services::Hx710bBaselineStatus::Ready),
+        static_cast<int>(service.updateHx710bBaseline(frame, 16000U)));
+
+    const auto readyBaseline = service.hx710bBaseline(16000U);
+    TEST_ASSERT_TRUE(readyBaseline.valid);
+    TEST_ASSERT_EQUAL_UINT32(3U, readyBaseline.validSampleCount);
+    TEST_ASSERT_EQUAL_FLOAT(20.0F, readyBaseline.pressureKpa);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::services::Hx710bBaselineStatus::Stale),
+        static_cast<int>(service.hx710bBaseline(24001U).status));
+
+    frame.hx710bSampleTimestampMs = 16000U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::services::Hx710bBaselineStatus::Stale),
+        static_cast<int>(service.updateHx710bBaseline(frame, 24001U)));
+    TEST_ASSERT_EQUAL_UINT32(
+        3U, service.hx710bBaseline(16000U).validSampleCount);
+    frame.hx710bSampleTimestampMs = 25000U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            project::services::Hx710bBaselineStatus::InsufficientData),
+        static_cast<int>(service.updateHx710bBaseline(frame, 25000U)));
+    TEST_ASSERT_EQUAL_UINT32(
+        1U, service.hx710bBaseline(25000U).validSampleCount);
+}
+
 void testSchemaRegistryMatchesTestOnlyStructureAndVector() {
     TestSchemaRegistryFixture fixture{};
     project::ai::SchemaCompatibilityReport report{};
@@ -3363,6 +4031,924 @@ void testCsvRowWriterHandlesExactCapacityAndOverflow() {
     TEST_ASSERT_NULL(overflowWriter.data());
 }
 
+void testCsvArtifactWriterExportsVersionedRowsAndIntegrityReport() {
+    using namespace project::dataset;
+
+    constexpr std::array<std::string_view, 4U> columns{{
+        "record_id", "label,raw", "score", "valid_score"}};
+    const CsvArtifactSchema schema{
+        "candidate.csv", 7U, columns.data(), columns.size()};
+    char output[128]{};
+    char rowBuffer[64]{};
+    CsvArtifactWriter writer(output, sizeof(output), rowBuffer,
+                             sizeof(rowBuffer), schema);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvArtifactExportStatus::Ok),
+        static_cast<int>(writer.begin()));
+    constexpr std::string_view expectedHeader =
+        "record_id,\"label,raw\",score,valid_score\n";
+    TEST_ASSERT_EQUAL_MEMORY(expectedHeader.data(), output,
+                             expectedHeader.size());
+
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvArtifactExportStatus::Ok),
+        static_cast<int>(writer.appendRow(
+            [](CsvRowWriter& row) noexcept {
+                if (row.appendField("row,1") != CsvWriteStatus::Ok ||
+                    row.appendField("say \"hi\"") != CsvWriteStatus::Ok ||
+                    row.appendNumber(1.25) != CsvWriteStatus::Ok) {
+                    return row.status();
+                }
+                return row.appendOptionalNumber(
+                    std::numeric_limits<double>::quiet_NaN(), false);
+            })));
+    constexpr std::string_view expectedRow =
+        "\"row,1\",\"say \"\"hi\"\"\",1.25,\n";
+    TEST_ASSERT_EQUAL_MEMORY(expectedRow.data(),
+                             output + expectedHeader.size(),
+                             expectedRow.size());
+
+    CsvArtifactExportReport report{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvArtifactExportStatus::Ok),
+        static_cast<int>(writer.finish(report)));
+    TEST_ASSERT_TRUE(report.complete);
+    TEST_ASSERT_EQUAL_STRING("candidate.csv", report.artifactName.data());
+    TEST_ASSERT_EQUAL_UINT32(7U, report.schemaVersion);
+    TEST_ASSERT_EQUAL_UINT64(1U, report.rowCount);
+    TEST_ASSERT_EQUAL_UINT64(expectedHeader.size() + expectedRow.size(),
+                             report.byteCount);
+
+    Sha256 expectedHash{};
+    std::array<std::uint8_t, Sha256::kDigestSize> expectedDigest{};
+    TEST_ASSERT_TRUE(expectedHash.update(
+        reinterpret_cast<const std::uint8_t*>(output),
+        static_cast<std::size_t>(report.byteCount)));
+    TEST_ASSERT_TRUE(expectedHash.finish(expectedDigest));
+    TEST_ASSERT_EQUAL_MEMORY(expectedDigest.data(), report.sha256.data(),
+                             expectedDigest.size());
+
+    CsvArtifactExportReport incomplete{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvArtifactExportStatus::InvalidState),
+        static_cast<int>(writer.finish(incomplete)));
+    TEST_ASSERT_FALSE(incomplete.complete);
+}
+
+void testCsvArtifactWriterRejectsPartialRowsAndCapacityFailures() {
+    using namespace project::dataset;
+
+    constexpr std::array<std::string_view, 2U> columns{{"first", "second"}};
+    const CsvArtifactSchema schema{
+        "bounded.csv", 1U, columns.data(), columns.size()};
+    constexpr std::string_view expectedHeader = "first,second\n";
+
+    char output[64]{};
+    char shortRowBuffer[16]{};
+    CsvArtifactWriter shortRowWriter(
+        output, sizeof(output), shortRowBuffer, sizeof(shortRowBuffer), schema);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvArtifactExportStatus::Ok),
+        static_cast<int>(shortRowWriter.begin()));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvArtifactExportStatus::CsvWriteError),
+        static_cast<int>(shortRowWriter.appendRow(
+            [](CsvRowWriter& row) noexcept {
+                if (row.appendField("1234567890") != CsvWriteStatus::Ok) {
+                    return row.status();
+                }
+                return row.appendField("abcdefghij");
+            })));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvWriteStatus::CapacityExceeded),
+        static_cast<int>(shortRowWriter.lastCsvStatus()));
+    TEST_ASSERT_EQUAL_UINT64(0U, shortRowWriter.rowsWritten());
+    TEST_ASSERT_EQUAL_MEMORY(expectedHeader.data(), output,
+                             expectedHeader.size());
+    CsvArtifactExportReport failedReport{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvArtifactExportStatus::CsvWriteError),
+        static_cast<int>(shortRowWriter.finish(failedReport)));
+    TEST_ASSERT_FALSE(failedReport.complete);
+
+    char capacityOutput[expectedHeader.size()]{};
+    char rowBuffer[32]{};
+    CsvArtifactWriter capacityWriter(
+        capacityOutput, sizeof(capacityOutput), rowBuffer, sizeof(rowBuffer),
+        schema);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvArtifactExportStatus::Ok),
+        static_cast<int>(capacityWriter.begin()));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvArtifactExportStatus::CapacityExceeded),
+        static_cast<int>(capacityWriter.appendRow(
+            [](CsvRowWriter& row) noexcept {
+                if (row.appendField("a") != CsvWriteStatus::Ok) {
+                    return row.status();
+                }
+                return row.appendField("b");
+            })));
+    TEST_ASSERT_EQUAL_UINT64(0U, capacityWriter.rowsWritten());
+    TEST_ASSERT_EQUAL_MEMORY(expectedHeader.data(), capacityOutput,
+                             expectedHeader.size());
+    failedReport = {};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvArtifactExportStatus::CapacityExceeded),
+        static_cast<int>(capacityWriter.finish(failedReport)));
+    TEST_ASSERT_FALSE(failedReport.complete);
+
+    char nonFiniteOutput[64]{};
+    CsvArtifactWriter nonFiniteWriter(
+        nonFiniteOutput, sizeof(nonFiniteOutput), rowBuffer, sizeof(rowBuffer),
+        CsvArtifactSchema{"numeric.csv", 1U, columns.data(), 1U});
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvArtifactExportStatus::Ok),
+        static_cast<int>(nonFiniteWriter.begin()));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvArtifactExportStatus::CsvWriteError),
+        static_cast<int>(nonFiniteWriter.appendRow(
+            [](CsvRowWriter& row) noexcept {
+                return row.appendNumber(
+                    std::numeric_limits<double>::infinity());
+            })));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CsvWriteStatus::NonFiniteNumber),
+        static_cast<int>(nonFiniteWriter.lastCsvStatus()));
+    TEST_ASSERT_EQUAL_UINT64(0U, nonFiniteWriter.rowsWritten());
+    TEST_ASSERT_EQUAL_MEMORY("first\n", nonFiniteOutput, 6U);
+}
+
+void testWindowCsvExporterWritesGoldenSchemaAndEscapedAuditFields() {
+    using namespace project::dataset;
+
+    static constexpr char schemaHash[] =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    static constexpr char expectedHeader[] =
+        "dataset_id,window_id,site_id,device_id,sensor_set_id,session_id,"
+        "start_boot_id,end_boot_id,start_sequence,end_sequence,"
+        "start_timestamp_ms,end_timestamp_ms,window_length_samples,"
+        "stride_samples,expected_samples,observed_samples,gap_count,"
+        "start_config_id,end_config_id,start_calibration_id,"
+        "end_calibration_id,start_feature_schema_id,end_feature_schema_id,"
+        "start_feature_schema_version,end_feature_schema_version,"
+        "start_feature_schema_sha256,end_feature_schema_sha256,"
+        "missing_required_channel_count,stale_required_channel_count,"
+        "calibration_invalid_required_channel_count,data_origin,"
+        "evidence_class,feature_contract_approved,calibration_approved,"
+        "window_eligible,window_rejection_reason,training_eligible,"
+        "training_rejection_reason,validation_eligible,"
+        "validation_rejection_reason,test_eligible,test_rejection_reason,"
+        "replay_eligible,replay_rejection_reason,safety_analysis_eligible,"
+        "safety_analysis_rejection_reason,annotation_refs,split_group_id,"
+        "split_name,split_policy_version\n";
+    static_assert(kWindowCsvColumns.size() == 50U,
+                  "windows.csv v1 column count changed");
+
+    WindowCsvRecord record{};
+    record.datasetId = "dataset-1";
+    record.windowId = "window-42";
+    record.siteId = "site-1";
+    record.deviceId = "device-1";
+    record.sensorSetId = "sensors-1";
+    record.sessionId = "session-1";
+    record.start = {9U, "config-A", "cal-A", "fss-A", 2U, schemaHash};
+    record.end = record.start;
+    record.startSequence = 100U;
+    record.endSequence = 101U;
+    record.startTimestampMs = 10000U;
+    record.endTimestampMs = 10100U;
+    record.windowLengthSamples = 2U;
+    record.strideSamples = 1U;
+    record.expectedSamples = 2U;
+    record.observedSamples = 2U;
+    record.provenance = {DataOrigin::Bench, EvidenceClass::GT2};
+    record.featureContractApproved = true;
+    record.calibrationApproved = true;
+    record.window = {true, {}};
+    record.training = {true, {}};
+    record.validation = {true, {}};
+    record.test = {true, {}};
+    record.replay = {true, {}};
+    record.safetyAnalysis = {true, {}};
+    record.annotationRefs = "annotation, \"reviewed\"";
+    record.splitGroupId = "group-1";
+    record.splitName = "train";
+    record.splitPolicyVersion = "split-v1";
+
+    char output[4096]{};
+    char rowBuffer[2048]{};
+    WindowCsvExporter exporter(output, sizeof(output), rowBuffer,
+                               sizeof(rowBuffer));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::Ok),
+        static_cast<int>(exporter.begin()));
+    TEST_ASSERT_EQUAL_MEMORY(expectedHeader, output,
+                             sizeof(expectedHeader) - 1U);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::Ok),
+        static_cast<int>(exporter.append(record)));
+    TEST_ASSERT_EQUAL_UINT64(1U, exporter.rowsWritten());
+    TEST_ASSERT_NOT_NULL(std::strstr(
+        output, "\"annotation, \"\"reviewed\"\"\""));
+    TEST_ASSERT_NOT_NULL(std::strstr(
+        output, "true,,true,,true,,true,,true,,true,,"));
+
+    CsvArtifactExportReport report{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::Ok),
+        static_cast<int>(exporter.finish(report)));
+    TEST_ASSERT_TRUE(report.complete);
+    TEST_ASSERT_EQUAL_STRING("windows.csv", report.artifactName.data());
+    TEST_ASSERT_EQUAL_UINT32(kWindowCsvSchemaVersion, report.schemaVersion);
+    TEST_ASSERT_EQUAL_UINT64(1U, report.rowCount);
+    TEST_ASSERT_EQUAL_UINT64(exporter.bytesWritten(), report.byteCount);
+}
+
+void testWindowCsvExporterRejectsQualityAndBoundaryFailuresWithReasons() {
+    using namespace project::dataset;
+
+    static constexpr char schemaHash[] =
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    WindowCsvRecord base{};
+    base.datasetId = "dataset-2";
+    base.windowId = "window-base";
+    base.siteId = "site";
+    base.deviceId = "device";
+    base.sensorSetId = "sensor-set";
+    base.sessionId = "session";
+    base.start = {3U, "cfg", "cal", "fss", 1U, schemaHash};
+    base.end = base.start;
+    base.startSequence = 20U;
+    base.endSequence = 21U;
+    base.startTimestampMs = 2000U;
+    base.endTimestampMs = 2100U;
+    base.windowLengthSamples = 2U;
+    base.strideSamples = 1U;
+    base.expectedSamples = 2U;
+    base.observedSamples = 2U;
+    base.provenance = {DataOrigin::Field, EvidenceClass::GT1};
+    base.featureContractApproved = true;
+    base.calibrationApproved = true;
+    base.window = {true, {}};
+    base.training = {true, {}};
+    base.validation = {true, {}};
+    base.test = {true, {}};
+    base.replay = {true, {}};
+    base.safetyAnalysis = {true, {}};
+    base.splitGroupId = "group";
+    base.splitName = "validation";
+    base.splitPolicyVersion = "policy-1";
+
+    char output[8192]{};
+    char rowBuffer[2048]{};
+    WindowCsvExporter exporter(output, sizeof(output), rowBuffer,
+                               sizeof(rowBuffer));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::Ok),
+        static_cast<int>(exporter.begin()));
+
+    WindowCsvRecord invalid = base;
+    invalid.gapCount = 1U;
+    invalid.endSequence = 22U;
+    invalid.windowId = "gap";
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::Ok),
+        static_cast<int>(exporter.append(invalid)));
+
+    invalid = base;
+    invalid.windowId = "incomplete";
+    invalid.observedSamples = 1U;
+    invalid.endSequence = invalid.startSequence;
+    invalid.endTimestampMs = invalid.startTimestampMs;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::Ok),
+        static_cast<int>(exporter.append(invalid)));
+
+    invalid = base;
+    invalid.windowId = "boot-boundary";
+    invalid.end.bootId++;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::Ok),
+        static_cast<int>(exporter.append(invalid)));
+    invalid = base;
+    invalid.windowId = "config-boundary";
+    invalid.end.configId = "cfg-next";
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::Ok),
+        static_cast<int>(exporter.append(invalid)));
+    invalid = base;
+    invalid.windowId = "calibration-boundary";
+    invalid.end.calibrationId = "cal-next";
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::Ok),
+        static_cast<int>(exporter.append(invalid)));
+    invalid = base;
+    invalid.windowId = "schema-boundary";
+    invalid.end.featureSchemaVersion++;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::Ok),
+        static_cast<int>(exporter.append(invalid)));
+
+    invalid = base;
+    invalid.windowId = "missing-channel";
+    invalid.missingRequiredChannelCount = 1U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::Ok),
+        static_cast<int>(exporter.append(invalid)));
+    invalid = base;
+    invalid.windowId = "stale-channel";
+    invalid.staleRequiredChannelCount = 1U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::Ok),
+        static_cast<int>(exporter.append(invalid)));
+    invalid = base;
+    invalid.windowId = "invalid-calibration";
+    invalid.calibrationInvalidRequiredChannelCount = 1U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::Ok),
+        static_cast<int>(exporter.append(invalid)));
+    TEST_ASSERT_EQUAL_UINT64(9U, exporter.rowsWritten());
+
+    TEST_ASSERT_NOT_NULL(std::strstr(output, "INCOMPLETE_WINDOW"));
+    TEST_ASSERT_NOT_NULL(std::strstr(output, "SEQUENCE_GAP"));
+    TEST_ASSERT_NOT_NULL(std::strstr(output, "BOOT_BOUNDARY"));
+    TEST_ASSERT_NOT_NULL(std::strstr(output, "CONFIG_BOUNDARY"));
+    TEST_ASSERT_NOT_NULL(std::strstr(output, "CALIBRATION_BOUNDARY"));
+    TEST_ASSERT_NOT_NULL(std::strstr(output, "FEATURE_SCHEMA_BOUNDARY"));
+    TEST_ASSERT_NOT_NULL(std::strstr(output, "MISSING_REQUIRED_CHANNEL"));
+    TEST_ASSERT_NOT_NULL(std::strstr(output, "STALE_REQUIRED_CHANNEL"));
+    TEST_ASSERT_NOT_NULL(
+        std::strstr(output, "CALIBRATION_INVALID_REQUIRED_CHANNEL"));
+    TEST_ASSERT_NOT_NULL(
+        std::strstr(output, "false,SEQUENCE_GAP,false,SEQUENCE_GAP"));
+
+    invalid = base;
+    invalid.windowId = "missing-identity";
+    invalid.sessionId = {};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::InvalidRecord),
+        static_cast<int>(exporter.append(invalid)));
+    invalid = base;
+    invalid.windowId = "UNKNOWN";
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::InvalidRecord),
+        static_cast<int>(exporter.append(invalid)));
+    TEST_ASSERT_EQUAL_UINT64(9U, exporter.rowsWritten());
+
+    CsvArtifactExportReport report{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::Ok),
+        static_cast<int>(exporter.finish(report)));
+    TEST_ASSERT_TRUE(report.complete);
+    TEST_ASSERT_EQUAL_UINT64(9U, report.rowCount);
+}
+
+void testWindowCsvExporterRequiresApprovalAndReportsBoundedFailures() {
+    using namespace project::dataset;
+
+    static constexpr char schemaHash[] =
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    WindowCsvRecord record{};
+    record.datasetId = "dataset-3";
+    record.windowId = "window-approval";
+    record.siteId = "site";
+    record.deviceId = "device";
+    record.sensorSetId = "sensor-set";
+    record.sessionId = "session";
+    record.start = {5U, "cfg", "cal", "fss", 1U, schemaHash};
+    record.end = record.start;
+    record.startSequence = 1U;
+    record.endSequence = 2U;
+    record.startTimestampMs = 10U;
+    record.endTimestampMs = 20U;
+    record.windowLengthSamples = 2U;
+    record.strideSamples = 1U;
+    record.expectedSamples = 2U;
+    record.observedSamples = 2U;
+    record.provenance = {DataOrigin::Replay, EvidenceClass::NotApplicable};
+    record.window = {true, {}};
+    record.training = {true, {}};
+    record.validation = {true, {}};
+    record.test = {true, {}};
+    record.replay = {true, {}};
+    record.safetyAnalysis = {true, {}};
+    record.splitGroupId = "group";
+    record.splitName = "test";
+    record.splitPolicyVersion = "policy";
+
+    constexpr std::string_view header =
+        "dataset_id,window_id,site_id,device_id,sensor_set_id,session_id,"
+        "start_boot_id,end_boot_id,start_sequence,end_sequence,"
+        "start_timestamp_ms,end_timestamp_ms,window_length_samples,"
+        "stride_samples,expected_samples,observed_samples,gap_count,"
+        "start_config_id,end_config_id,start_calibration_id,"
+        "end_calibration_id,start_feature_schema_id,end_feature_schema_id,"
+        "start_feature_schema_version,end_feature_schema_version,"
+        "start_feature_schema_sha256,end_feature_schema_sha256,"
+        "missing_required_channel_count,stale_required_channel_count,"
+        "calibration_invalid_required_channel_count,data_origin,"
+        "evidence_class,feature_contract_approved,calibration_approved,"
+        "window_eligible,window_rejection_reason,training_eligible,"
+        "training_rejection_reason,validation_eligible,"
+        "validation_rejection_reason,test_eligible,test_rejection_reason,"
+        "replay_eligible,replay_rejection_reason,safety_analysis_eligible,"
+        "safety_analysis_rejection_reason,annotation_refs,split_group_id,"
+        "split_name,split_policy_version\n";
+    char limitedOutput[header.size()]{};
+    char rowBuffer[2048]{};
+    WindowCsvExporter limited(limitedOutput, sizeof(limitedOutput), rowBuffer,
+                              sizeof(rowBuffer));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::Ok),
+        static_cast<int>(limited.begin()));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::CapacityExceeded),
+        static_cast<int>(limited.append(record)));
+    TEST_ASSERT_EQUAL_UINT64(0U, limited.rowsWritten());
+    TEST_ASSERT_EQUAL_MEMORY(header.data(), limitedOutput, header.size());
+    CsvArtifactExportReport report{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::CapacityExceeded),
+        static_cast<int>(limited.finish(report)));
+    TEST_ASSERT_FALSE(report.complete);
+
+    char output[4096]{};
+    WindowCsvExporter exporter(output, sizeof(output), rowBuffer,
+                               sizeof(rowBuffer));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::Ok),
+        static_cast<int>(exporter.begin()));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::Ok),
+        static_cast<int>(exporter.append(record)));
+    record.windowId = "window-calibration-approval";
+    record.featureContractApproved = true;
+    record.calibrationApproved = false;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(WindowCsvExportStatus::Ok),
+        static_cast<int>(exporter.append(record)));
+    TEST_ASSERT_NOT_NULL(
+        std::strstr(output, "false,FEATURE_CONTRACT_NOT_APPROVED"));
+    TEST_ASSERT_NOT_NULL(std::strstr(output, "false,CALIBRATION_NOT_APPROVED"));
+    TEST_ASSERT_NOT_NULL(std::strstr(output, "true,,true,,"));
+}
+
+project::dataset::FeatureCsvSchema featureCsvSchemaFixture() noexcept {
+    using namespace project::dataset;
+    FeatureCsvSchema schema{};
+    schema.featureSchemaId = 12U;
+    schema.featureSchemaVersion = 4U;
+    schema.featureSchemaSha256.fill(0xABU);
+    schema.featureSchemaName = "candidate-fss-12";
+    schema.modelInputKind = "ENGINEERED_FEATURES";
+    schema.slotCount = 2U;
+    schema.slots[0U] = {
+        0U, "tilt_x_deg", "Tilt X", "deg", "approved_tilt_x", 3U};
+    schema.slots[1U] = {
+        1U, "accel_magnitude", "Accel Magnitude", "m/s^2",
+        "approved_accel_magnitude", 3U};
+    schema.featureContractApproved = true;
+    schema.modelMetadataVerified = true;
+    schema.modelSchemaCompatible = true;
+    return schema;
+}
+
+project::models::FeatureVector featureCsvVectorFixture() noexcept {
+    project::models::FeatureVector vector{};
+    vector.schemaId = 12U;
+    vector.schemaVersion = 4U;
+    std::memset(vector.schemaHashSha256, 0xAB,
+                sizeof(vector.schemaHashSha256));
+    vector.schemaHashValid = true;
+    vector.bootId = 7U;
+    vector.relatedSequenceNo = 41U;
+    vector.windowStartMs = 1000U;
+    vector.windowEndMs = 1100U;
+    vector.windowSampleCount = 2U;
+    vector.count = 2U;
+    vector.featureValidMask = 3U;
+    vector.values[0U] = 12.5F;
+    vector.values[1U] = 9.81F;
+    vector.quality.eligibility =
+        project::models::WindowEligibilityState::Eligible;
+    vector.valid = true;
+    return vector;
+}
+
+void testFeatureCsvExporterWritesOrderedSchemaAndExactHash() {
+    using namespace project::dataset;
+    using project::models::DataQualityState;
+
+    FeatureCsvSchema schema = featureCsvSchemaFixture();
+    project::models::FeatureVector vector = featureCsvVectorFixture();
+    const std::array<DataQualityState, 2U> quality{{
+        DataQualityState::VALID, DataQualityState::VALID}};
+    FeatureCsvRecord record{"dataset-a", "window-a", &vector,
+                            quality.data(), quality.size()};
+
+    char output[4096]{};
+    char rowBuffer[2048]{};
+    FeatureCsvExporter exporter(output, sizeof(output), rowBuffer,
+                                sizeof(rowBuffer), schema);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(FeatureCsvExportStatus::Ok),
+        static_cast<int>(exporter.begin()));
+    constexpr std::string_view expectedHeader =
+        "dataset_id,window_id,boot_id,related_sequence_no,window_start_ms,"
+        "window_end_ms,window_sample_count,feature_schema_id,"
+        "feature_schema_version,feature_schema_sha256,model_input_kind,"
+        "feature_contract_approved,model_metadata_verified,"
+        "model_schema_compatible,export_kind,feature_count,"
+        "valid_feature_count,model_input_eligible,eligibility_reason,"
+        "feature_0_order,feature_0_stable_id,feature_0_name,feature_0_unit,"
+        "feature_0_transform_id,feature_0_transform_version,feature_0_valid,"
+        "feature_0_quality,feature_0_value,feature_1_order,"
+        "feature_1_stable_id,feature_1_name,feature_1_unit,"
+        "feature_1_transform_id,feature_1_transform_version,feature_1_valid,"
+        "feature_1_quality,feature_1_value\n";
+    TEST_ASSERT_EQUAL_MEMORY(expectedHeader.data(), output,
+                             expectedHeader.size());
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(FeatureCsvExportStatus::Ok),
+        static_cast<int>(exporter.append(record)));
+    constexpr std::string_view expectedRow =
+        "dataset-a,window-a,7,41,1000,1100,2,12,4,"
+        "abababababababababababababababababababababababababababababababab,"
+        "ENGINEERED_FEATURES,true,true,true,PRODUCTION_MODEL_INPUT,2,2,true,,"
+        "0,tilt_x_deg,Tilt X,deg,approved_tilt_x,3,true,VALID,12.5,"
+        "1,accel_magnitude,Accel Magnitude,m/s^2,"
+        "approved_accel_magnitude,3,true,VALID,9.81\n";
+    TEST_ASSERT_EQUAL_MEMORY(expectedRow.data(),
+                             output + expectedHeader.size(),
+                             expectedRow.size());
+
+    CsvArtifactExportReport report{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(FeatureCsvExportStatus::Ok),
+        static_cast<int>(exporter.finish(report)));
+    TEST_ASSERT_TRUE(report.complete);
+    TEST_ASSERT_EQUAL_STRING("features.csv", report.artifactName.data());
+    TEST_ASSERT_EQUAL_UINT32(kFeatureCsvSchemaVersion,
+                             report.schemaVersion);
+    TEST_ASSERT_EQUAL_UINT64(1U, report.rowCount);
+    Sha256 hash{};
+    std::array<std::uint8_t, Sha256::kDigestSize> expectedHash{};
+    TEST_ASSERT_TRUE(hash.update(
+        reinterpret_cast<const std::uint8_t*>(output),
+        static_cast<std::size_t>(report.byteCount)));
+    TEST_ASSERT_TRUE(hash.finish(expectedHash));
+    TEST_ASSERT_EQUAL_MEMORY(expectedHash.data(), report.sha256.data(),
+                             expectedHash.size());
+}
+
+void testFeatureCsvExporterKeepsCandidatesAndInvalidValuesExplicit() {
+    using namespace project::dataset;
+    using project::models::DataQualityState;
+
+    FeatureCsvSchema schema = featureCsvSchemaFixture();
+    schema.featureContractApproved = false;
+    schema.modelMetadataVerified = false;
+    schema.modelSchemaCompatible = false;
+    schema.slots[1U].unit = "UNKNOWN";
+    schema.slots[1U].transformId = "UNKNOWN";
+    schema.slots[1U].transformVersion = 0U;
+    project::models::FeatureVector vector = featureCsvVectorFixture();
+    vector.featureValidMask = 1U;
+    vector.values[1U] = 9876.5F;
+    std::array<DataQualityState, 2U> quality{{
+        DataQualityState::VALID, DataQualityState::MISSING}};
+    FeatureCsvRecord record{"dataset-b", "window-b", &vector,
+                            quality.data(), quality.size()};
+
+    char output[4096]{};
+    char rowBuffer[2048]{};
+    FeatureCsvExporter exporter(output, sizeof(output), rowBuffer,
+                                sizeof(rowBuffer), schema);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(FeatureCsvExportStatus::Ok),
+        static_cast<int>(exporter.begin()));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(FeatureCsvExportStatus::Ok),
+        static_cast<int>(exporter.append(record)));
+    TEST_ASSERT_NOT_NULL(std::strstr(output, "CANDIDATE_ONLY"));
+    TEST_ASSERT_NOT_NULL(std::strstr(output, "false,FSS_NOT_APPROVED"));
+    TEST_ASSERT_NOT_NULL(std::strstr(output, "0,tilt_x_deg,Tilt X,deg"));
+    TEST_ASSERT_NOT_NULL(std::strstr(output, "MISSING,"));
+    TEST_ASSERT_NULL(std::strstr(output, "9876.5"));
+    TEST_ASSERT_EQUAL_UINT64(1U, exporter.rowsWritten());
+
+    CsvArtifactExportReport report{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(FeatureCsvExportStatus::Ok),
+        static_cast<int>(exporter.finish(report)));
+    TEST_ASSERT_TRUE(report.complete);
+
+    schema = featureCsvSchemaFixture();
+    schema.featureContractApproved = true;
+    schema.modelMetadataVerified = false;
+    schema.modelSchemaCompatible = false;
+    vector = featureCsvVectorFixture();
+    quality[1U] = DataQualityState::VALID;
+    record.vector = &vector;
+    char candidateOutput[4096]{};
+    FeatureCsvExporter metadataMissing(candidateOutput, sizeof(candidateOutput),
+                                       rowBuffer, sizeof(rowBuffer), schema);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(FeatureCsvExportStatus::Ok),
+        static_cast<int>(metadataMissing.begin()));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(FeatureCsvExportStatus::Ok),
+        static_cast<int>(metadataMissing.append(record)));
+    TEST_ASSERT_NOT_NULL(
+        std::strstr(candidateOutput, "false,MODEL_METADATA_UNVERIFIED"));
+}
+
+void testFeatureCsvExporterRejectsDimensionSchemaAndNumericMismatches() {
+    using namespace project::dataset;
+    using project::models::DataQualityState;
+
+    FeatureCsvSchema schema = featureCsvSchemaFixture();
+    project::models::FeatureVector vector = featureCsvVectorFixture();
+    std::array<DataQualityState, 2U> quality{{
+        DataQualityState::VALID, DataQualityState::VALID}};
+    FeatureCsvRecord record{"dataset-c", "window-c", &vector,
+                            quality.data(), quality.size()};
+    char output[4096]{};
+    char rowBuffer[2048]{};
+    FeatureCsvExporter exporter(output, sizeof(output), rowBuffer,
+                                sizeof(rowBuffer), schema);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(FeatureCsvExportStatus::Ok),
+        static_cast<int>(exporter.begin()));
+
+    vector.count = 1U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(FeatureCsvExportStatus::InvalidRecord),
+        static_cast<int>(exporter.append(record)));
+    vector = featureCsvVectorFixture();
+    vector.schemaVersion++;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(FeatureCsvExportStatus::SchemaMismatch),
+        static_cast<int>(exporter.append(record)));
+    vector = featureCsvVectorFixture();
+    vector.schemaHashSha256[0U] ^= 0x01U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(FeatureCsvExportStatus::SchemaMismatch),
+        static_cast<int>(exporter.append(record)));
+    vector = featureCsvVectorFixture();
+    vector.featureValidMask |= 0x04U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(FeatureCsvExportStatus::InvalidFeature),
+        static_cast<int>(exporter.append(record)));
+    vector = featureCsvVectorFixture();
+    vector.values[0U] = std::numeric_limits<float>::quiet_NaN();
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(FeatureCsvExportStatus::InvalidFeature),
+        static_cast<int>(exporter.append(record)));
+    vector = featureCsvVectorFixture();
+    quality[0U] = DataQualityState::MISSING;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(FeatureCsvExportStatus::InvalidFeature),
+        static_cast<int>(exporter.append(record)));
+    TEST_ASSERT_EQUAL_UINT64(0U, exporter.rowsWritten());
+
+    CsvArtifactExportReport report{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(FeatureCsvExportStatus::Ok),
+        static_cast<int>(exporter.finish(report)));
+    TEST_ASSERT_TRUE(report.complete);
+
+    schema.slotCount = 0U;
+    char invalidOutput[2048]{};
+    FeatureCsvExporter invalidSchema(invalidOutput, sizeof(invalidOutput),
+                                     rowBuffer, sizeof(rowBuffer), schema);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(FeatureCsvExportStatus::InvalidSchema),
+        static_cast<int>(invalidSchema.begin()));
+}
+
+project::dataset::CalibratedSampleCsvConfig calibratedSampleConfigFixture(
+    bool testOnly = true) noexcept {
+    using namespace project::dataset;
+    CalibratedSampleCsvConfig config{};
+    config.datasetId = "dataset-cal";
+    config.siteId = "site-cal";
+    config.deviceId = "device-cal";
+    config.sensorSetId = "sensor-set-cal";
+    config.sessionId = "session-cal";
+    config.provenance = {DataOrigin::Synthetic, EvidenceClass::GT5};
+    config.mode = CalibratedSampleMode::CalibrationArtifact;
+    config.calibration = {
+        "cal-fixture-1",
+        3U,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sensor-fixture",
+        "channel-fixture",
+        "test-unit",
+        -10.0,
+        10.0,
+        "test-transform",
+        2U,
+        true,
+        true,
+        EvidenceClass::GT5,
+        "TEST_ONLY_fixture_approval",
+        testOnly};
+    return config;
+}
+
+project::dataset::CalibratedSampleCsvRecord calibratedSampleRecordFixture()
+    noexcept {
+    using namespace project::dataset;
+    using project::models::DataQualityState;
+    CalibratedSampleCsvRecord record{};
+    record.bootId = 5U;
+    record.sequenceNo = 17U;
+    record.timestampMs = 900U;
+    record.sensorId = "sensor-fixture";
+    record.channelId = "channel-fixture";
+    record.rawValue = -2.5;
+    record.rawQuality = DataQualityState::VALID;
+    record.calibratedValue = 4.25;
+    record.calibratedQuality = DataQualityState::VALID;
+    record.appliedCalibrationId = "cal-fixture-1";
+    record.appliedCalibrationVersion = 3U;
+    record.appliedCalibrationSha256 =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    return record;
+}
+
+void testCalibratedSampleCsvExporterKeepsRawOnlyValuesExplicit() {
+    using namespace project::dataset;
+    using project::models::DataQualityState;
+
+    CalibratedSampleCsvConfig config{};
+    config.datasetId = "dataset-raw";
+    config.siteId = "site-raw";
+    config.deviceId = "device-raw";
+    config.sensorSetId = "sensor-set-raw";
+    config.sessionId = "session-raw";
+    config.provenance = {DataOrigin::Bench, EvidenceClass::NotApplicable};
+    CalibratedSampleCsvRecord record{};
+    record.bootId = 1U;
+    record.sequenceNo = 2U;
+    record.timestampMs = 30U;
+    record.sensorId = "UNKNOWN";
+    record.channelId = "UNKNOWN";
+    record.rawValue = 12.5;
+    record.rawQuality = DataQualityState::VALID;
+    record.calibratedValue = 9999.0;
+    record.calibratedQuality = DataQualityState::MISSING;
+
+    char output[4096]{};
+    CalibratedSampleCsvExporter exporter(output, sizeof(output), config);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CalibratedSampleCsvExportStatus::Ok),
+        static_cast<int>(exporter.begin()));
+    constexpr std::string_view expectedHeader =
+        "dataset_id,site_id,device_id,sensor_set_id,session_id,boot_id,"
+        "sequence_no,timestamp_ms,sensor_id,channel_id,raw_value,raw_quality,"
+        "calibrated_value,calibrated_quality,calibrated_unit,"
+        "calibration_status,calibration_id,calibration_version,"
+        "calibration_sha256,calibration_sensor_id,calibration_channel_id,"
+        "valid_minimum,valid_maximum,calibration_approved,"
+        "approval_evidence_accepted,evidence_class,"
+        "approval_evidence_reference,transform_id,transform_version,"
+        "transform_status,rejection_reason,test_only\n";
+    TEST_ASSERT_EQUAL_MEMORY(expectedHeader.data(), output,
+                             expectedHeader.size());
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CalibratedSampleCsvExportStatus::Ok),
+        static_cast<int>(exporter.append(record)));
+    TEST_ASSERT_NOT_NULL(std::strstr(
+        output, "12.5,VALID,,MISSING,,RAW_ONLY,UNKNOWN,0,UNKNOWN,UNKNOWN,"
+               "UNKNOWN,,,false,false,NOT_APPLICABLE,,,0,NOT_APPLIED,"
+               "CALIBRATION_NOT_CONFIGURED,false\n"));
+    TEST_ASSERT_NULL(std::strstr(output, "9999"));
+    CsvArtifactExportReport report{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CalibratedSampleCsvExportStatus::Ok),
+        static_cast<int>(exporter.finish(report)));
+    TEST_ASSERT_TRUE(report.complete);
+    TEST_ASSERT_EQUAL_STRING("calibrated_samples.csv",
+                             report.artifactName.data());
+    TEST_ASSERT_EQUAL_UINT32(kCalibratedSampleCsvSchemaVersion,
+                             report.schemaVersion);
+    TEST_ASSERT_EQUAL_UINT64(1U, report.rowCount);
+}
+
+void testCalibratedSampleCsvExporterAcceptsTestOnlyCalibrationAndRangeChecks() {
+    using namespace project::dataset;
+    using project::models::DataQualityState;
+
+    const CalibratedSampleCsvConfig config =
+        calibratedSampleConfigFixture(true);
+    CalibratedSampleCsvRecord record = calibratedSampleRecordFixture();
+    char output[4096]{};
+    CalibratedSampleCsvExporter exporter(output, sizeof(output), config);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CalibratedSampleCsvExportStatus::Ok),
+        static_cast<int>(exporter.begin()));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CalibratedSampleCsvExportStatus::Ok),
+        static_cast<int>(exporter.append(record)));
+    TEST_ASSERT_NOT_NULL(std::strstr(
+        output, ",-2.5,VALID,4.25,VALID,test-unit,TEST_ONLY_CALIBRATION"));
+    TEST_ASSERT_NOT_NULL(std::strstr(output, "cal-fixture-1,3,"));
+    TEST_ASSERT_NOT_NULL(std::strstr(
+        output, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+               "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    TEST_ASSERT_NOT_NULL(
+        std::strstr(output, "sensor-fixture,channel-fixture,"));
+    TEST_ASSERT_NOT_NULL(std::strstr(output, ",-10,10,true,true,GT5,"));
+    TEST_ASSERT_NOT_NULL(std::strstr(
+        output, "GT5,TEST_ONLY_fixture_approval,test-transform,2,"
+               "APPLIED_TEST_ONLY,,true\n"));
+
+    record.sequenceNo++;
+    record.calibratedValue = 10.5;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CalibratedSampleCsvExportStatus::Ok),
+        static_cast<int>(exporter.append(record)));
+    const std::string_view artifact(output, exporter.bytesWritten());
+    TEST_ASSERT_TRUE(
+        artifact.find(",-2.5,VALID,,OUT_OF_RANGE,test-unit,"
+                      "TEST_ONLY_CALIBRATION") != std::string_view::npos);
+    TEST_ASSERT_EQUAL_UINT64(2U, exporter.rowsWritten());
+
+    CsvArtifactExportReport report{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CalibratedSampleCsvExportStatus::Ok),
+        static_cast<int>(exporter.finish(report)));
+    TEST_ASSERT_TRUE(report.complete);
+
+    record = calibratedSampleRecordFixture();
+    record.calibratedValue = std::numeric_limits<double>::quiet_NaN();
+    char nonFiniteOutput[4096]{};
+    CalibratedSampleCsvExporter nonFinite(nonFiniteOutput,
+                                          sizeof(nonFiniteOutput), config);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CalibratedSampleCsvExportStatus::Ok),
+        static_cast<int>(nonFinite.begin()));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CalibratedSampleCsvExportStatus::Ok),
+        static_cast<int>(nonFinite.append(record)));
+    TEST_ASSERT_NOT_NULL(
+        std::strstr(nonFiniteOutput, ",-2.5,VALID,,NON_FINITE,test-unit"));
+    TEST_ASSERT_NULL(std::strstr(nonFiniteOutput, "nan"));
+}
+
+void testCalibratedSampleCsvExporterRejectsCalibrationIdentityMismatches() {
+    using namespace project::dataset;
+
+    const CalibratedSampleCsvConfig config =
+        calibratedSampleConfigFixture(true);
+    CalibratedSampleCsvRecord record = calibratedSampleRecordFixture();
+    char output[4096]{};
+    CalibratedSampleCsvExporter exporter(output, sizeof(output), config);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CalibratedSampleCsvExportStatus::Ok),
+        static_cast<int>(exporter.begin()));
+
+    record.sensorId = "other-sensor";
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CalibratedSampleCsvExportStatus::CalibrationMismatch),
+        static_cast<int>(exporter.append(record)));
+    record = calibratedSampleRecordFixture();
+    record.appliedCalibrationVersion++;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CalibratedSampleCsvExportStatus::CalibrationMismatch),
+        static_cast<int>(exporter.append(record)));
+    record = calibratedSampleRecordFixture();
+    record.appliedCalibrationSha256 =
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CalibratedSampleCsvExportStatus::CalibrationMismatch),
+        static_cast<int>(exporter.append(record)));
+    TEST_ASSERT_EQUAL_UINT64(0U, exporter.rowsWritten());
+
+    CalibratedSampleCsvConfig invalidConfig =
+        calibratedSampleConfigFixture(false);
+    invalidConfig.calibration.validMinimum = 11.0;
+    char invalidOutput[1024]{};
+    CalibratedSampleCsvExporter invalid(invalidOutput, sizeof(invalidOutput),
+                                        invalidConfig);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            CalibratedSampleCsvExportStatus::InvalidCalibration),
+        static_cast<int>(invalid.begin()));
+
+    invalidConfig = calibratedSampleConfigFixture(false);
+    invalidConfig.calibration.evidenceClass = EvidenceClass::GT5;
+    char proxyOutput[1024]{};
+    CalibratedSampleCsvExporter proxyCalibration(
+        proxyOutput, sizeof(proxyOutput), invalidConfig);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(
+            CalibratedSampleCsvExportStatus::InvalidCalibration),
+        static_cast<int>(proxyCalibration.begin()));
+}
+
 void testDsdV12RawHeaderMatchesCoreSchemaAndFitsBound() {
     using project::dataset::CsvWriteStatus;
     using project::dataset::kDsdV1_2RawSampleCoreFields;
@@ -3527,6 +5113,49 @@ bool setRawManifestForCsv(const char* data, std::size_t size,
         return false;
     }
     return hash.finish(manifest.expectedSha256);
+}
+
+bool setDatasetManifestDocument(
+    const project::dataset::RawDatasetManifest& raw,
+    project::dataset::DatasetManifestDocument& document) {
+    using namespace project::dataset;
+    static char schemaHash[ Sha256::kDigestSize * 2U ]{};
+    std::size_t schemaHashSize = 0U;
+    if (writeRawArtifactSchemaSha256(schemaHash, sizeof(schemaHash),
+                                     schemaHashSize) !=
+        DatasetManifestJsonStatus::Ok) {
+        return false;
+    }
+
+    document = {};
+    document.raw = raw;
+    document.artifactSchemaVersion = raw.rawSchemaVersion;
+    document.artifactName = "raw_samples.csv";
+    document.artifactSchemaSha256 =
+        std::string_view(schemaHash, schemaHashSize);
+    document.sourceIds[0U] = "synthetic-seed-123";
+    document.sourceIds[1U] = "source-run-456";
+    document.sourceIdCount = 2U;
+    document.firmwareId = "NOT_APPLICABLE";
+    document.configId = "synthetic-config-v1";
+    document.calibrationId = "NOT_APPLICABLE";
+    document.fssId = "UNKNOWN";
+    document.modelId = "UNKNOWN";
+    document.generatorVersion = "synthetic-generator-test-fixture-v1";
+    document.generatorSeedState = DatasetManifestValueState::Known;
+    document.generatorSeed = 123U;
+    document.replaySourceSha256 = "NOT_APPLICABLE";
+    document.createdAt = "UNKNOWN";
+    document.toolVersion = "native-test";
+    document.acceptedRows = raw.expectedRows;
+    document.rejectedRows = 0U;
+    document.splitPolicyVersion = "UNKNOWN";
+    document.targetContractId = "UNDEFINED";
+    document.targetContractState = "UNDEFINED";
+    document.limitations =
+        "GT5 synthetic \"test\" fixture\nnot field evidence";
+    document.approvalState = "NOT_APPROVED";
+    return true;
 }
 
 void testSyntheticGeneratorIsDeterministicAndCarriesGt5() {
@@ -3778,6 +5407,169 @@ void testDsdRawDatasetValidatorAcceptsExactSchemaAndManifest() {
     TEST_ASSERT_EQUAL_MEMORY(report.computedSha256.data(),
                              replayReport.computedSha256.data(),
                              report.computedSha256.size());
+}
+
+void testDatasetManifestJsonRoundTripsAndChecksArtifactIntegrity() {
+    using namespace project::dataset;
+    char csv[4096]{};
+    std::size_t csvSize = 0U;
+    TEST_ASSERT_TRUE(createRawSamplesCsv(csv, sizeof(csv), csvSize));
+    RawDatasetManifest raw{};
+    TEST_ASSERT_TRUE(setRawManifestForCsv(csv, csvSize, 2U, raw));
+    DatasetManifestDocument document{};
+    TEST_ASSERT_TRUE(setDatasetManifestDocument(raw, document));
+
+    char json[2048]{};
+    char repeatedJson[2048]{};
+    std::size_t jsonSize = 0U;
+    std::size_t repeatedJsonSize = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::Ok),
+        static_cast<int>(writeDatasetManifestJson(
+            document, json, sizeof(json), jsonSize)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::Ok),
+        static_cast<int>(writeDatasetManifestJson(
+            document, repeatedJson, sizeof(repeatedJson),
+            repeatedJsonSize)));
+    TEST_ASSERT_EQUAL_UINT(jsonSize, repeatedJsonSize);
+    TEST_ASSERT_EQUAL_MEMORY(json, repeatedJson, jsonSize);
+
+    char textStorage[2048]{};
+    DatasetManifestDocument parsed{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::Ok),
+        static_cast<int>(readDatasetManifestJson(
+            std::string_view(json, jsonSize), textStorage,
+            sizeof(textStorage), parsed)));
+    TEST_ASSERT_EQUAL_UINT32(kDatasetManifestJsonSchemaVersion,
+                             parsed.manifestSchemaVersion);
+    TEST_ASSERT_EQUAL_STRING("1.2", parsed.dsdDocumentVersion.data());
+    TEST_ASSERT_EQUAL_STRING("synthetic-dataset",
+                             parsed.raw.datasetId.data());
+    TEST_ASSERT_EQUAL_STRING("raw_samples.csv",
+                             parsed.artifactName.data());
+    TEST_ASSERT_EQUAL_STRING("source-run-456",
+                             parsed.sourceIds[1U].data());
+    TEST_ASSERT_EQUAL_UINT(2U, parsed.sourceIdCount);
+    TEST_ASSERT_EQUAL_UINT64(raw.expectedBytes, parsed.raw.expectedBytes);
+    TEST_ASSERT_EQUAL_UINT64(raw.expectedRows, parsed.raw.expectedRows);
+    TEST_ASSERT_EQUAL_UINT64(123U, parsed.generatorSeed);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestValueState::Known),
+        static_cast<int>(parsed.generatorSeedState));
+    TEST_ASSERT_TRUE(parsed.raw.provenance.isValid());
+    TEST_ASSERT_TRUE(parsed.raw.channelPresenceConfigured);
+    TEST_ASSERT_EQUAL_STRING(
+        "GT5 synthetic \"test\" fixture\nnot field evidence",
+        parsed.limitations.data());
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::Ok),
+        static_cast<int>(validateDatasetManifestDocument(parsed)));
+
+    MemoryDatasetCsvSource source{
+        reinterpret_cast<const std::uint8_t*>(csv), csvSize};
+    DatasetValidator validator{};
+    IdentityWorkspaceEntry entries[4]{};
+    std::uint8_t keyBytes[1024]{};
+    DatasetValidationWorkspace workspace{
+        entries, 4U, 0U, keyBytes, sizeof(keyBytes), 0U};
+    QuarantineReference quarantine[2]{};
+    DatasetValidationReport report{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetValidationStatus::Complete),
+        static_cast<int>(validator.validateRawSamples(
+            source, parsed.raw, workspace, quarantine, 2U, report)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::Ok),
+        static_cast<int>(validateDatasetManifestResult(parsed, report)));
+
+    DatasetValidationReport mismatched = report;
+    mismatched.computedSha256[0U] ^= 0x01U;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::ArtifactHashMismatch),
+        static_cast<int>(validateDatasetManifestResult(parsed, mismatched)));
+    mismatched = report;
+    ++mismatched.bytesRead;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::ArtifactByteCountMismatch),
+        static_cast<int>(validateDatasetManifestResult(parsed, mismatched)));
+    mismatched = report;
+    --mismatched.dataRowsSeen;
+    mismatched.rowCountVerified = false;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::ArtifactRowCountMismatch),
+        static_cast<int>(validateDatasetManifestResult(parsed, mismatched)));
+    mismatched = report;
+    mismatched.acceptedRows = 1U;
+    mismatched.rejectedRows = 1U;
+    mismatched.rejectionCounts[static_cast<std::size_t>(
+        RawRowRejectionReason::InvalidToken)] = 1U;
+    mismatched.status = DatasetValidationStatus::CompleteWithRejectedRows;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::RejectionCountMismatch),
+        static_cast<int>(validateDatasetManifestResult(parsed, mismatched)));
+    mismatched = report;
+    mismatched.status = DatasetValidationStatus::SourceError;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::ArtifactValidationFailed),
+        static_cast<int>(validateDatasetManifestResult(parsed, mismatched)));
+
+    DatasetManifestDocument invalid = parsed;
+    invalid.raw.provenance = {};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::InvalidManifest),
+        static_cast<int>(validateDatasetManifestDocument(invalid)));
+    invalid = parsed;
+    invalid.artifactSchemaSha256 = "00000000000000000000000000000000"
+                                   "00000000000000000000000000000000";
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::InvalidManifest),
+        static_cast<int>(validateDatasetManifestDocument(invalid)));
+
+    DatasetManifestDocument rejected{};
+    char parseStorage[2048]{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::MissingField),
+        static_cast<int>(readDatasetManifestJson(
+            "{\"manifest_schema_version\":1}", parseStorage,
+            sizeof(parseStorage), rejected)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::UnsupportedVersion),
+        static_cast<int>(readDatasetManifestJson(
+            "{\"manifest_schema_version\":2}", parseStorage,
+            sizeof(parseStorage), rejected)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::DuplicateField),
+        static_cast<int>(readDatasetManifestJson(
+            "{\"manifest_schema_version\":1,"
+            "\"manifest_schema_version\":1}",
+            parseStorage, sizeof(parseStorage), rejected)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::UnknownField),
+        static_cast<int>(readDatasetManifestJson(
+            "{\"manifest_schema_version\":1,\"future_field\":0}",
+            parseStorage, sizeof(parseStorage), rejected)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::MalformedJson),
+        static_cast<int>(readDatasetManifestJson(
+            "{\"manifest_schema_version\":", parseStorage,
+            sizeof(parseStorage), rejected)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::CapacityExceeded),
+        static_cast<int>(readDatasetManifestJson(
+            std::string_view(json, jsonSize), parseStorage, 8U, rejected)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::CapacityExceeded),
+        static_cast<int>(writeDatasetManifestJson(
+            document, repeatedJson, 8U, repeatedJsonSize)));
+    static const std::array<char, kMaxDatasetManifestJsonBytes + 1U>
+        oversizedJson{};
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(DatasetManifestJsonStatus::CapacityExceeded),
+        static_cast<int>(readDatasetManifestJson(
+            std::string_view(oversizedJson.data(), oversizedJson.size()),
+            parseStorage, sizeof(parseStorage), rejected)));
 }
 
 void testDsdRawDatasetValidatorQuarantinesDuplicatesAndSequenceGaps() {
@@ -5059,14 +6851,154 @@ void testEvaluationRunnerCountsMissingRejectedAndJoinFailures() {
     TEST_ASSERT_EQUAL_UINT64(0U, report.totalWindowCount);
 }
 
+void testSerialDiagnosticsBuildsStatusResponse() {
+    class TestSerialPort final
+        : public project::diagnostics::IDiagnosticsSerialPort {
+    public:
+        std::size_t available() noexcept override {
+            return std::strlen(input) - inputOffset;
+        }
+
+        int readByte() noexcept override {
+            return inputOffset < std::strlen(input)
+                       ? static_cast<unsigned char>(input[inputOffset++])
+                       : -1;
+        }
+
+        bool write(const char* data, std::size_t length) noexcept override {
+            if (data == nullptr || length >= sizeof(output)) {
+                return false;
+            }
+            std::memcpy(output, data, length);
+            output[length] = '\0';
+            return true;
+        }
+
+        std::uint64_t monotonicMillis() noexcept override { return 100U; }
+
+        const char* input{"diag status\n"};
+        std::size_t inputOffset{0U};
+        char output[project::diagnostics::SerialDiagnostics::kResponseCapacity]{};
+    } port;
+
+    class TestSnapshotProvider final
+        : public project::diagnostics::IDiagnosticsSnapshotProvider {
+    public:
+        bool readSnapshot(
+            project::diagnostics::DiagnosticsSnapshot& output) noexcept override {
+            output = snapshot;
+            return true;
+        }
+
+        project::diagnostics::DiagnosticsSnapshot snapshot{};
+    } snapshots;
+    snapshots.snapshot.firmwareVersionCode = 42U;
+    snapshots.snapshot.firmwareVersionAvailable = true;
+
+    const project::diagnostics::SerialDiagnosticsConfig config{1U, true};
+    project::diagnostics::SerialDiagnostics diagnostics(port, snapshots, config);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::diagnostics::SerialDiagnosticsStatus::Ok),
+        static_cast<int>(diagnostics.begin()));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(project::diagnostics::SerialDiagnosticsStatus::Ok),
+        static_cast<int>(diagnostics.poll()));
+    TEST_ASSERT_NOT_NULL(std::strstr(port.output, "\"status\":\"ok\""));
+    TEST_ASSERT_NOT_NULL(
+        std::strstr(port.output, "\"firmware_version_code\":42"));
+}
+
+void testBoardPinValidationRejectsIncompleteDuplicateAndOutOfRangePins() {
+    using project::bsp::BoardPins;
+    using project::bsp::GpioPin;
+    using project::bsp::pinsDoNotConflict;
+
+    BoardPins pins{};
+    constexpr auto kTestPin = GpioPin::kMaxApiPinNumber;
+    pins.imuI2c.sda.number = kTestPin;
+    TEST_ASSERT_FALSE(pinsDoNotConflict(pins));
+
+    pins.imuI2c.scl.number = kTestPin - 1;
+    pins.adc.soilMoisture[0].number = kTestPin - 2;
+    pins.adc.soilMoisture[1].number = kTestPin - 3;
+    pins.adc.soilMoisture[2].number = kTestPin - 4;
+    pins.digitalSensors.soilMoisture.number = kTestPin - 2;
+    TEST_ASSERT_FALSE(pinsDoNotConflict(pins));
+
+    pins.digitalSensors.soilMoisture.number = -1;
+    pins.adc.soilMoisture[2].number = kTestPin - 2;
+    TEST_ASSERT_FALSE(pinsDoNotConflict(pins));
+
+    pins.adc.soilMoisture[2].number = kTestPin - 4;
+    pins.alarm.led.number = GpioPin::kMaxApiPinNumber + 1;
+    TEST_ASSERT_FALSE(pinsDoNotConflict(pins));
+}
+
+void testDefaultBoardConfigurationFailsClosed() {
+    const auto report = project::bsp::validateBoardConfig(
+        project::bsp::kBoardConfig, project::bsp::kBoardPins);
+    TEST_ASSERT_FALSE(report.isReadyForEarlyBoardSetup());
+    TEST_ASSERT_FALSE(report.isReadyForImuBus());
+    TEST_ASSERT_TRUE(
+        (report.issues & project::bsp::issueMask(
+                             project::bsp::BoardConfigIssue::BoardIdentityUnknown)) !=
+        0U);
+    TEST_ASSERT_TRUE(
+        (report.issues & project::bsp::issueMask(
+                             project::bsp::BoardConfigIssue::BoardVersionUnknown)) !=
+        0U);
+    TEST_ASSERT_TRUE(
+        (report.issues & project::bsp::issueMask(
+                             project::bsp::BoardConfigIssue::HardwareReviewMissing)) !=
+        0U);
+}
+
+void testBoardConfigurationRequiresExplicitHardwareReview() {
+    auto config = project::bsp::kBoardConfig;
+    project::bsp::BoardPins pins{};
+
+    config.info.boardId = "test-board";
+    config.info.variant = "test-variant";
+    config.info.boardIdKnown = true;
+    config.info.variantKnown = true;
+    config.info.hardwareVersion = {1U, 0U, 0U, true};
+    config.imuI2c.controller = project::bsp::I2cController::Controller0;
+    config.imuI2c.clockHz = {100000U, true};
+    config.imuI2c.imuAddress = {0x2AU, true};
+    config.imuI2c.electricalLevelsVerified = true;
+    config.imuI2c.pullUpsVerified = true;
+    pins.imuI2c.sda.number = project::bsp::GpioPin::kMaxApiPinNumber;
+    pins.imuI2c.scl.number =
+        project::bsp::GpioPin::kMaxApiPinNumber - 1;
+
+    const auto unapprovedReport = project::bsp::validateBoardConfig(config, pins);
+    TEST_ASSERT_EQUAL_UINT32(
+        project::bsp::issueMask(
+            project::bsp::BoardConfigIssue::HardwareReviewMissing),
+        unapprovedReport.issues);
+    TEST_ASSERT_FALSE(unapprovedReport.isReadyForEarlyBoardSetup());
+    TEST_ASSERT_FALSE(unapprovedReport.isReadyForImuBus());
+
+    config.hardwareReviewApproved = true;
+    const auto approvedReport = project::bsp::validateBoardConfig(config, pins);
+    TEST_ASSERT_EQUAL_UINT32(0U, approvedReport.issues);
+    TEST_ASSERT_TRUE(approvedReport.isReadyForEarlyBoardSetup());
+    TEST_ASSERT_TRUE(approvedReport.isReadyForImuBus());
+}
+
 }  // namespace
 
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testSensorManagerReadsSensorsInOrderAndRetries);
+    RUN_TEST(testSensorManagerAllowsAbsentOptionalSensorWithoutZeroValidity);
+    RUN_TEST(testSensorManagerRejectsMissingRequiredSensor);
     RUN_TEST(testSensorManagerMarksReadTimeoutAndContinuesSnapshot);
     RUN_TEST(testSensorManagerKeepsPerSensorReadTimestamps);
+    RUN_TEST(testSensorManagerPreservesDegradedSoilChannelState);
+    RUN_TEST(testSensorManagerPreservesIndependentRainChannels);
     RUN_TEST(testDataQualityClassifiesRequiredChannelStates);
+    RUN_TEST(testDataQualityPropagatesRainChannelValidityIndependently);
     RUN_TEST(testDataQualityRejectsUnconfiguredPolicy);
     RUN_TEST(testFeaturePipelineBuildsApprovedWindow);
     RUN_TEST(testFeaturePipelineFailsClosedForTbdRawFeature);
@@ -5104,6 +7036,7 @@ int main() {
     RUN_TEST(testReplayEngineRejectsMalformedRow);
     RUN_TEST(testReplayMalformedRowDoesNotAdvanceTimestampBaseline);
     RUN_TEST(testConfigManagerAcceptsValidTestOnlyManifestWithoutArtifacts);
+    RUN_TEST(testConfigManagerValidatesOptionalSensorTimeoutsAndRequiredness);
     RUN_TEST(testConfigManagerReportsMissingManifestField);
     RUN_TEST(testConfigManagerRejectsUnsupportedManifestVersion);
     RUN_TEST(testConfigManagerRejectsInvalidEnum);
@@ -5119,6 +7052,7 @@ int main() {
     RUN_TEST(testAppControllerStartsPhasesInOrderAndGatesInference);
     RUN_TEST(testAppControllerCleansUpEveryStartupFailureInReverse);
     RUN_TEST(testAppControllerFailsClosedWhenInferenceGateCannotOpen);
+    RUN_TEST(testAppControllerKeepsInferenceDisabledWithoutApproval);
     RUN_TEST(testAppControllerShutdownOrderAndRepeatedCalls);
     RUN_TEST(testAppControllerFlushFailureStillMakesOutputsSafe);
     RUN_TEST(testAppControllerHealthChecksAreBoundedAndFailClosed);
@@ -5128,6 +7062,12 @@ int main() {
     RUN_TEST(testCalibrationServiceRejectsNonFiniteAndDoesNotMakeValidZero);
     RUN_TEST(testCalibrationServiceRejectsUnmatchedCalibrationVersion);
     RUN_TEST(testCalibrationServiceRejectsMissingFrameSchemaVersion);
+    RUN_TEST(testHx710bProtocolSignExtendsAndSendsTwentyFiveTrailingPulses);
+    RUN_TEST(testHx710bReadyTimeoutIsBounded);
+    RUN_TEST(testHx710bDriverAveragesValidReadsAndClearsAllFailureOutput);
+    RUN_TEST(testHx710bCalibrationRequiresMatchingApprovedProfile);
+    RUN_TEST(
+        testHx710bBaselineNeedsCoverageAndRejectsInvalidOrStaleSamples);
     RUN_TEST(testSchemaRegistryMatchesTestOnlyStructureAndVector);
     RUN_TEST(testSchemaRegistryRejectsCapacityOverflowAndMissingMetadata);
     RUN_TEST(testSchemaRegistryReportsVersionHashAndCountMismatches);
@@ -5140,12 +7080,26 @@ int main() {
     RUN_TEST(testCsvRowWriterFormatsFiniteNumbersAndInvalidAsEmpty);
     RUN_TEST(testCsvRowWriterRejectsNonFiniteAndColumnCountErrors);
     RUN_TEST(testCsvRowWriterHandlesExactCapacityAndOverflow);
+    RUN_TEST(testCsvArtifactWriterExportsVersionedRowsAndIntegrityReport);
+    RUN_TEST(testCsvArtifactWriterRejectsPartialRowsAndCapacityFailures);
+    RUN_TEST(testFeatureCsvExporterWritesOrderedSchemaAndExactHash);
+    RUN_TEST(testFeatureCsvExporterKeepsCandidatesAndInvalidValuesExplicit);
+    RUN_TEST(testFeatureCsvExporterRejectsDimensionSchemaAndNumericMismatches);
+    RUN_TEST(testCalibratedSampleCsvExporterKeepsRawOnlyValuesExplicit);
+    RUN_TEST(
+        testCalibratedSampleCsvExporterAcceptsTestOnlyCalibrationAndRangeChecks);
+    RUN_TEST(
+        testCalibratedSampleCsvExporterRejectsCalibrationIdentityMismatches);
+    RUN_TEST(testWindowCsvExporterWritesGoldenSchemaAndEscapedAuditFields);
+    RUN_TEST(testWindowCsvExporterRejectsQualityAndBoundaryFailuresWithReasons);
+    RUN_TEST(testWindowCsvExporterRequiresApprovalAndReportsBoundedFailures);
     RUN_TEST(testDsdV12RawHeaderMatchesCoreSchemaAndFitsBound);
     RUN_TEST(testSyntheticGeneratorIsDeterministicAndCarriesGt5);
     RUN_TEST(testSyntheticGeneratorCoversScenarioBoundaries);
     RUN_TEST(testSyntheticGeneratorRejectsInvalidAndOverflowingConfig);
     RUN_TEST(testSha256MatchesKnownVectorAndBoundaryBlocks);
     RUN_TEST(testDsdRawDatasetValidatorAcceptsExactSchemaAndManifest);
+    RUN_TEST(testDatasetManifestJsonRoundTripsAndChecksArtifactIntegrity);
     RUN_TEST(testDsdRawDatasetValidatorQuarantinesDuplicatesAndSequenceGaps);
     RUN_TEST(testDsdRawDatasetValidatorRejectsEncodingQuoteAndTruncation);
     RUN_TEST(testDsdRawDatasetValidatorReportsManifestAndInjectedFailures);
@@ -5166,5 +7120,9 @@ int main() {
     RUN_TEST(testEvaluationRunnerReportsFeatureAndApprovedRegressionMetrics);
     RUN_TEST(testEvaluationRunnerDisablesUndefinedTargetsAndSeparatesGt5Proxy);
     RUN_TEST(testEvaluationRunnerCountsMissingRejectedAndJoinFailures);
+    RUN_TEST(testSerialDiagnosticsBuildsStatusResponse);
+    RUN_TEST(testBoardPinValidationRejectsIncompleteDuplicateAndOutOfRangePins);
+    RUN_TEST(testDefaultBoardConfigurationFailsClosed);
+    RUN_TEST(testBoardConfigurationRequiresExplicitHardwareReview);
     return UNITY_END();
 }

@@ -84,6 +84,14 @@ SensorManager::SensorManager(project::drivers::ISensor& imu,
                              project::drivers::ISensor& hx710b,
                              const SensorManagerConfig& config,
                              ISensorManagerClock& clock) noexcept
+    : SensorManager(&imu, &soil, &rain, &hx710b, config, clock) {}
+
+SensorManager::SensorManager(project::drivers::ISensor* imu,
+                             project::drivers::ISensor* soil,
+                             project::drivers::ISensor* rain,
+                             project::drivers::ISensor* hx710b,
+                             const SensorManagerConfig& config,
+                             ISensorManagerClock& clock) noexcept
     : imu_(imu),
       soil_(soil),
       rain_(rain),
@@ -95,13 +103,44 @@ bool SensorManager::validateConfig() const noexcept {
     if (config_.samplePeriodMicros == 0U) {
         return false;
     }
-    for (const auto& policy : config_.readPolicies) {
-        if (policy.beginTimeoutMicros == 0U ||
+
+    bool hasRequiredSensor = false;
+    for (std::size_t index = 0U; index < kSensorSlotCount; ++index) {
+        const SensorSlot slot = static_cast<SensorSlot>(index);
+        const SensorAvailability& availability = config_.availability[index];
+        if (availability.required && !availability.present) {
+            return false;
+        }
+        hasRequiredSensor = hasRequiredSensor || availability.required;
+        if (!availability.present) {
+            continue;
+        }
+
+        const SensorReadPolicy& policy = config_.readPolicies[index];
+        if (sensorFor(slot) == nullptr ||
+            policy.beginTimeoutMicros == 0U ||
             policy.timeoutMicros == 0U) {
             return false;
         }
     }
-    return true;
+    return hasRequiredSensor;
+}
+
+project::drivers::ISensor* SensorManager::sensorFor(
+    const SensorSlot slot) const noexcept {
+    switch (slot) {
+        case SensorSlot::Imu:
+            return imu_;
+        case SensorSlot::Soil:
+            return soil_;
+        case SensorSlot::Rain:
+            return rain_;
+        case SensorSlot::Hx710b:
+            return hx710b_;
+        case SensorSlot::Count:
+            return nullptr;
+    }
+    return nullptr;
 }
 
 bool SensorManager::beginAll() noexcept {
@@ -114,17 +153,22 @@ bool SensorManager::beginAll() noexcept {
         return false;
     }
 
-    const project::models::SensorStatus imuStatus =
-        beginSensor(imu_, SensorSlot::Imu);
-    const project::models::SensorStatus soilStatus =
-        beginSensor(soil_, SensorSlot::Soil);
-    const project::models::SensorStatus rainStatus =
-        beginSensor(rain_, SensorSlot::Rain);
-    const project::models::SensorStatus hx710bStatus =
-        beginSensor(hx710b_, SensorSlot::Hx710b);
+    bool requiredSensorsReady = true;
+    for (std::size_t index = 0U; index < kSensorSlotCount; ++index) {
+        const SensorSlot slot = static_cast<SensorSlot>(index);
+        const SensorAvailability& availability = config_.availability[index];
+        if (!availability.present) {
+            continue;
+        }
 
-    ready_ = imuStatus.valid && soilStatus.valid && rainStatus.valid &&
-             hx710bStatus.valid;
+        project::models::SensorStatus status =
+            beginSensor(*sensorFor(slot), slot);
+        if (availability.required && !status.valid) {
+            requiredSensorsReady = false;
+        }
+    }
+
+    ready_ = requiredSensorsReady;
     return ready_;
 }
 
@@ -187,9 +231,15 @@ bool SensorManager::pollDue(const std::uint64_t nowMicros) noexcept {
 }
 
 project::models::SensorStatus SensorManager::readSensor(
-    project::drivers::ISensor& sensor,
+    project::drivers::ISensor* sensor,
     const SensorSlot slot,
     project::models::SensorFrame& sensorFrame) noexcept {
+    if (sensor == nullptr) {
+        project::models::SensorStatus status{};
+        setSensorStatus(sensorFrame, slot, status);
+        return status;
+    }
+
     auto& stats = mutableDiagnostics(slot);
     const auto& policy = config_.readPolicies[static_cast<std::size_t>(slot)];
     project::models::SensorStatus status{};
@@ -200,7 +250,7 @@ project::models::SensorStatus SensorManager::readSensor(
         sensorFrame = {};
         incrementSaturated(stats.readAttempts);
         const std::uint64_t started = clock_.nowMicros();
-        status = sensor.read(sensorFrame);
+        status = sensor->read(sensorFrame);
         const std::uint64_t finished = clock_.nowMicros();
         status.timestampMs = finished / 1000U;
         bool timedOut = false;
@@ -219,6 +269,12 @@ project::models::SensorStatus SensorManager::readSensor(
             status.health = project::models::SensorHealth::Fault;
             sensorFrame = {};
         } else if (!status.valid) {
+            if (status.health == project::models::SensorHealth::Degraded) {
+                // Degraded invalid samples can carry per-channel warm-up or
+                // quality state without representing a sensor read failure.
+                setSensorStatus(sensorFrame, slot, status);
+                return status;
+            }
             incrementSaturated(stats.readFailures);
             status.health = project::models::SensorHealth::Fault;
             sensorFrame = {};
@@ -252,14 +308,23 @@ bool SensorManager::readSnapshot(
     project::models::SensorFrame rainFrame{};
     project::models::SensorFrame hx710bFrame{};
 
+    const auto readConfiguredSensor =
+        [this](SensorSlot slot,
+               project::models::SensorFrame& frame) noexcept {
+            const std::size_t index = static_cast<std::size_t>(slot);
+            return readSensor(config_.availability[index].present
+                                  ? sensorFor(slot)
+                                  : nullptr,
+                              slot, frame);
+        };
     const project::models::SensorStatus imuStatus =
-        readSensor(imu_, SensorSlot::Imu, imuFrame);
+        readConfiguredSensor(SensorSlot::Imu, imuFrame);
     const project::models::SensorStatus soilStatus =
-        readSensor(soil_, SensorSlot::Soil, soilFrame);
+        readConfiguredSensor(SensorSlot::Soil, soilFrame);
     const project::models::SensorStatus rainStatus =
-        readSensor(rain_, SensorSlot::Rain, rainFrame);
+        readConfiguredSensor(SensorSlot::Rain, rainFrame);
     const project::models::SensorStatus hx710bStatus =
-        readSensor(hx710b_, SensorSlot::Hx710b, hx710bFrame);
+        readConfiguredSensor(SensorSlot::Hx710b, hx710bFrame);
 
     output.bootId = config_.bootId;
     output.sequence = ++nextSequence_;
@@ -278,9 +343,21 @@ bool SensorManager::readSnapshot(
         output.tiltAngleDeg = imuFrame.tiltAngleDeg;
         output.tiltAngleValid = imuFrame.tiltAngleValid;
     }
+    if (soilStatus.valid ||
+        soilStatus.health == project::models::SensorHealth::Degraded) {
+        output.soilMoistureProbes = soilFrame.soilMoistureProbes;
+        output.soilMoistureValidChannelCount =
+            soilFrame.soilMoistureValidChannelCount;
+        output.soilMoistureRequiredChannelCount =
+            soilFrame.soilMoistureRequiredChannelCount;
+        output.soilMoistureAverageValid =
+            soilFrame.soilMoistureAverageValid;
+    }
     if (soilStatus.valid) {
         output.soilMoistureRaw = soilFrame.soilMoistureRaw;
         output.soilMoisturePct = soilFrame.soilMoisturePct;
+        output.soilMoistureRawChannelIndex =
+            soilFrame.soilMoistureRawChannelIndex;
         output.calibrationVersion = soilFrame.calibrationVersion;
     }
     if (rainStatus.valid) {
@@ -288,6 +365,16 @@ bool SensorManager::readSnapshot(
         output.rainWetnessRelativePct =
             rainFrame.rainWetnessRelativePct;
         output.rainWetnessValid = rainFrame.rainWetnessValid;
+        output.rainDigitalWet = rainFrame.rainDigitalWet;
+        output.rainDigitalValid = rainFrame.rainDigitalValid;
+        output.rainAccEquivalentWetSeconds =
+            rainFrame.rainAccEquivalentWetSeconds;
+        output.rainAccCoverageMs = rainFrame.rainAccCoverageMs;
+        output.rainAccValid = rainFrame.rainAccValid;
+        output.rainAoStatus = rainFrame.rainAoStatus;
+        output.rainDoStatus = rainFrame.rainDoStatus;
+        output.rainAccumulationStatus =
+            rainFrame.rainAccumulationStatus;
         output.rainRateMmH = rainFrame.rainRateMmH;
         if (rainFrame.calibrationVersion != 0U) {
             output.calibrationVersion = rainFrame.calibrationVersion;
@@ -295,6 +382,12 @@ bool SensorManager::readSnapshot(
     }
     if (hx710bStatus.valid) {
         output.hx710bRaw = hx710bFrame.hx710bRaw;
+        output.hx710bRawSampleCount =
+            hx710bFrame.hx710bRawSampleCount;
+        output.hx710bTransducerIdentityId =
+            hx710bFrame.hx710bTransducerIdentityId;
+        output.hx710bCalibrationVersion =
+            hx710bFrame.hx710bCalibrationVersion;
         output.hx710bCalibrationFactor =
             hx710bFrame.hx710bCalibrationFactor;
         output.hx710bCalibrationFactorValid =

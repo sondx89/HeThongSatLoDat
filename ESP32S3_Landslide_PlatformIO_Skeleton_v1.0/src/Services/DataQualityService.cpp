@@ -36,6 +36,8 @@ bool hasProcessedField(SensorChannel channel) noexcept {
         case SensorChannel::GyroZDps:
         case SensorChannel::SoilMoisturePct:
         case SensorChannel::RainWetnessRelativePct:
+        case SensorChannel::RainDigitalWet:
+        case SensorChannel::RainAccumulationEquivalentWetSeconds:
             return true;
         case SensorChannel::ImuAccelXRaw:
         case SensorChannel::ImuAccelYRaw:
@@ -145,6 +147,17 @@ DataQualityState DataQualityService::classify(
             break;
         case SensorChannel::RainRaw:
         case SensorChannel::RainWetnessRelativePct:
+            status = &frame.rainAoStatus;
+            sensor = QualitySensor::Rain;
+            break;
+        case SensorChannel::RainDigitalWet:
+            status = &frame.rainDoStatus;
+            sensor = QualitySensor::Rain;
+            break;
+        case SensorChannel::RainAccumulationEquivalentWetSeconds:
+            status = &frame.rainAccumulationStatus;
+            sensor = QualitySensor::Rain;
+            break;
         case SensorChannel::RainRateMmH:
             status = &frame.rainStatus;
             sensor = QualitySensor::Rain;
@@ -275,10 +288,26 @@ DataQualityServiceStatus DataQualityService::process(
     copyFloat(SensorChannel::SoilMoisturePct, input.soilMoisturePct,
               input.calibrationVersion != 0, output.soilMoisturePct);
 
-    assess(SensorChannel::RainRaw, input.rainRaw, input.rainStatus.valid);
+    assess(SensorChannel::RainRaw, input.rainRaw,
+           input.rainAoStatus.valid);
     copyFloat(SensorChannel::RainWetnessRelativePct,
               input.rainWetnessRelativePct, input.rainWetnessValid,
               output.rainWetnessRelativePct);
+    assess(SensorChannel::RainDigitalWet,
+           input.rainDigitalWet ? 1.0 : 0.0, input.rainDigitalValid);
+    if (output.channelQuality[channelIndex(SensorChannel::RainDigitalWet)] ==
+        DataQualityState::VALID) {
+        output.rainDigitalWet = input.rainDigitalWet;
+        output.rainDigitalWetValid = true;
+    }
+    copyFloat(SensorChannel::RainAccumulationEquivalentWetSeconds,
+              input.rainAccEquivalentWetSeconds,
+              input.rainAccValid && input.rainAccumulationStatus.valid,
+              output.rainAccEquivalentWetSeconds);
+    output.rainAccValid =
+        output.channelQuality[channelIndex(
+            SensorChannel::RainAccumulationEquivalentWetSeconds)] ==
+        DataQualityState::VALID;
     assess(SensorChannel::RainRateMmH, input.rainRateMmH, false);
 
     assess(SensorChannel::Hx710bRaw, input.hx710bRaw,

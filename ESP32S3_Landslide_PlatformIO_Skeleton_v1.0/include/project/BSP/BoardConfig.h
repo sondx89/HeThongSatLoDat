@@ -63,6 +63,7 @@ struct OutputElectricalConfiguration {
 
 struct BoardConfig {
     BoardInfo info{kBoardInfo};
+    bool hardwareReviewApproved{false};
 
     I2cConfiguration imuI2c{};
     AdcConfiguration soilAdc{};
@@ -91,8 +92,13 @@ enum class BoardConfigIssue : std::uint32_t {
     I2cPinsMissing = 1U << 5U,
     I2cClockUnknown = 1U << 6U,
     I2cAddressUnknown = 1U << 7U,
-    I2cElectricalReviewMissing = 1U << 8U
+    I2cElectricalReviewMissing = 1U << 8U,
+    HardwareReviewMissing = 1U << 9U
 };
+
+constexpr std::uint32_t issueMask(BoardConfigIssue issue) noexcept {
+    return static_cast<std::uint32_t>(issue);
+}
 
 struct BoardConfigReport {
     std::uint32_t issues{0};
@@ -101,7 +107,8 @@ struct BoardConfigReport {
         constexpr std::uint32_t boardIssues =
             issueMask(BoardConfigIssue::BoardIdentityUnknown) |
             issueMask(BoardConfigIssue::BoardVersionUnknown) |
-            issueMask(BoardConfigIssue::PinMapInvalid);
+            issueMask(BoardConfigIssue::PinMapInvalid) |
+            issueMask(BoardConfigIssue::HardwareReviewMissing);
         return (issues & boardIssues) == 0;
     }
 
@@ -109,10 +116,6 @@ struct BoardConfigReport {
         return issues == 0;
     }
 };
-
-constexpr std::uint32_t issueMask(BoardConfigIssue issue) noexcept {
-    return static_cast<std::uint32_t>(issue);
-}
 
 constexpr void addIssue(std::uint32_t& issues, BoardConfigIssue issue) noexcept {
     issues |= issueMask(issue);
@@ -129,6 +132,9 @@ constexpr BoardConfigReport validateBoardConfig(const BoardConfig& config,
     }
     if (!config.info.hardwareVersion.known) {
         addIssue(report.issues, BoardConfigIssue::BoardVersionUnknown);
+    }
+    if (!config.hardwareReviewApproved) {
+        addIssue(report.issues, BoardConfigIssue::HardwareReviewMissing);
     }
     if (!pinsDoNotConflict(pins)) {
         addIssue(report.issues, BoardConfigIssue::PinMapInvalid);

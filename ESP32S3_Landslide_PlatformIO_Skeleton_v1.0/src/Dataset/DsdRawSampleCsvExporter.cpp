@@ -2,11 +2,9 @@
 
 #include "project/Dataset/DsdRawSampleCsvExporter.h"
 
-#include <cstring>
 #include <limits>
 
 #include "project/Dataset/CsvSchemas.h"
-#include "project/Dataset/CsvWriter.h"
 #include "project/Dataset/DsdRawSampleCsvParser.h"
 
 namespace project::dataset {
@@ -14,6 +12,12 @@ namespace {
 
 using project::models::DataQualityState;
 using project::models::TimeStatus;
+
+constexpr CsvArtifactSchema kRawSampleArtifactSchema{
+    "raw_samples.csv",
+    kRawSampleCoreSchemaVersion,
+    kDsdV1_2RawSampleCoreFields.data(),
+    kDsdV1_2RawSampleCoreFields.size()};
 
 std::string_view qualityName(DataQualityState quality) noexcept {
     switch (quality) {
@@ -157,48 +161,50 @@ CsvWriteStatus appendRecordFields(
     return status;
 }
 
+DsdRawSampleExportStatus mapArtifactStatus(
+    CsvArtifactExportStatus status) noexcept {
+    switch (status) {
+        case CsvArtifactExportStatus::Ok:
+            return DsdRawSampleExportStatus::Ok;
+        case CsvArtifactExportStatus::InvalidArgument:
+            return DsdRawSampleExportStatus::InvalidArgument;
+        case CsvArtifactExportStatus::InvalidState:
+            return DsdRawSampleExportStatus::InvalidState;
+        case CsvArtifactExportStatus::CapacityExceeded:
+            return DsdRawSampleExportStatus::CapacityExceeded;
+        case CsvArtifactExportStatus::HashError:
+            return DsdRawSampleExportStatus::HashError;
+        case CsvArtifactExportStatus::InvalidSchema:
+        case CsvArtifactExportStatus::CsvWriteError:
+            return DsdRawSampleExportStatus::CsvWriteError;
+        case CsvArtifactExportStatus::RowCountOverflow:
+            return DsdRawSampleExportStatus::InvalidRecord;
+    }
+    return DsdRawSampleExportStatus::CsvWriteError;
+}
+
 }  // namespace
 
 DsdRawSampleCsvExporter::DsdRawSampleCsvExporter(
     char* output, std::size_t capacity,
     const DsdRawSampleExportConfig& config) noexcept
-    : output_(output), capacity_(capacity), config_(config) {}
-
-DsdRawSampleExportStatus DsdRawSampleCsvExporter::appendBytes(
-    const char* bytes, std::size_t size) noexcept {
-    if (bytesWritten_ > capacity_ ||
-        size > capacity_ - bytesWritten_) {
-        failed_ = true;
-        return DsdRawSampleExportStatus::CapacityExceeded;
-    }
-    if (!sha256_.update(reinterpret_cast<const std::uint8_t*>(bytes), size)) {
-        failed_ = true;
-        return DsdRawSampleExportStatus::HashError;
-    }
-    std::memcpy(output_ + bytesWritten_, bytes, size);
-    bytesWritten_ += size;
-    return DsdRawSampleExportStatus::Ok;
-}
+    : config_(config),
+      artifactWriter_(output, capacity, rowBuffer_.data(), rowBuffer_.size(),
+                      kRawSampleArtifactSchema) {}
 
 DsdRawSampleExportStatus DsdRawSampleCsvExporter::begin() noexcept {
     if (begun_ || finished_ || failed_) {
         return DsdRawSampleExportStatus::InvalidState;
     }
-    if (output_ == nullptr || capacity_ == 0U || !validConfig(config_)) {
+    if (!validConfig(config_)) {
         failed_ = true;
         return DsdRawSampleExportStatus::InvalidArgument;
     }
 
-    char header[1024U]{};
-    std::size_t headerSize = 0U;
-    if (writeDsdV1_2RawSampleCoreHeader(
-            header, sizeof(header), headerSize) != CsvWriteStatus::Ok) {
+    const CsvArtifactExportStatus status = artifactWriter_.begin();
+    if (status != CsvArtifactExportStatus::Ok) {
         failed_ = true;
-        return DsdRawSampleExportStatus::CsvWriteError;
-    }
-    const DsdRawSampleExportStatus status = appendBytes(header, headerSize);
-    if (status != DsdRawSampleExportStatus::Ok) {
-        return status;
+        return mapArtifactStatus(status);
     }
     begun_ = true;
     return DsdRawSampleExportStatus::Ok;
@@ -210,26 +216,24 @@ DsdRawSampleExportStatus DsdRawSampleCsvExporter::append(
         return DsdRawSampleExportStatus::InvalidState;
     }
     if (!validRecord(config_, record) ||
-        rowsWritten_ == std::numeric_limits<std::uint64_t>::max()) {
+        artifactWriter_.rowsWritten() ==
+            std::numeric_limits<std::uint64_t>::max()) {
         failed_ = true;
         return DsdRawSampleExportStatus::InvalidRecord;
     }
 
-    std::array<char, kMaxRawCsvRecordBytes> row{};
-    CsvRowWriter writer(row.data(), row.size(),
-                        kDsdV1_2RawSampleCoreFields.size());
-    if (writer.appendField(config_.datasetId) != CsvWriteStatus::Ok ||
-        appendRecordFields(writer, record) != CsvWriteStatus::Ok ||
-        writer.finish() != CsvWriteStatus::Ok) {
+    const CsvArtifactExportStatus status = artifactWriter_.appendRow(
+        [this, &record](CsvRowWriter& writer) noexcept {
+            const CsvWriteStatus datasetStatus =
+                writer.appendField(config_.datasetId);
+            return datasetStatus == CsvWriteStatus::Ok
+                       ? appendRecordFields(writer, record)
+                       : datasetStatus;
+        });
+    if (status != CsvArtifactExportStatus::Ok) {
         failed_ = true;
-        return DsdRawSampleExportStatus::CsvWriteError;
+        return mapArtifactStatus(status);
     }
-    const DsdRawSampleExportStatus status =
-        appendBytes(writer.data(), writer.size());
-    if (status != DsdRawSampleExportStatus::Ok) {
-        return status;
-    }
-    ++rowsWritten_;
     return DsdRawSampleExportStatus::Ok;
 }
 
@@ -239,16 +243,17 @@ DsdRawSampleExportStatus DsdRawSampleCsvExporter::finish(
     if (!begun_ || finished_ || failed_) {
         return DsdRawSampleExportStatus::InvalidState;
     }
-    std::array<std::uint8_t, Sha256::kDigestSize> digest{};
-    if (!sha256_.finish(digest)) {
+    CsvArtifactExportReport report{};
+    const CsvArtifactExportStatus status = artifactWriter_.finish(report);
+    if (status != CsvArtifactExportStatus::Ok) {
         failed_ = true;
-        return DsdRawSampleExportStatus::HashError;
+        return mapArtifactStatus(status);
     }
     manifest.datasetId = config_.datasetId;
-    manifest.rawSchemaVersion = kRawSampleCoreSchemaVersion;
-    manifest.expectedRows = rowsWritten_;
-    manifest.expectedBytes = static_cast<std::uint64_t>(bytesWritten_);
-    manifest.expectedSha256 = digest;
+    manifest.rawSchemaVersion = report.schemaVersion;
+    manifest.expectedRows = report.rowCount;
+    manifest.expectedBytes = report.byteCount;
+    manifest.expectedSha256 = report.sha256;
     manifest.provenance = config_.provenance;
     manifest.channelPresence = config_.channelPresence;
     manifest.channelPresenceConfigured = true;

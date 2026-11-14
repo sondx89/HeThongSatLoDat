@@ -26,8 +26,19 @@ struct ProcessedFrame {
     float accelMagnitude{0.0F}; // TODO(TBD): unit/formula and eligibility.
     float soilMoisturePct{0.0F};
     float rainWetnessRelativePct{0.0F};
+    bool rainDigitalWet{false};
+    bool rainDigitalWetValid{false};
+    float rainAccEquivalentWetSeconds{0.0F};
+    bool rainAccValid{false};
     float rainRateMmH{0.0F};
-    float hx710bCalibratedValue{0.0F};  // Unit/measurand remain TBD.
+    float hx710bCalibratedValue{0.0F};  // kPa only with an approved profile.
+    bool hx710bCalibratedValueValid{false};
+    std::uint64_t hx710bSampleTimestampMs{0};
+    std::uint32_t hx710bTransducerIdentityId{0};
+    std::uint32_t hx710bCalibrationVersion{0};
+    float hx710bBaselineKpa{0.0F};
+    std::uint32_t hx710bBaselineSampleCount{0};
+    bool hx710bBaselineValid{false};
 
     std::array<DataQualityState,
                static_cast<std::size_t>(SensorChannel::Count)>

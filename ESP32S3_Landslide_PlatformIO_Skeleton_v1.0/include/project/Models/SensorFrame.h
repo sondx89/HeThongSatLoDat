@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -31,6 +32,8 @@ enum class SensorChannel : std::uint8_t {
     RainRateMmH,
     Hx710bRaw,
     Hx710bCalibratedValue,
+    RainDigitalWet,
+    RainAccumulationEquivalentWetSeconds,
     Count
 };
 
@@ -38,6 +41,7 @@ struct ImuRawSample {
     std::int32_t accelX{0};
     std::int32_t accelY{0};
     std::int32_t accelZ{0};
+    std::int32_t temperatureRaw{0};
     std::int32_t gyroX{0};
     std::int32_t gyroY{0};
     std::int32_t gyroZ{0};
@@ -50,6 +54,34 @@ struct ImuPhysicalSample {
     float gyroXDps{0.0F};
     float gyroYDps{0.0F};
     float gyroZDps{0.0F};
+    float temperatureC{0.0F};
+    float tiltRollDeg{0.0F};
+    float tiltPitchDeg{0.0F};
+    bool temperatureValid{false};
+    bool tiltRollValid{false};
+    bool tiltPitchValid{false};
+};
+
+inline constexpr std::size_t kSoilMoistureProbeCount = 3;
+
+enum class SoilMoistureQuality : std::uint8_t {
+    NotPresent,
+    WarmingUp,
+    Valid,
+    AdcReadFailed,
+    AdcValueOutOfRange,
+    Stale
+};
+
+struct SoilMoistureProbeSample {
+    std::int32_t rawAdcCount{0};
+    float filteredAdcCount{0.0F};
+    float moisturePercent{0.0F};
+    std::uint64_t timestampMs{0};
+    std::uint32_t calibrationVersion{0};
+    std::uint8_t sampleCount{0};
+    SoilMoistureQuality quality{SoilMoistureQuality::NotPresent};
+    bool valid{false};
 };
 
 struct SensorFrame {
@@ -65,15 +97,29 @@ struct SensorFrame {
     // whether a channel contains a usable measurement.
     ImuRawSample imu{};
     ImuPhysicalSample imuPhysical{};
-    float tiltAngleDeg{0.0F};  // TODO(TBD): confirm feature definition/reference.
+    float tiltAngleDeg{0.0F};  // max(abs(roll), abs(pitch)); mounting remains TBD.
     bool tiltAngleValid{false};
     std::int32_t soilMoistureRaw{0};
     float soilMoisturePct{0.0F};     // Valid only after approved calibration.
+    std::array<SoilMoistureProbeSample, kSoilMoistureProbeCount>
+        soilMoistureProbes{};
+    std::uint8_t soilMoistureValidChannelCount{0};
+    std::uint8_t soilMoistureRequiredChannelCount{0};
+    std::uint8_t soilMoistureRawChannelIndex{0xFF};
+    bool soilMoistureAverageValid{false};
     std::int32_t rainRaw{0};
     float rainWetnessRelativePct{0.0F};  // Not rainfall amount/intensity.
     bool rainWetnessValid{false};
+    bool rainDigitalWet{false};
+    bool rainDigitalValid{false};
+    float rainAccEquivalentWetSeconds{0.0F};
+    std::uint32_t rainAccCoverageMs{0};
+    bool rainAccValid{false};
     float rainRateMmH{0.0F};         // Valid only if sensor/calibration supports it.
     std::int32_t hx710bRaw{0};
+    std::uint8_t hx710bRawSampleCount{0};
+    std::uint32_t hx710bTransducerIdentityId{0};
+    std::uint32_t hx710bCalibrationVersion{0};
     float hx710bCalibrationFactor{0.0F};
     bool hx710bCalibrationFactorValid{false};
     float hx710bFactorScaledRaw{0.0F};  // Not an engineering-unit measurement.
@@ -88,6 +134,9 @@ struct SensorFrame {
     SensorStatus imuStatus{};
     SensorStatus soilStatus{};
     SensorStatus rainStatus{};
+    SensorStatus rainAoStatus{};
+    SensorStatus rainDoStatus{};
+    SensorStatus rainAccumulationStatus{};
     SensorStatus hx710bStatus{};
 };
 

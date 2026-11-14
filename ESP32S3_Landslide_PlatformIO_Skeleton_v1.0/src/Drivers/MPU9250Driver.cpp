@@ -1,5 +1,6 @@
 #include "project/Drivers/MPU9250Driver.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -19,18 +20,34 @@ constexpr std::uint8_t kRegisterAccelConfiguration2 = 0x1D;
 constexpr std::uint8_t kRegisterAccelOutput = 0x3B;
 constexpr std::uint8_t kRegisterWhoAmI = 0x75;
 constexpr std::uint8_t kRawSampleLength = 14;
-constexpr std::uint8_t kMaxCalibrationSamples = 100;
+constexpr std::uint8_t kMpu9250WhoAmI = 0x71;
+constexpr std::uint16_t kCalibrationSampleCount = 200;
+constexpr std::uint16_t kCalibrationIntervalMs = 5;
+constexpr float kAccelGPerLsbAt2G = 1.0F / 16384.0F;
+constexpr float kGyroDpsPerLsbAt250Dps = 1.0F / 131.0F;
+constexpr float kTemperatureLsbPerDegreeC = 333.87F;
+constexpr float kTemperatureOffsetC = 21.0F;
+constexpr float kComplementaryAlpha = 0.98F;
+constexpr float kRadiansToDegrees = 57.29577951308232F;
 
-std::int16_t decodeSigned16(const std::uint8_t high,
+std::int32_t decodeSigned16(const std::uint8_t high,
                             const std::uint8_t low) noexcept {
     const auto combined = static_cast<std::uint16_t>(
         (static_cast<std::uint16_t>(high) << 8U) |
         static_cast<std::uint16_t>(low));
-    return static_cast<std::int16_t>(combined);
+    const std::int32_t signedValue = static_cast<std::int32_t>(combined);
+    return (combined & 0x8000U) != 0U
+               ? signedValue - 0x10000
+               : signedValue;
 }
 
 bool finitePositive(const float value) noexcept {
     return std::isfinite(value) && value > 0.0F;
+}
+
+bool nearScale(const float value, const float expected) noexcept {
+    return std::isfinite(value) &&
+           std::fabs(value - expected) <= expected * 0.0001F;
 }
 
 }  // namespace
@@ -43,30 +60,30 @@ Mpu9250Status MPU9250Driver::validateConfiguration() const noexcept {
     if (config_.i2cAddress == 0U || config_.i2cAddress > 0x7FU ||
         config_.transactionTimeoutMs == 0U ||
         !config_.registerSetupConfigured ||
-        config_.calibrationSampleCount == 0U ||
-        config_.calibrationSampleCount > kMaxCalibrationSamples ||
-        config_.calibrationIntervalMs == 0U ||
-        (config_.verifyIdentity && config_.expectedWhoAmI == 0U) ||
+        config_.calibrationSampleCount != kCalibrationSampleCount ||
+        config_.calibrationIntervalMs != kCalibrationIntervalMs ||
+        !config_.verifyIdentity ||
+        config_.expectedWhoAmI != kMpu9250WhoAmI ||
+        !config_.datasheetAssumptionsApproved ||
+        config_.powerManagement1 != 0U ||
+        config_.gyroConfiguration != 0U ||
+        config_.accelConfiguration != 0U ||
         !finitePositive(config_.accelGPerLsb) ||
-        !finitePositive(config_.gyroDpsPerLsb)) {
+        !finitePositive(config_.gyroDpsPerLsb) ||
+        !nearScale(config_.accelGPerLsb, kAccelGPerLsbAt2G) ||
+        !nearScale(config_.gyroDpsPerLsb, kGyroDpsPerLsbAt250Dps) ||
+        (config_.tiltDefinitionApproved &&
+         config_.maximumFilterGapMs == 0U)) {
         return Mpu9250Status::InvalidConfiguration;
     }
 
-    float referenceNormSquared = 0.0F;
-    for (const float component : config_.referenceAccelG) {
-        if (!std::isfinite(component)) {
-            return Mpu9250Status::InvalidConfiguration;
-        }
-        referenceNormSquared += component * component;
-    }
-    return referenceNormSquared > 0.0F
-               ? Mpu9250Status::Ok
-               : Mpu9250Status::InvalidConfiguration;
+    return Mpu9250Status::Ok;
 }
 
 Mpu9250Status MPU9250Driver::initialize() noexcept {
     initialized_ = false;
     offsets_ = {};
+    resetFilter();
     lastStatus_ = validateConfiguration();
     if (lastStatus_ != Mpu9250Status::Ok) {
         return lastStatus_;
@@ -115,9 +132,8 @@ Mpu9250Status MPU9250Driver::calibrateOffsets() noexcept {
         return lastStatus_;
     }
 
-    std::array<double, 3> accelSums{};
     std::array<double, 3> gyroSums{};
-    for (std::uint8_t sampleIndex = 0;
+    for (std::uint16_t sampleIndex = 0;
          sampleIndex < config_.calibrationSampleCount;
          ++sampleIndex) {
         project::models::ImuRawSample raw{};
@@ -128,9 +144,6 @@ Mpu9250Status MPU9250Driver::calibrateOffsets() noexcept {
             return lastStatus_;
         }
 
-        accelSums[0] += raw.accelX;
-        accelSums[1] += raw.accelY;
-        accelSums[2] += raw.accelZ;
         gyroSums[0] += raw.gyroX;
         gyroSums[1] += raw.gyroY;
         gyroSums[2] += raw.gyroZ;
@@ -143,16 +156,11 @@ Mpu9250Status MPU9250Driver::calibrateOffsets() noexcept {
     const double sampleCount =
         static_cast<double>(config_.calibrationSampleCount);
     for (std::size_t axis = 0; axis < 3; ++axis) {
-        const double expectedAccelRaw =
-            static_cast<double>(config_.referenceAccelG[axis]) /
-            static_cast<double>(config_.accelGPerLsb);
-        offsets_.accelRaw[axis] =
-            static_cast<float>(accelSums[axis] / sampleCount -
-                               expectedAccelRaw);
         offsets_.gyroRaw[axis] =
             static_cast<float>(gyroSums[axis] / sampleCount);
     }
     offsets_.valid = true;
+    resetFilter();
     lastStatus_ = Mpu9250Status::Ok;
     return lastStatus_;
 }
@@ -177,39 +185,59 @@ Mpu9250Status MPU9250Driver::readSample(Mpu9250Sample& output) noexcept {
         return lastStatus_;
     }
 
-    const std::array<float, 3> accelRaw{
-        static_cast<float>(output.raw.accelX),
-        static_cast<float>(output.raw.accelY),
-        static_cast<float>(output.raw.accelZ)};
-    const std::array<float, 3> gyroRaw{
-        static_cast<float>(output.raw.gyroX),
-        static_cast<float>(output.raw.gyroY),
-        static_cast<float>(output.raw.gyroZ)};
-    std::array<float, 3> accelG{};
-    std::array<float, 3> gyroDps{};
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-        accelG[axis] =
-            (accelRaw[axis] - offsets_.accelRaw[axis]) *
-            config_.accelGPerLsb;
-        gyroDps[axis] =
-            (gyroRaw[axis] - offsets_.gyroRaw[axis]) *
-            config_.gyroDpsPerLsb;
+    output.physical.accelXG =
+        static_cast<float>(output.raw.accelX) * config_.accelGPerLsb;
+    output.physical.accelYG =
+        static_cast<float>(output.raw.accelY) * config_.accelGPerLsb;
+    output.physical.accelZG =
+        static_cast<float>(output.raw.accelZ) * config_.accelGPerLsb;
+    output.physical.gyroXDps =
+        (static_cast<float>(output.raw.gyroX) - offsets_.gyroRaw[0]) *
+        config_.gyroDpsPerLsb;
+    output.physical.gyroYDps =
+        (static_cast<float>(output.raw.gyroY) - offsets_.gyroRaw[1]) *
+        config_.gyroDpsPerLsb;
+    output.physical.gyroZDps =
+        (static_cast<float>(output.raw.gyroZ) - offsets_.gyroRaw[2]) *
+        config_.gyroDpsPerLsb;
+    output.temperatureC =
+        static_cast<float>(output.raw.temperatureRaw) /
+            kTemperatureLsbPerDegreeC +
+        kTemperatureOffsetC;
+
+    const std::int64_t timestampUs = esp_timer_get_time();
+    if (timestampUs < 0 ||
+        !std::isfinite(output.physical.accelXG) ||
+        !std::isfinite(output.physical.accelYG) ||
+        !std::isfinite(output.physical.accelZG) ||
+        !std::isfinite(output.physical.gyroXDps) ||
+        !std::isfinite(output.physical.gyroYDps) ||
+        !std::isfinite(output.physical.gyroZDps) ||
+        !std::isfinite(output.temperatureC)) {
+        resetFilter();
+        lastStatus_ = Mpu9250Status::InvalidSample;
+        return lastStatus_;
     }
 
-    output.physical.accelXG = accelG[0];
-    output.physical.accelYG = accelG[1];
-    output.physical.accelZG = accelG[2];
-    output.physical.gyroXDps = gyroDps[0];
-    output.physical.gyroYDps = gyroDps[1];
-    output.physical.gyroZDps = gyroDps[2];
+    output.physical.temperatureC = output.temperatureC;
+    output.physical.temperatureValid = true;
     output.sequence = ++sequence_;
-    output.timestampMs =
-        static_cast<std::uint64_t>(esp_timer_get_time()) / 1000U;
+    output.timestampMs = static_cast<std::uint64_t>(timestampUs) / 1000U;
+    output.temperatureValid = true;
     output.accelValid = true;
     output.gyroValid = true;
     output.tiltStatus =
-        calculateTiltAngle(output.physical, output.tiltAngleDeg);
+        config_.tiltDefinitionApproved
+            ? calculateTiltAngle(
+                  output.physical, static_cast<std::uint64_t>(timestampUs),
+                  output.physical.tiltRollDeg, output.physical.tiltPitchDeg,
+                  output.tiltAngleDeg)
+            : Mpu9250Status::TiltDefinitionNotApproved;
     output.tiltValid = output.tiltStatus == Mpu9250Status::Ok;
+    output.rollValid = output.tiltValid;
+    output.pitchValid = output.tiltValid;
+    output.physical.tiltRollValid = output.rollValid;
+    output.physical.tiltPitchValid = output.pitchValid;
 
     lastStatus_ = Mpu9250Status::Ok;
     return lastStatus_;
@@ -263,10 +291,11 @@ project::models::SensorStatus MPU9250Driver::selfTest() {
 Mpu9250Status MPU9250Driver::writeRegister(const std::uint8_t reg,
                                            const std::uint8_t value) noexcept {
     bus_.beginTransmission(config_.i2cAddress);
-    bus_.write(reg);
-    bus_.write(value);
+    const std::size_t registerBytesWritten = bus_.write(reg);
+    const std::size_t valueBytesWritten = bus_.write(value);
     const std::uint8_t result = bus_.endTransmission(true);
-    if (result != 0U) {
+    if (registerBytesWritten != 1U || valueBytesWritten != 1U ||
+        result != 0U) {
         lastStatus_ = Mpu9250Status::I2cWriteFailed;
         return lastStatus_;
     }
@@ -277,21 +306,22 @@ Mpu9250Status MPU9250Driver::readRegisters(
     const std::uint8_t firstRegister,
     std::uint8_t* output,
     const std::uint8_t length) noexcept {
-    if (output == nullptr || length == 0U) {
+    if (output == nullptr || length == 0U || length > kRawSampleLength) {
         lastStatus_ = Mpu9250Status::InvalidConfiguration;
         return lastStatus_;
     }
 
     bus_.beginTransmission(config_.i2cAddress);
-    bus_.write(firstRegister);
-    if (bus_.endTransmission(false) != 0U) {
+    const std::size_t registerBytesWritten = bus_.write(firstRegister);
+    const std::uint8_t pointerStatus = bus_.endTransmission(false);
+    if (registerBytesWritten != 1U || pointerStatus != 0U) {
         lastStatus_ = Mpu9250Status::I2cReadFailed;
         return lastStatus_;
     }
 
     const std::uint8_t received =
         bus_.requestFrom(config_.i2cAddress, length, true);
-    if (received != length) {
+    if (received != length || bus_.available() != length) {
         while (bus_.available() > 0) {
             (void)bus_.read();
         }
@@ -299,21 +329,34 @@ Mpu9250Status MPU9250Driver::readRegisters(
         return lastStatus_;
     }
 
+    std::array<std::uint8_t, kRawSampleLength> bytes{};
     for (std::uint8_t index = 0; index < length; ++index) {
         const int byteValue = bus_.read();
         if (byteValue < 0) {
+            while (bus_.available() > 0) {
+                (void)bus_.read();
+            }
             lastStatus_ = Mpu9250Status::I2cTimeout;
             return lastStatus_;
         }
-        output[index] = static_cast<std::uint8_t>(byteValue);
+        bytes[index] = static_cast<std::uint8_t>(byteValue);
     }
+    if (bus_.available() != 0) {
+        while (bus_.available() > 0) {
+            (void)bus_.read();
+        }
+        lastStatus_ = Mpu9250Status::I2cReadFailed;
+        return lastStatus_;
+    }
+    std::copy_n(bytes.begin(), length, output);
     return Mpu9250Status::Ok;
 }
 
 Mpu9250Status MPU9250Driver::readRaw(
     project::models::ImuRawSample& output) noexcept {
-    std::uint8_t bytes[kRawSampleLength]{};
-    lastStatus_ = readRegisters(kRegisterAccelOutput, bytes, kRawSampleLength);
+    std::array<std::uint8_t, kRawSampleLength> bytes{};
+    lastStatus_ = readRegisters(kRegisterAccelOutput, bytes.data(),
+                                kRawSampleLength);
     if (lastStatus_ != Mpu9250Status::Ok) {
         return lastStatus_;
     }
@@ -321,6 +364,7 @@ Mpu9250Status MPU9250Driver::readRaw(
     output.accelX = decodeSigned16(bytes[0], bytes[1]);
     output.accelY = decodeSigned16(bytes[2], bytes[3]);
     output.accelZ = decodeSigned16(bytes[4], bytes[5]);
+    output.temperatureRaw = decodeSigned16(bytes[6], bytes[7]);
     output.gyroX = decodeSigned16(bytes[8], bytes[9]);
     output.gyroY = decodeSigned16(bytes[10], bytes[11]);
     output.gyroZ = decodeSigned16(bytes[12], bytes[13]);
@@ -329,12 +373,81 @@ Mpu9250Status MPU9250Driver::readRaw(
 
 Mpu9250Status MPU9250Driver::calculateTiltAngle(
     const project::models::ImuPhysicalSample& physical,
-    float& tiltAngleDeg) const noexcept {
-    (void)physical;
-    tiltAngleDeg = 0.0F;
-    // TODO(TBD): implement only after the tilt axes, reference pose, formula,
-    // and filtering method are approved in the system documents.
-    return Mpu9250Status::TiltCalculationPending;
+    const std::uint64_t timestampUs,
+    float& rollDeg,
+    float& pitchDeg,
+    float& tiltMaxDeg) noexcept {
+    rollDeg = 0.0F;
+    pitchDeg = 0.0F;
+    tiltMaxDeg = 0.0F;
+
+    const float ax = physical.accelXG;
+    const float ay = physical.accelYG;
+    const float az = physical.accelZG;
+    const float normSquared = ax * ax + ay * ay + az * az;
+    if (!std::isfinite(normSquared) || normSquared <= 1.0e-6F ||
+        !std::isfinite(physical.gyroXDps) ||
+        !std::isfinite(physical.gyroYDps)) {
+        resetFilter();
+        return Mpu9250Status::InvalidSample;
+    }
+
+    const float rollAccelDeg = std::atan2(ay, az) * kRadiansToDegrees;
+    const float pitchAccelDeg =
+        std::atan2(-ax, std::sqrt(ay * ay + az * az)) *
+        kRadiansToDegrees;
+    if (!std::isfinite(rollAccelDeg) || !std::isfinite(pitchAccelDeg)) {
+        resetFilter();
+        return Mpu9250Status::InvalidSample;
+    }
+
+    if (filterInitialized_) {
+        if (timestampUs <= lastFilterTimestampUs_) {
+            resetFilter();
+            return Mpu9250Status::InvalidSample;
+        }
+        const std::uint64_t elapsedUs = timestampUs - lastFilterTimestampUs_;
+        if (elapsedUs >
+            static_cast<std::uint64_t>(config_.maximumFilterGapMs) * 1000U) {
+            resetFilter();
+            return Mpu9250Status::InvalidSample;
+        }
+        const float dtSeconds = static_cast<float>(elapsedUs) / 1000000.0F;
+        filteredRollDeg_ =
+            kComplementaryAlpha *
+                (filteredRollDeg_ + physical.gyroXDps * dtSeconds) +
+            (1.0F - kComplementaryAlpha) * rollAccelDeg;
+        filteredPitchDeg_ =
+            kComplementaryAlpha *
+                (filteredPitchDeg_ + physical.gyroYDps * dtSeconds) +
+            (1.0F - kComplementaryAlpha) * pitchAccelDeg;
+    } else {
+        filteredRollDeg_ = rollAccelDeg;
+        filteredPitchDeg_ = pitchAccelDeg;
+        filterInitialized_ = true;
+    }
+    lastFilterTimestampUs_ = timestampUs;
+
+    if (!std::isfinite(filteredRollDeg_) ||
+        !std::isfinite(filteredPitchDeg_)) {
+        resetFilter();
+        return Mpu9250Status::InvalidSample;
+    }
+    rollDeg = filteredRollDeg_;
+    pitchDeg = filteredPitchDeg_;
+    tiltMaxDeg = std::max(std::fabs(rollDeg), std::fabs(pitchDeg));
+    if (!std::isfinite(tiltMaxDeg)) {
+        resetFilter();
+        return Mpu9250Status::InvalidSample;
+    }
+    return Mpu9250Status::Ok;
+}
+
+void MPU9250Driver::resetFilter() noexcept {
+    lastFilterTimestampUs_ = 0;
+    filteredRollDeg_ = 0.0F;
+    filteredPitchDeg_ = 0.0F;
+    filterInitialized_ = false;
 }
 
 project::models::SensorStatus MPU9250Driver::sensorStatus(

@@ -1,5 +1,9 @@
 # CsvLogger
 
+**Runtime integration status:** PARTIAL — the logger contract and serializers
+are implemented, but no production `ITaskLogWriter`/`ICsvFileSystem` composition
+or approved storage backend is provided.
+
 `project/Storage/CsvLogger.h` writes sample rows with this exact header:
 
 ```csv
@@ -105,3 +109,21 @@ const auto writeStatus = logger.appendRecord(record);
 `maximumFileBytes`, value mapping, required validity policy, and whether a given
 `RiskState` label is an approved external representation must be set by the
 integration from reviewed project decisions.
+
+## P14 runtime wiring gate
+
+`TaskLogger` is the sole Q_EVENT/Q_LOG consumer and invokes an injected
+`ITaskLogWriter`; the firmware does not currently provide that production
+writer. Q_LOG's current tagged `LogRecord` is event-only, so it is not a
+sensor-row pipeline. `CsvLogger` is a separate synchronous component and has no
+runtime adapter to the task writer. Consequently this repository does not claim
+that sensor snapshots are being written to the six-column operational CSV.
+
+Do not invent a risk-token mapping, interpret model stress as probability, or
+merge serial mock telemetry into the operational CSV. The DSD v1.2 raw dataset
+schema remains a separate exact 36-column export; calibrated samples remain a
+separate exporter. Runtime wiring is blocked until the project supplies an
+approved row/source mapping, finite storage-adapter behavior, storage backend,
+rotation/flush policy and failure-recovery composition. Queue drops and logger
+errors must remain visible; acquisition must never wait indefinitely for
+storage.

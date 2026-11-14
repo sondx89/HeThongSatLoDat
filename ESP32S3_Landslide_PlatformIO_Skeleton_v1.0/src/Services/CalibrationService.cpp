@@ -1,5 +1,6 @@
 #include "project/Services/CalibrationService.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 
@@ -11,6 +12,9 @@ using project::models::SensorChannel;
 using project::models::SensorFrame;
 using project::models::SensorHealth;
 using project::models::SensorStatus;
+
+constexpr std::uint32_t kHx710bBaselineWindowMs = 15000U;
+constexpr std::uint32_t kHx710bBaselineMinimumSamples = 3U;
 
 constexpr std::size_t channelIndex(SensorChannel channel) noexcept {
     return static_cast<std::size_t>(channel);
@@ -47,6 +51,48 @@ DataQualityState unconfiguredProcessedQuality(const SensorStatus& status,
     const DataQualityState quality = sourceQuality(status, value, present);
     return quality == DataQualityState::VALID ? DataQualityState::MISSING
                                               : quality;
+}
+
+bool pressureFromRaw(
+    const std::int32_t rawValue,
+    const project::drivers::Hx710bCalibration& calibration,
+    float& pressureKpa) noexcept {
+    const auto minimumRaw =
+        std::min(calibration.rawZeroCount, calibration.rawFullScaleCount);
+    const auto maximumRaw =
+        std::max(calibration.rawZeroCount, calibration.rawFullScaleCount);
+    if (rawValue < minimumRaw || rawValue > maximumRaw) {
+        return false;
+    }
+
+    const double rawSpan =
+        static_cast<double>(calibration.rawFullScaleCount) -
+        static_cast<double>(calibration.rawZeroCount);
+    const double fraction =
+        (static_cast<double>(rawValue) -
+         static_cast<double>(calibration.rawZeroCount)) /
+        rawSpan;
+    const double mapped =
+        static_cast<double>(calibration.zeroPressureKpa) +
+        fraction *
+            (static_cast<double>(calibration.fullScalePressureKpa) -
+             static_cast<double>(calibration.zeroPressureKpa));
+    if (!std::isfinite(mapped) ||
+        mapped < calibration.minimumPressureKpa ||
+        mapped > calibration.maximumPressureKpa) {
+        return false;
+    }
+    pressureKpa = static_cast<float>(mapped);
+    return std::isfinite(pressureKpa);
+}
+
+bool baselinePolicyIsConfigured(
+    const Hx710bBaselinePolicy& policy) noexcept {
+    return policy.configured &&
+           policy.windowDurationMs == kHx710bBaselineWindowMs &&
+           policy.minimumValidSamples >=
+               kHx710bBaselineMinimumSamples &&
+           policy.maximumSampleAgeMs != 0U;
 }
 
 void setQuality(project::models::ProcessedFrame& output,
@@ -140,7 +186,9 @@ bool CalibrationService::loadCalibration() {
 
 project::models::ApiStatus CalibrationService::loadCalibrationStatus()
     const noexcept {
-    return project::models::ApiStatus::NotInitialized;
+    return mode_ == CalibrationMode::Hx710bPressureOnly
+               ? project::models::ApiStatus::Ok
+               : project::models::ApiStatus::NotInitialized;
 }
 
 bool CalibrationService::process(
@@ -160,16 +208,176 @@ project::models::ApiStatus CalibrationService::processStatus(
     output.qualityFlags = input.qualityFlags;
     output.sensorStatusBits = input.sensorStatusBits;
     output.calibrationVersion = input.calibrationVersion;
+    output.hx710bTransducerIdentityId =
+        input.hx710bTransducerIdentityId;
+    output.hx710bCalibrationVersion =
+        input.hx710bCalibrationVersion;
+    output.hx710bSampleTimestampMs =
+        input.hx710bStatus.timestampMs;
 
     propagateRawAndSourceQuality(input, output);
+    output.hx710bCalibratedValue = 0.0F;
+    output.hx710bCalibratedValueValid = false;
+    output.hx710bBaselineKpa = 0.0F;
+    output.hx710bBaselineValid = false;
 
     if (input.schemaVersion == 0U) {
         return project::models::ApiStatus::InvalidArgument;
     }
-    if (input.calibrationVersion != 0U) {
+    if (mode_ == CalibrationMode::RawOnly &&
+        input.calibrationVersion != 0U) {
         return project::models::ApiStatus::VersionMismatch;
     }
+
+    if (mode_ == CalibrationMode::Hx710bPressureOnly) {
+        const auto channelIndex =
+            static_cast<std::size_t>(
+                SensorChannel::Hx710bCalibratedValue);
+        const bool sourceValid =
+            sensorDataAvailable(input.hx710bStatus) &&
+            input.hx710bRawSampleCount != 0U;
+        if (!sourceValid) {
+            output.channelQuality[channelIndex] =
+                DataQualityState::MISSING;
+            return project::models::ApiStatus::NotInitialized;
+        }
+        if (input.hx710bTransducerIdentityId !=
+                hx710bCalibration_.transducerIdentityId ||
+            input.hx710bCalibrationVersion !=
+                hx710bCalibration_.version) {
+            output.channelQuality[channelIndex] =
+                DataQualityState::CALIBRATION_INVALID;
+            return project::models::ApiStatus::VersionMismatch;
+        }
+
+        float pressureKpa = 0.0F;
+        if (!pressureFromRaw(input.hx710bRaw, hx710bCalibration_,
+                             pressureKpa)) {
+            output.channelQuality[channelIndex] =
+                DataQualityState::OUT_OF_RANGE;
+            return project::models::ApiStatus::InvalidArgument;
+        }
+
+        output.hx710bCalibratedValue = pressureKpa;
+        output.hx710bCalibratedValueValid = true;
+        output.channelQuality[channelIndex] = DataQualityState::VALID;
+        const auto baseline =
+            hx710bBaseline(input.hx710bStatus.timestampMs);
+        output.hx710bBaselineKpa = baseline.pressureKpa;
+        output.hx710bBaselineSampleCount =
+            baseline.validSampleCount;
+        output.hx710bBaselineValid = baseline.valid;
+        return project::models::ApiStatus::Ok;
+    }
+
     return project::models::ApiStatus::NotInitialized;
+}
+
+CalibrationService::CalibrationService(
+    const project::drivers::Hx710bCalibration& hx710bCalibration,
+    const Hx710bBaselinePolicy& baselinePolicy) noexcept
+    : hx710bCalibration_(hx710bCalibration),
+      baselinePolicy_(baselinePolicy),
+      mode_(project::drivers::isApprovedHx710bPressureCalibration(
+                hx710bCalibration)
+                ? CalibrationMode::Hx710bPressureOnly
+                : CalibrationMode::RawOnly) {}
+
+Hx710bBaselineStatus CalibrationService::updateHx710bBaseline(
+    const project::models::ProcessedFrame& frame,
+    const std::uint64_t nowMs) noexcept {
+    if (mode_ != CalibrationMode::Hx710bPressureOnly ||
+        !baselinePolicyIsConfigured(baselinePolicy_)) {
+        return Hx710bBaselineStatus::Disabled;
+    }
+    if (!frame.hx710bCalibratedValueValid ||
+        frame.channelQuality[static_cast<std::size_t>(
+            SensorChannel::Hx710bCalibratedValue)] !=
+            DataQualityState::VALID ||
+        frame.hx710bTransducerIdentityId !=
+            hx710bCalibration_.transducerIdentityId ||
+        frame.hx710bCalibrationVersion != hx710bCalibration_.version ||
+        !std::isfinite(frame.hx710bCalibratedValue) ||
+        frame.hx710bCalibratedValue <
+            hx710bCalibration_.minimumPressureKpa ||
+        frame.hx710bCalibratedValue >
+            hx710bCalibration_.maximumPressureKpa ||
+        frame.hx710bSampleTimestampMs > nowMs ||
+        nowMs - frame.hx710bSampleTimestampMs >
+            baselinePolicy_.maximumSampleAgeMs) {
+        return hx710bBaseline(nowMs).status ==
+                       Hx710bBaselineStatus::Stale
+                   ? Hx710bBaselineStatus::Stale
+                   : Hx710bBaselineStatus::InsufficientData;
+    }
+    if (hx710bBaselineSampleCount_ != 0U &&
+        frame.hx710bSampleTimestampMs <= hx710bBaselineLastSampleMs_) {
+        return hx710bBaseline(nowMs).status;
+    }
+    if (hx710bBaselineSampleCount_ != 0U &&
+        frame.hx710bSampleTimestampMs -
+                hx710bBaselineLastSampleMs_ >
+            baselinePolicy_.maximumSampleAgeMs) {
+        resetHx710bBaseline();
+    }
+    if (hx710bBaselineReady_) {
+        return hx710bBaseline(nowMs).status;
+    }
+
+    if (hx710bBaselineSampleCount_ == 0U) {
+        hx710bBaselineStartMs_ = frame.hx710bSampleTimestampMs;
+        hx710bBaselineSumKpa_ = 0.0;
+    }
+    hx710bBaselineSumKpa_ += frame.hx710bCalibratedValue;
+    ++hx710bBaselineSampleCount_;
+    hx710bBaselineLastSampleMs_ = frame.hx710bSampleTimestampMs;
+    hx710bBaselineReady_ =
+        hx710bBaselineSampleCount_ >=
+            baselinePolicy_.minimumValidSamples &&
+        frame.hx710bSampleTimestampMs >= hx710bBaselineStartMs_ &&
+        frame.hx710bSampleTimestampMs - hx710bBaselineStartMs_ >=
+            baselinePolicy_.windowDurationMs;
+    return hx710bBaselineReady_ ? Hx710bBaselineStatus::Ready
+                                : Hx710bBaselineStatus::InsufficientData;
+}
+
+Hx710bBaselineSnapshot CalibrationService::hx710bBaseline(
+    const std::uint64_t nowMs) const noexcept {
+    Hx710bBaselineSnapshot snapshot{};
+    if (mode_ != CalibrationMode::Hx710bPressureOnly ||
+        !baselinePolicyIsConfigured(baselinePolicy_)) {
+        snapshot.status = Hx710bBaselineStatus::Disabled;
+        return snapshot;
+    }
+    snapshot.validSampleCount = hx710bBaselineSampleCount_;
+    snapshot.windowStartMs = hx710bBaselineStartMs_;
+    snapshot.lastSampleMs = hx710bBaselineLastSampleMs_;
+    if (!hx710bBaselineReady_ ||
+        hx710bBaselineSampleCount_ == 0U) {
+        snapshot.status = Hx710bBaselineStatus::InsufficientData;
+        return snapshot;
+    }
+    if (nowMs < hx710bBaselineLastSampleMs_ ||
+        nowMs - hx710bBaselineLastSampleMs_ >
+            baselinePolicy_.maximumSampleAgeMs) {
+        snapshot.status = Hx710bBaselineStatus::Stale;
+        return snapshot;
+    }
+    snapshot.pressureKpa = static_cast<float>(
+        hx710bBaselineSumKpa_ /
+        static_cast<double>(hx710bBaselineSampleCount_));
+    snapshot.valid = std::isfinite(snapshot.pressureKpa);
+    snapshot.status = snapshot.valid ? Hx710bBaselineStatus::Ready
+                                    : Hx710bBaselineStatus::InsufficientData;
+    return snapshot;
+}
+
+void CalibrationService::resetHx710bBaseline() noexcept {
+    hx710bBaselineSumKpa_ = 0.0;
+    hx710bBaselineSampleCount_ = 0U;
+    hx710bBaselineStartMs_ = 0U;
+    hx710bBaselineLastSampleMs_ = 0U;
+    hx710bBaselineReady_ = false;
 }
 
 }  // namespace project::services

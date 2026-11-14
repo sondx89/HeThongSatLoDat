@@ -1,106 +1,68 @@
-# Rain sensor driver
+# YL-83 / FC-37 rain sensing
 
-## Class diagram
+## Board and calibration inputs
 
-```mermaid
-classDiagram
-    class ISensor {
-        <<interface>>
-        +begin() SensorStatus
-        +read(SensorFrame&) SensorStatus
-        +selfTest() SensorStatus
-    }
-    class RainSensorDriver {
-        -IAdcReader& adcReader
-        -BoardPins& boardPins
-        -RainSensorDriverConfig config
-        -int32 samples[16]
-        -uint64 sampleSum
-        +begin() SensorStatus
-        +read(SensorFrame&) SensorStatus
-        +readSample(RainSensorSample&) RainSensorStatus
-        +selfTest() SensorStatus
-    }
-    class IAdcReader {
-        <<interface>>
-        +readRaw(pin, output) bool
-    }
-    class ArduinoAdcReader {
-        +readRaw(pin, output) bool
-    }
-    class RainSensorDriverConfig {
-        +uint16 adcMaximumCount
-        +uint8 filterWindowSamples
-        +RainCalibrationPoint calibrationPoints[2]
-        +uint32 calibrationVersion
-        +bool adcConfigurationVerified
-        +bool wetnessSemanticsVerified
-        +bool calibrationConfigured
-    }
-    class RainCalibrationPoint {
-        +uint16 adcCount
-        +float wetnessPercent
-    }
-    class RainSensorSample {
-        +int32 rawAdcCount
-        +float filteredAdcCount
-        +float wetnessRelativePercent
-        +uint8 filterSampleCount
-        +uint32 qualityFlags
-        +bool valid
-    }
-    class SensorManager
-    class BoardPins
+AO uses `BoardPins::adc.rainSensor`; DO uses the separate
+`BoardPins::digitalSensors.rainSensor`. Both remain unset in the default board
+profile. The DOCX GPIO7/GPIO10 values are wiring references only and are not
+production assignments.
 
-    ISensor <|.. RainSensorDriver
-    IAdcReader <|.. ArduinoAdcReader
-    RainSensorDriver --> IAdcReader : injected ADC source
-    RainSensorDriver --> BoardPins : uses adc.rainSensor
-    RainSensorDriver --> RainSensorDriverConfig : owns copy
-    RainSensorDriver --> RainSensorSample : fills
-    SensorManager --> ISensor : owns acquisition sequence
+AO requires a verified ADC range, wetness semantics, calibration version and
+two distinct measured ADC endpoints, one calibrated to 0% and the other to
+100%. Calibration maps the filtered ADC count to a relative surface-wetness
+proxy. The DOCX example endpoints
+(dry=4095, wet=0) are not defaults. This proxy is not rainfall amount,
+rainfall intensity or mm/h.
+
+DO is optional and has a separate validity status. When enabled, its active-low
+polarity must be explicitly verified in configuration and physically confirmed
+before use; low means wet. AO can remain usable if DO is unavailable, and DO
+can remain usable while AO is warming, stale or faulty.
+
+## Acquisition and accumulation
+
+- Each AO reading is the mean of exactly eight in-range ADC conversions. The
+  driver performs at most one conversion per call, with at least 2 ms between
+  conversions; it never blocks to insert a delay. A reading remains pending
+  until the eight-conversion burst completes.
+- `accumulationSamplePeriodMs` must be at least 500 ms. The rain window keeps a
+  bounded history (256 timestamped points); `maximumSampleGapMs` must cover
+  the sample period plus the 14 ms minimum burst span and remain below 120 s.
+- Wetness is held constant from each completed AO reading until the next
+  reading (zero-order hold). The driver integrates the actual elapsed
+  milliseconds, clips the result to the trailing 120,000 ms, and expresses it
+  as equivalent wet-seconds: `integral(wetnessPercent / 100 * dtSeconds)`.
+- The accumulator is valid only when the history covers the complete trailing
+  120 seconds and every observed interval, including the latest sample age, is
+  no greater than `maximumSampleGapMs`. A larger gap invalidates and restarts
+  the accumulation history. Missing data is never inserted as a dry/zero
+  sample. The configured maximum gap defines how long the last known wetness
+  may be held across irregular or missed polls.
+- `rainAccCoverageMs`, `rainAccValid` and `rainAccumulationStatus` distinguish
+  a warming, stale or incomplete window from a valid accumulation. AO, DO and
+  accumulation have separate statuses in `SensorFrame`; `DataQualityService`
+  preserves them independently in `ProcessedFrame`.
+
+The DOCX watch/extreme values (30/90 equivalent wet-seconds) are demo
+thresholds only. They are not rainfall measurements or geotechnically
+validated limits. `rainRateMmH` remains unsupported and invalid.
+
+## Host tests
+
+The fake-ADC/digital tests cover dry/wet endpoints, active-low polarity,
+independent AO/DO failures, eight-sample acquisition, irregular-interval
+integration, trailing-window eviction, gap invalidation and fail-closed
+configuration. From the project directory, run:
+
+```powershell
+$env:PATH = 'C:\msys64\ucrt64\bin;' + $env:PATH
+$exe = Join-Path $env:TEMP 'rain_host_tests.exe'
+g++ -std=c++17 -Wall -Wextra -Werror `
+  -I test\test_rain_host\fakes -I include -I include\project `
+  test\test_rain_host\test_rain_host.cpp `
+  src\Drivers\RainSensorDriver.cpp -o $exe
+if ($LASTEXITCODE -eq 0) { & $exe; Remove-Item -LiteralPath $exe -Force }
 ```
 
-## Behavior
-
-The ADC reader is shared with the soil moisture driver. The rain GPIO comes
-from `BoardPins::adc.rainSensor`; no pin number or ADC scale is embedded in the
-driver. `adcMaximumCount`, a finite moving-average window (maximum 16 samples),
-ADC verification, wetness semantics verification, and the calibration version
-must all be explicitly supplied before initialization succeeds.
-
-Each successful ADC sample enters the fixed-size moving average. The average
-uses the number collected during filter warm-up, with
-`FilterWindowWarming` set until the configured window fills. The current raw
-count is retained separately from the filtered count. ADC read errors and
-out-of-range values clear the filter to avoid mixing stale history into
-subsequent valid data.
-
-Two calibration points map the filtered ADC count to a relative wetness
-percentage using linear interpolation. ADC counts must be distinct and within
-the configured ADC maximum; wetness values must be finite, distinct, and in
-`[0, 100]`. Values outside the calibration interval clamp to the endpoint
-wetness, and a corresponding clamp quality flag is set. ADC polarity is not
-assumed.
-
-## Quality and contract limits
-
-`RainSensorSample::qualityFlags` and `SensorStatus::qualityFlags` use the
-driver-local `RainQualityFlag` bit assignments in `RainSensorDriver.h`; they
-indicate an in-range ADC reading, valid calibration, filter warm-up, and
-endpoint clamping. A failed ADC conversion, out-of-range count, or invalid
-calibration returns an explicit `RainSensorStatus` and an invalid sensor
-status. Numeric zero is never used as a failure indication.
-
-On success, the `ISensor` adapter provides `SensorFrame::rainRaw`,
-`rainWetnessRelativePct`, and its explicit validity flag. It does not populate
-`rainRateMmH`: a YL-83 plate does not provide calibrated rainfall rate or amount.
-The sensor documents leave analog/digital mode, electrical ADC range, wetness
-semantics, threshold/calibration, and sample-window parameters unresolved.
-Therefore this driver requires verified configuration and supplies no hardware,
-filter, or calibration defaults. This relative wetness percentage must not be
-treated as mm/h or rainfall total.
-
-As with the other acquisition drivers, `TaskSensor` should be the sole owner;
-filter state has no internal mutex. Sample timing is controlled by the sensor
-manager/task and is not guessed inside the driver.
+These tests do not approve GPIO assignments, ADC settings, sensor polarity,
+calibration or physical rain interpretation.

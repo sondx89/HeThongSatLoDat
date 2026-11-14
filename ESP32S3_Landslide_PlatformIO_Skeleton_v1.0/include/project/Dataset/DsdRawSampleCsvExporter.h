@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <string_view>
 
+#include "Dataset/CsvArtifactExporter.h"
 #include "Dataset/DatasetValidator.h"
 #include "Models/DataContractTypes.h"
 
@@ -68,19 +69,17 @@ public:
     DsdRawSampleExportStatus finish(
         RawDatasetManifest& manifest) noexcept;
 
-    std::size_t bytesWritten() const noexcept { return bytesWritten_; }
-    std::uint64_t rowsWritten() const noexcept { return rowsWritten_; }
+    std::size_t bytesWritten() const noexcept {
+        return artifactWriter_.bytesWritten();
+    }
+    std::uint64_t rowsWritten() const noexcept {
+        return artifactWriter_.rowsWritten();
+    }
 
 private:
-    DsdRawSampleExportStatus appendBytes(const char* bytes,
-                                         std::size_t size) noexcept;
-
-    char* const output_;
-    const std::size_t capacity_;
     const DsdRawSampleExportConfig config_;
-    Sha256 sha256_{};
-    std::size_t bytesWritten_{0U};
-    std::uint64_t rowsWritten_{0U};
+    std::array<char, kMaxRawCsvRecordBytes> rowBuffer_{};
+    CsvArtifactWriter artifactWriter_;
     bool begun_{false};
     bool finished_{false};
     bool failed_{false};

@@ -140,6 +140,7 @@ project::models::SensorFrame sensorFrameFromRawCsv(
                         frame.timestampMs};
     frame.rainStatus = {SensorHealth::Healthy, valid[4U], 0U, 0U,
                         frame.timestampMs};
+    frame.rainAoStatus = frame.rainStatus;
     frame.hx710bStatus = {SensorHealth::Healthy, valid[5U], 0U, 0U,
                           frame.timestampMs};
     return frame;
@@ -248,6 +249,8 @@ struct IntegrationSensor final : project::drivers::ISensor {
                 frame.rainRaw = 250;
                 frame.rainWetnessRelativePct = 25.0F;
                 frame.rainWetnessValid = true;
+                frame.rainAoStatus =
+                    {SensorHealth::Healthy, true, 0U, 0U, 1000U};
                 break;
             case 'H':
                 frame.hx710bRaw = 123456;
@@ -536,6 +539,7 @@ project::models::SensorFrame sensorFrameFromSynthetic(
                         0U, 0U, observation.timestampMs};
     frame.rainStatus = {SensorHealth::Healthy, observation.channelValid[4U],
                         0U, 0U, observation.timestampMs};
+    frame.rainAoStatus = frame.rainStatus;
     frame.hx710bStatus = {SensorHealth::Healthy,
                           observation.channelValid[5U], 0U, 0U,
                           observation.timestampMs};

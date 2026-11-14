@@ -26,8 +26,8 @@ struct RiskEvaluationContext {
     std::uint64_t bootId{0};
     std::uint64_t sequenceNo{0};
     std::uint64_t timestampMs{0};
-    // FAULT blocks model-derived score; only an approved severe sensor rule
-    // may independently retain DANGER_TEST.
+    // FAULT blocks model-derived score. Sensor-only risk candidates are
+    // accepted only in explicit test-only builds.
     project::models::HealthState health{project::models::HealthState::Unknown};
 };
 
@@ -56,6 +56,7 @@ struct RiskManagerConfig {
     float scoreSafeBoundary{0.0F};
     float scoreMonitorBoundary{0.0F};
 
+    // Test/replay policy only; production validateConfig rejects this rule.
     bool tiltRuleEnabled{false};
     float tiltSafeMaximumDeg{0.0F};
     float tiltMonitorMaximumDeg{0.0F};

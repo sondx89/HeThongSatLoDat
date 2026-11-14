@@ -2,7 +2,7 @@
 
 **Document revision:** 1.0
 
-**Audit date:** 2026-11-02
+**Audit date:** 2026-11-13
 **Evidence:** Current headers/sources, callers, PlatformIO test filters, and
 the native unit/integration test runs recorded below. A module is not called
 production-ready merely because its source or host tests exist.
@@ -23,6 +23,7 @@ production-ready merely because its source or host tests exist.
 | `Managers/AppController` — `include/project/Managers/AppController.h`, `src/Managers/AppController.cpp` | Dependency-injected startup/shutdown state machine, ten ordered phases, reverse cleanup, inference gate, bounded-port config, health checks and status results. It has no production module adapter and is not used by `main.cpp`. | AppController tests in `test/test_system_contracts/test_system_contracts.cpp`: phase order, every startup-phase failure/reverse cleanup, inference-gate failure, shutdown order/repeat, flush failure, health failure/bounds, and unconfigured timeout. | **Implemented/host-tested protocol; production integration blocked.** TaskFramework has no stop/drain operation; StorageManager exposes no timeout-bearing flush. Adapter must enforce bounds; synchronous calls are not preempted. |
 | `Managers/ConfigManager` — header/source | Pure manifest validation and injected two-slot logical persistence: write candidate, flush, read back, validate, commit marker, select newest valid committed generation. Default constructor remains without persistence. `activeManifest()` exposes a selected Production manifest only after manager-level gate; no runtime module application occurs. | ConfigManager tests in system-contract suite: validation errors, hash checks, production fail-closed, each write/commit fault boundary, invalid candidate, successful commit, newest-corrupt fallback. | **Implemented/host-tested protocol; production persistence blocked.** No concrete adapter/field encoder/media, production composition, or hardware durability proof. |
 | `Services/CalibrationService` | Propagates frame metadata, raw values, and channel validity without applying calibration coefficients; calibration load remains not initialized. | CalibrationService tests in system-contract suite: raw/validity propagation, non-finite handling, version/schema rejection, partial-channel behavior. | **Partial/host-tested.** No approved calibration artifact, coefficients, or calibrated production output. |
+| `Dataset/CalibratedSampleCsvExporter` — `include/project/Dataset/CalibratedSampleCsvExporter.h`, `src/Dataset/CalibratedSampleCsvExporter.cpp` | Bounded host-only artifact serializer keeps raw and calibrated fields separate; RAW_ONLY leaves calibrated values empty with an explicit status/reason. | `testCalibratedSampleCsvExporterKeepsRawOnlyValuesExplicit`, `testCalibratedSampleCsvExporterAcceptsTestOnlyCalibrationAndRangeChecks`, and `testCalibratedSampleCsvExporterRejectsCalibrationIdentityMismatches` in the system-contract suite. | **Implemented/host-tested serializer; physical calibration blocked.** A test-only fixture does not approve physical conversion or calibration. |
 | `AI/SchemaRegistry` | Compares descriptors and vectors across schema identity/hash, feature count/order/units, preprocessing, window/stride/rate and validity. Production compatibility rejects test-only descriptors. | SchemaRegistry test group in system-contract suite. | **Implemented/host-tested generic validation.** Synthetic descriptors only; released FSS and actual model metadata absent, so production compatibility is blocked. |
 | `Models/Serialization` — header/source | Field-by-field bounded EventRecord JSONL v2 encode/decode. Other record types and CSV/binary serializer operations report unsupported/not implemented. No raw struct dump. | EventRecord JSONL tests in system-contract suite: round-trip, invalid args/bounds, truncation/trailing bytes, invalid type/version/enums, non-finite policy and boundary values. | **Partial/host-tested.** Six record codecs and other formats are not implemented. See `SERIALIZATION_SCHEMA.md`. |
 | `Storage/StorageManager` — header/source | Injected `IStorage` lifecycle; bounded by a configured maximum record length, synchronous borrowed input; backend false maps to I/O error and Faulted; logical shutdown. No storage layout or hardware operations. | StorageManager lifecycle/fake-backend tests in system-contract suite include begin failures/retry, append validation, partial-write error, flush failure, capacity, shutdown and write-after-shutdown. | **Implemented/host-tested lifecycle.** `IStorage` returns only bool, has no timeout/byte count/close; physical backend and durability remain blocked. |
@@ -39,20 +40,38 @@ production-ready merely because its source or host tests exist.
 | BSP watchdog and power status | `watchdogInit()`, `watchdogFeed()`, and `readPowerStatus()` remain `NotConfigured` absent approved target configuration/hardware. | No target verification. | **Not configured/blocked.** Do not claim hardware watchdog or power monitoring is operational. |
 | `main.cpp` production composition | Performs early BSP checks, then default-constructs ConfigManager and stays fail-closed when production config is unavailable. It does not construct AppController or start runtime tasks. | Source review. | **Partial, deliberately blocked.** Requires production persistence, adapters, measured runtime configuration, and approved model/FSS/hardware. |
 
-## Current test evidence
+## P01 test evidence snapshot (2026-11-13, before P02)
 
-On 2026-11-02:
+Latest run executed on 2026-11-13 from the repository root with MSYS2 UCRT64
+GCC/G++ 16.2.0 added to `PATH`:
 
-- `pio test -e native-unit-tests`: 71 passed, 0 failed.
-- `pio test -e native-integration-tests`: 3 passed, 0 failed.
-- No ESP32-S3 target build, hardware-in-loop, power-loss-on-device, or
-  deployed-model test is evidenced.
+- `pio test -d ESP32S3_Landslide_PlatformIO_Skeleton_v1.0 -e native-unit-tests`:
+  exit 0, 115/115 cases passed.
+- `pio test -d ESP32S3_Landslide_PlatformIO_Skeleton_v1.0 -e native-integration-tests`:
+  exit 0, 7/7 cases passed.
+- `pio run -d ESP32S3_Landslide_PlatformIO_Skeleton_v1.0 -e esp32-s3-devkitc-1`:
+  exit 1. Current compile errors are the `SerialDiagnostics::buildPayload`
+  declaration/definition mismatch and `HealthSnapshot` brace-assignment
+  mismatches. The prior `BoardConfig.h` `issueMask` error is fixed.
+- Hardware-in-loop, power-loss-on-device, and deployed-model tests were not run.
 
-See `BASELINE_TEST_REPORT.md` and `REQUIREMENT_TRACEABILITY.md` for limits and
-test-to-requirement links.
+The 2026-11-02 results of 71 unit and 3 integration cases are historical.
+P01's 115/7 results and target failure preceded P02. See
+`BASELINE_TEST_REPORT.md` for the latest results and
+`REQUIREMENT_TRACEABILITY.md` for test-to-requirement links.
+
+## Latest P02 test evidence (2026-11-13)
+
+- Native unit tests: 116/116 passed, exit 0.
+- Native integration tests: 7/7 passed, exit 0.
+- ESP32-S3 compile/link/image build: passed, exit 0, through a temporary
+  `Z:` alias used to avoid the non-ASCII workspace path issue.
+- No upload, HIL, or physical hardware test was run.
 
 ## Change history
 
 | Revision | Date | Change |
 |---|---|---|
+| 1.2 | 2026-11-13 | Recorded current P02 test/build evidence; retained P01 results as a dated snapshot. |
+| 1.1 | 2026-11-13 | Added the calibrated-sample exporter inventory and current P01 native/target evidence; marked earlier counts historical. |
 | 1.0 | 2026-11-02 | Replaced the stale 2026-10-30 skeleton inventory with source/test-backed implementation states and current blockers. |

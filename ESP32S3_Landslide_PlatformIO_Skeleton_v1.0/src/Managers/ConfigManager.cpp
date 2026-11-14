@@ -211,6 +211,8 @@ bool isProcessedChannel(project::models::SensorChannel channel) noexcept {
         case SensorChannel::GyroZDps:
         case SensorChannel::SoilMoisturePct:
         case SensorChannel::RainWetnessRelativePct:
+        case SensorChannel::RainDigitalWet:
+        case SensorChannel::RainAccumulationEquivalentWetSeconds:
             return true;
         case SensorChannel::ImuAccelXRaw:
         case SensorChannel::ImuAccelYRaw:
@@ -319,13 +321,31 @@ void validateSensorManagerConfig(
         addIssue(report, ManifestErrorCode::MissingField,
                  "sensorManager.samplePeriodMicros");
     }
-    for (const project::managers::SensorReadPolicy& policy :
-         config.readPolicies) {
+
+    bool hasRequiredSensor = false;
+    for (std::size_t i = 0U; i < config.availability.size(); ++i) {
+        const project::managers::SensorAvailability& availability =
+            config.availability[i];
+        hasRequiredSensor = hasRequiredSensor || availability.required;
+        if (availability.required && !availability.present) {
+            addIssue(report, ManifestErrorCode::CrossFieldMismatch,
+                     "sensorManager.availability.required");
+        }
+        if (!availability.present) {
+            continue;
+        }
+
+        const project::managers::SensorReadPolicy& policy =
+            config.readPolicies[i];
         if (policy.beginTimeoutMicros == 0U ||
             policy.timeoutMicros == 0U) {
             addIssue(report, ManifestErrorCode::MissingField,
                      "sensorManager.readPolicies.timeout");
         }
+    }
+    if (!hasRequiredSensor) {
+        addIssue(report, ManifestErrorCode::MissingField,
+                 "sensorManager.availability.required");
     }
 }
 

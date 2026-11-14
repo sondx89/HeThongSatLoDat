@@ -93,3 +93,12 @@ fails closed; it does not add a byte-count capability to the production
 Hardware backend integration remains blocked until its ownership, timeout,
 partial-write, flush/durability, storage layout, and platform-specific
 requirements are reviewed.
+
+## P14 runtime integration status
+
+The P14 runtime path is not yet composed: `TaskLogger` delegates through
+`ITaskLogWriter`, but there is no production writer joining Q_LOG/Q_EVENT to
+`CsvLogger` or a physical storage adapter. `StorageManager` remains a separate
+opaque-byte API and must not be presented as if it were the CsvLogger backend.
+Host fakes validate component behavior only; they do not prove bounded SD-card
+operations, durable flush, queue-to-file delivery, or recovery on the target.

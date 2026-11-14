@@ -78,6 +78,7 @@ bool TaskFeature::onStart() noexcept {
     featureConfigurationFailureReported_ = false;
     lastSensorBootId_ = 0U;
     lastSensorSequence_ = 0U;
+    lastSensorTimestampMs_ = 0U;
     hasLastSensorSequence_ = false;
     if (!calibration_.loadCalibration()) {
         return false;
@@ -94,6 +95,21 @@ TaskStepResult TaskFeature::runOne() noexcept {
         return queueTimeoutResult(received);
     }
 
+    const bool sameBoot =
+        hasLastSensorSequence_ &&
+        sensorFrame.bootId == lastSensorBootId_;
+    const bool outOfOrder =
+        sameBoot &&
+        (sensorFrame.sequence <= lastSensorSequence_ ||
+         sensorFrame.timestampMs <= lastSensorTimestampMs_);
+    if (outOfOrder) {
+        pipeline_.resetWindow();
+        return events_.reportFeatureRejection(
+                   FeatureRejectReason::SensorOutOfOrder, sensorFrame, nullptr)
+                   ? TaskStepResult::Progress
+                   : TaskStepResult::Failure;
+    }
+
     const bool sequenceGap =
         hasLastSensorSequence_ &&
         (sensorFrame.bootId != lastSensorBootId_ ||
@@ -108,6 +124,7 @@ TaskStepResult TaskFeature::runOne() noexcept {
     }
     lastSensorBootId_ = sensorFrame.bootId;
     lastSensorSequence_ = sensorFrame.sequence;
+    lastSensorTimestampMs_ = sensorFrame.timestampMs;
     hasLastSensorSequence_ = true;
 
     project::models::ProcessedFrame qualityFrame{};
@@ -192,7 +209,7 @@ void TaskInference::createFailureOutput(
     const project::models::FeatureVector& input,
     project::models::ModelOutput& output,
     project::models::InferenceStatus status) const noexcept {
-    output = {};
+    output = project::models::ModelOutput{};
     output.bootId = input.bootId;
     output.inferenceId = inferenceId_;
     output.timestampMs = tickToMillis(xTaskGetTickCount());
@@ -351,7 +368,7 @@ TaskDiagnostics::TaskDiagnostics(const TaskRuntimeConfig& config,
 
 bool TaskDiagnostics::collect(
     project::models::HealthSnapshot& output) const noexcept {
-    output = {};
+    output = project::models::HealthSnapshot{};
     if (!source_.collectSystemMetrics(output)) {
         return false;
     }

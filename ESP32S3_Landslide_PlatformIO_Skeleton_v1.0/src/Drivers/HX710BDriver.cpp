@@ -1,5 +1,6 @@
 #include "project/Drivers/HX710BDriver.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -10,18 +11,34 @@ namespace {
 
 bool validProtocol(const Hx710bProtocolConfig& protocol,
                    const project::bsp::BoardPins& pins) noexcept {
+    const std::uint32_t clockHalfPeriodUs =
+        protocol.clockHalfPeriodUs;
+    const std::uint32_t conversionOverrunBoundUs =
+        2U * clockHalfPeriodUs;
+    const std::uint32_t minimumConversionTimeUs =
+        2U * (static_cast<std::uint32_t>(protocol.dataBitCount) +
+              static_cast<std::uint32_t>(
+                  protocol.trailingClockPulses)) *
+        clockHalfPeriodUs;
     return pins.hx710.clock.isConfigured() &&
            pins.hx710.clock.isWellFormed() &&
            pins.hx710.data.isConfigured() &&
            pins.hx710.data.isWellFormed() &&
            pins.hx710.clock.number != pins.hx710.data.number &&
            protocol.readyTimeoutUs != 0U &&
+           protocol.readyTimeoutUs <= kHx710bMaximumReadyTimeoutUs &&
            protocol.conversionTimeoutUs != 0U &&
            protocol.clockHalfPeriodUs != 0U &&
-           protocol.dataBitCount >= 1U &&
-           protocol.dataBitCount <= 32U &&
-           protocol.trailingClockPulses >= 1U &&
-           protocol.trailingClockPulses <= 3U &&
+           protocol.dataBitCount == kHx710bDataBitCount &&
+           protocol.trailingClockPulses == kHx710bTrailingClockPulses &&
+           minimumConversionTimeUs <=
+               kHx710bMaximumReadyTimeoutUs -
+                   conversionOverrunBoundUs &&
+           protocol.conversionTimeoutUs >= minimumConversionTimeUs &&
+           protocol.conversionTimeoutUs <=
+               kHx710bMaximumReadyTimeoutUs -
+                   conversionOverrunBoundUs &&
+           protocol.signedOutput &&
            protocol.verifiedAgainstDatasheet;
 }
 
@@ -78,7 +95,7 @@ Hx710bTransportStatus ArduinoHx710bTransport::readRaw(
     for (std::uint8_t bit = 0; bit < protocol_.dataBitCount; ++bit) {
         digitalWrite(clockPin, HIGH);
         delayMicroseconds(protocol_.clockHalfPeriodUs);
-        if (static_cast<std::uint32_t>(micros() - conversionStartedUs) >=
+        if (static_cast<std::uint32_t>(micros() - conversionStartedUs) >
             protocol_.conversionTimeoutUs) {
             digitalWrite(clockPin, LOW);
             return Hx710bTransportStatus::Timeout;
@@ -89,7 +106,7 @@ Hx710bTransportStatus ArduinoHx710bTransport::readRaw(
         }
         digitalWrite(clockPin, LOW);
         delayMicroseconds(protocol_.clockHalfPeriodUs);
-        if (static_cast<std::uint32_t>(micros() - conversionStartedUs) >=
+        if (static_cast<std::uint32_t>(micros() - conversionStartedUs) >
             protocol_.conversionTimeoutUs) {
             return Hx710bTransportStatus::Timeout;
         }
@@ -102,7 +119,7 @@ Hx710bTransportStatus ArduinoHx710bTransport::readRaw(
         delayMicroseconds(protocol_.clockHalfPeriodUs);
         digitalWrite(clockPin, LOW);
         delayMicroseconds(protocol_.clockHalfPeriodUs);
-        if (static_cast<std::uint32_t>(micros() - conversionStartedUs) >=
+        if (static_cast<std::uint32_t>(micros() - conversionStartedUs) >
             protocol_.conversionTimeoutUs) {
             return Hx710bTransportStatus::Timeout;
         }
@@ -174,6 +191,10 @@ project::models::SensorStatus HX710BDriver::begin() {
     if (calibration_.configured && !diagnostics_.calibrationFactorValid) {
         incrementSaturated(diagnostics_.calibrationErrorCount);
     }
+    if (calibration_.pressureCalibrationConfigured &&
+        !isApprovedHx710bPressureCalibration(calibration_)) {
+        incrementSaturated(diagnostics_.calibrationErrorCount);
+    }
     lastStatus_ = Hx710bStatus::Ok;
     diagnostics_.lastStatus = lastStatus_;
     return makeSensorStatus(true);
@@ -191,12 +212,16 @@ project::models::SensorStatus HX710BDriver::read(
     }
 
     output.hx710bRaw = sample.rawValue;
+    output.hx710bRawSampleCount = sample.sampleCount;
+    output.hx710bTransducerIdentityId =
+        sample.transducerIdentityId;
+    output.hx710bCalibrationVersion =
+        sample.pressureCalibrationVersion;
     output.hx710bCalibrationFactor = sample.calibrationFactor;
     output.hx710bCalibrationFactorValid =
         sample.calibrationFactorValid;
     output.hx710bFactorScaledRaw = sample.factorScaledRaw;
     output.hx710bFactorScaledRawValid = sample.factorScaledRawValid;
-    output.calibrationVersion = sample.calibrationVersion;
     output.hx710bStatus = makeSensorStatus(true, sample.qualityFlags);
     return output.hx710bStatus;
 }
@@ -216,41 +241,87 @@ Hx710bStatus HX710BDriver::readSample(Hx710bSample& output) noexcept {
         return lastStatus_;
     }
 
-    std::int32_t rawValue = 0;
-    const Hx710bTransportStatus transportStatus =
-        transport_.readRaw(rawValue);
-    switch (transportStatus) {
-        case Hx710bTransportStatus::Ok:
-            break;
-        case Hx710bTransportStatus::InvalidConfiguration:
-            lastStatus_ = Hx710bStatus::InvalidConfiguration;
-            recordFailure(lastStatus_);
-            return lastStatus_;
-        case Hx710bTransportStatus::ReadFailure:
-            lastStatus_ = Hx710bStatus::ReadFailure;
-            recordFailure(lastStatus_);
-            return lastStatus_;
-        case Hx710bTransportStatus::NotInitialized:
-            lastStatus_ = Hx710bStatus::NotInitialized;
-            recordFailure(lastStatus_);
-            return lastStatus_;
-        case Hx710bTransportStatus::NotReady:
-            lastStatus_ = Hx710bStatus::NotReady;
-            recordFailure(lastStatus_);
-            return lastStatus_;
-        case Hx710bTransportStatus::Timeout:
-            lastStatus_ = Hx710bStatus::Timeout;
-            recordFailure(lastStatus_);
-            return lastStatus_;
-        case Hx710bTransportStatus::RawOutOfRange:
-            lastStatus_ = Hx710bStatus::RawOutOfRange;
-            recordFailure(lastStatus_);
-            return lastStatus_;
+    std::int64_t rawSum = 0;
+    std::uint8_t sampleCount = 0;
+    Hx710bStatus mostRecentFailure = Hx710bStatus::ReadFailure;
+    for (std::size_t attempt = 0; attempt < kMaximumReadAttempts;
+         ++attempt) {
+        std::int32_t rawValue = 0;
+        const Hx710bTransportStatus transportStatus =
+            transport_.readRaw(rawValue);
+        Hx710bStatus readStatus = Hx710bStatus::Ok;
+        switch (transportStatus) {
+            case Hx710bTransportStatus::Ok:
+                if (rawValue < kHx710bSigned24Minimum ||
+                    rawValue > kHx710bSigned24Maximum) {
+                    readStatus = Hx710bStatus::RawOutOfRange;
+                    break;
+                }
+                rawSum += rawValue;
+                ++sampleCount;
+                incrementSaturated(diagnostics_.successfulReads);
+                if (!diagnostics_.hasRawRange) {
+                    diagnostics_.minimumRaw = rawValue;
+                    diagnostics_.maximumRaw = rawValue;
+                    diagnostics_.hasRawRange = true;
+                } else {
+                    diagnostics_.minimumRaw =
+                        std::min(diagnostics_.minimumRaw, rawValue);
+                    diagnostics_.maximumRaw =
+                        std::max(diagnostics_.maximumRaw, rawValue);
+                }
+                continue;
+            case Hx710bTransportStatus::InvalidConfiguration:
+                readStatus = Hx710bStatus::InvalidConfiguration;
+                break;
+            case Hx710bTransportStatus::NotInitialized:
+                readStatus = Hx710bStatus::NotInitialized;
+                break;
+            case Hx710bTransportStatus::NotReady:
+                readStatus = Hx710bStatus::NotReady;
+                break;
+            case Hx710bTransportStatus::Timeout:
+                readStatus = Hx710bStatus::Timeout;
+                break;
+            case Hx710bTransportStatus::ReadFailure:
+                readStatus = Hx710bStatus::ReadFailure;
+                break;
+            case Hx710bTransportStatus::RawOutOfRange:
+                readStatus = Hx710bStatus::RawOutOfRange;
+                break;
+        }
+        mostRecentFailure = readStatus;
+        recordFailure(readStatus);
     }
 
-    output.rawValue = rawValue;
+    if (sampleCount == 0U) {
+        lastStatus_ = mostRecentFailure;
+        diagnostics_.lastStatus = lastStatus_;
+        return lastStatus_;
+    }
+
+    const std::int64_t roundingOffset =
+        rawSum >= 0 ? static_cast<std::int64_t>(sampleCount / 2U)
+                    : -static_cast<std::int64_t>(sampleCount / 2U);
+    output.rawValue = static_cast<std::int32_t>(
+        (rawSum + roundingOffset) / static_cast<std::int64_t>(sampleCount));
+    output.sampleCount = sampleCount;
     output.qualityFlags = hx710bQualityMask(Hx710bQualityFlag::RawValid);
+    if (sampleCount < kMaximumReadAttempts) {
+        output.qualityFlags |=
+            hx710bQualityMask(Hx710bQualityFlag::PartialSampleCount);
+    }
     output.valid = true;
+    if (isApprovedHx710bPressureCalibration(calibration_)) {
+        output.transducerIdentityId =
+            calibration_.transducerIdentityId;
+        output.pressureCalibrationVersion = calibration_.version;
+        output.qualityFlags |= hx710bQualityMask(
+            Hx710bQualityFlag::PressureCalibrationApproved);
+    } else {
+        output.qualityFlags |= hx710bQualityMask(
+            Hx710bQualityFlag::PressureCalibrationUnavailable);
+    }
     if (diagnostics_.calibrationFactorValid) {
         output.calibrationFactor = calibration_.factor;
         output.calibrationVersion = calibration_.version;
@@ -258,7 +329,7 @@ Hx710bStatus HX710BDriver::readSample(Hx710bSample& output) noexcept {
         output.qualityFlags |=
             hx710bQualityMask(Hx710bQualityFlag::CalibrationFactorValid);
         const double scaled =
-            static_cast<double>(rawValue) * calibration_.factor;
+            static_cast<double>(output.rawValue) * calibration_.factor;
         if (std::isfinite(scaled) &&
             scaled <= std::numeric_limits<float>::max() &&
             scaled >= -std::numeric_limits<float>::max()) {
@@ -277,19 +348,6 @@ Hx710bStatus HX710BDriver::readSample(Hx710bSample& output) noexcept {
                                     : Hx710bQualityFlag::CalibrationUnavailable);
     }
 
-    incrementSaturated(diagnostics_.successfulReads);
-    if (!diagnostics_.hasRawRange) {
-        diagnostics_.minimumRaw = rawValue;
-        diagnostics_.maximumRaw = rawValue;
-        diagnostics_.hasRawRange = true;
-    } else {
-        if (rawValue < diagnostics_.minimumRaw) {
-            diagnostics_.minimumRaw = rawValue;
-        }
-        if (rawValue > diagnostics_.maximumRaw) {
-            diagnostics_.maximumRaw = rawValue;
-        }
-    }
     lastStatus_ = Hx710bStatus::Ok;
     diagnostics_.lastStatus = lastStatus_;
     return lastStatus_;
@@ -325,8 +383,13 @@ project::models::SensorStatus HX710BDriver::makeSensorStatus(
     const std::uint32_t qualityFlags) const noexcept {
     project::models::SensorStatus status{};
     status.valid = valid;
-    status.health = valid ? project::models::SensorHealth::Healthy
-                          : project::models::SensorHealth::Fault;
+    status.health =
+        !valid ? project::models::SensorHealth::Fault
+               : ((qualityFlags & hx710bQualityMask(
+                                      Hx710bQualityFlag::PartialSampleCount)) !=
+                          0U
+                      ? project::models::SensorHealth::Degraded
+                      : project::models::SensorHealth::Healthy);
     status.qualityFlags = qualityFlags;
     return status;
 }

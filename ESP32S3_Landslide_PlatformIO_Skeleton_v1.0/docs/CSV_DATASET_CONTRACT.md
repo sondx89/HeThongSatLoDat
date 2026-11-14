@@ -3,11 +3,13 @@
 **Status:** Host writer/schema contract aligned to supplied DSD v1.2. The
 controlled DSD remains DRAFT; this document does not approve it. The bounded
 row writer, raw-core header, host-only bounded parser, raw-sample validator,
-and bounded raw-core exporter are implemented. Host evaluation summary and
-feature-distribution reports are implemented; calibrated/window/feature/
+bounded raw-core exporter, bounded v1 JSON manifest serializer/parser, bounded
+window, feature, and calibrated-sample exporters are implemented. Host
+evaluation summary and feature-distribution reports are implemented;
 annotation exporters and row-level evaluation/residual export remain
-unimplemented. The raw-only replay composition is host-test-only and does not
-produce model-eligible features.  
+unimplemented. Physical calibration remains unconfigured, so calibrated
+production values are not available. The raw-only replay composition is
+host-test-only and does not produce model-eligible features.
 **Date:** 2026-11-02
 
 ## 1. Purpose and separation
@@ -75,6 +77,49 @@ the emitted bytes. Pass the exported buffer and manifest to
 `DatasetValidator` before replay. The API is host-only and does not assign
 physical units, derive quality, or create labels.
 
+### dataset_manifest.json v1
+
+`DatasetManifestDocument` persists the typed raw manifest plus the metadata
+needed to identify and qualify `raw_samples.csv`. Its JSON
+`manifest_schema_version` is project-local version `1`, independent of the
+`dsd_document_version` (`1.2`) and the raw artifact schema version (`1`).
+`artifact_schema_sha256` is SHA-256 over the exact generated 36-column header
+bytes, including the terminating LF. `artifact_sha256` is the SHA-256 over the exact CSV bytes, including header and record terminators; it
+is not computed from parsed or normalized rows.
+
+The v1 serializer emits a canonical compact key order and lowercase hexadecimal
+SHA-256 strings, UTF-8 strings, unsigned decimal integers, fixed channel-
+presence and rejection-count arrays, up to eight source IDs, and one trailing
+LF. It records firmware/config/calibration/FSS/model IDs; generator version and
+seed or replay-source hash; creation time and tool version; accepted/rejected
+rows and per-reason counts; split policy; target-contract ID/state; limitations
+and approval state. Values that are not known or do not apply must be supplied
+explicitly as `UNKNOWN`, `UNDEFINED`, or `NOT_APPLICABLE` where the field
+contract permits; empty/missing required values are rejected. Synthetic
+provenance requires `GT5`, a generator version and seed, and no replay hash.
+Replay provenance requires a valid replay-source SHA-256 and marks generator
+metadata not applicable. A manifest does not approve any referenced ID or
+contract. Do not serialize secrets.
+
+Serialization writes to a caller-owned bounded buffer. Parsing accepts at
+most `kMaxDatasetManifestJsonBytes` (8192) and uses caller-owned string
+storage; all parsed `string_view` fields remain valid only while that storage
+remains alive and unchanged. It permits up to
+`kMaxDatasetManifestSourceIds` (8) source IDs. The serializer reports the
+exact JSON byte count, including the final LF; the schema-hash helper writes
+exactly 64 lowercase hexadecimal bytes without a NUL terminator. The parser
+rejects malformed JSON,
+duplicate/unknown/missing fields, unsupported versions, invalid UTF-8,
+invalid provenance, and inconsistent counts. Call
+`DatasetValidator::validateRawSamples` on the original artifact bytes, then
+`validateDatasetManifestResult` with its report to verify the exact artifact
+digest, byte/row counts, and accepted/rejected reason counts.
+
+Backward compatibility is strict: v1 readers accept only the complete v1
+field set and reject unknown fields or other versions. Any field or semantic
+change requires a new manifest schema version; no missing field receives a
+silent default. The existing typed `RawDatasetManifest` API remains available.
+
 The raw core has no per-channel acquisition timestamp. Replay can preserve
 the archived quality token but cannot reconstruct stale age for an individual
 channel from this artifact alone; retain required timing detail in an
@@ -118,13 +163,93 @@ generator ID/version/seed; GT5 does not establish independent ground truth.
 One row per sample. Contains physical values only when calibration is approved. Every transformed channel references `calibration_id`, transform version and unit. Raw values remain in raw_samples.csv.
 
 ### windows.csv
-One row per candidate/accepted window. Include dataset/session/boot, window ID, start/end sequence and timestamp, sample count, expected count, gap count, reset reason, quality summary, schema version and eligibility/reason fields. Final exact columns must be frozen before code implementation.
+`windows.csv` v1 has one row per identified candidate window. Its exact
+ordered header is:
+
+```csv
+dataset_id,window_id,site_id,device_id,sensor_set_id,session_id,start_boot_id,end_boot_id,start_sequence,end_sequence,start_timestamp_ms,end_timestamp_ms,window_length_samples,stride_samples,expected_samples,observed_samples,gap_count,start_config_id,end_config_id,start_calibration_id,end_calibration_id,start_feature_schema_id,end_feature_schema_id,start_feature_schema_version,end_feature_schema_version,start_feature_schema_sha256,end_feature_schema_sha256,missing_required_channel_count,stale_required_channel_count,calibration_invalid_required_channel_count,data_origin,evidence_class,feature_contract_approved,calibration_approved,window_eligible,window_rejection_reason,training_eligible,training_rejection_reason,validation_eligible,validation_rejection_reason,test_eligible,test_rejection_reason,replay_eligible,replay_rejection_reason,safety_analysis_eligible,safety_analysis_rejection_reason,annotation_refs,split_group_id,split_name,split_policy_version
+```
+
+`window_length_samples` is the configured window length; `expected_samples`
+must match it. `observed_samples` records actual samples, and `gap_count`
+records known sequence gaps. The three quality counts refer to required
+channels only. Every false eligibility field has a non-empty reason. One
+identified but invalid candidate may be retained for audit, but cannot be
+eligible for any use. Candidates without dataset/window/site/device/sensor-
+set/session identity or usable start/end coordinates are rejected and not
+written.
+
+The exporter rejects eligibility when sequence order/gap/completeness fails,
+timestamps are reversed, or start/end boot, config, calibration, or feature-
+schema identities differ; it writes the candidate with a specific rejection
+reason and all purpose eligibility false. Required-channel missing, stale,
+or calibration-invalid counts likewise fail the common window gate.
+Training/validation/test eligibility additionally requires explicit
+`feature_contract_approved` and `calibration_approved` input; CSV parse
+success alone never grants either approval. Replay and safety-analysis
+decisions are supplied by the caller and still require an eligible window.
+No sample rate or time tolerance is inferred. Unknown IDs/hashes must be
+explicitly represented as `UNKNOWN` or `NOT_APPLICABLE`; an approved feature
+contract requires a known schema ID, non-zero version, and SHA-256.
+
+Schema version `1` is project-local and distinct from the DSD document
+version and raw artifact schema. The exporter uses the shared bounded
+`CsvArtifactWriter`, so its completion report (header+rows byte count, data
+row count, exact-byte SHA-256) is available only after successful finalization.
 
 ### features.csv
-One row per window. Include window ID, schema ID/version/hash, model input kind, feature count, and features by stable feature ID/order. Do not assume candidate FSS features are approved. The actual Edge Impulse export determines whether model input is raw time-series or engineered features.
+Schema v1 writes one row per `FeatureVector`, with window identity/bounds,
+feature-schema ID/version/hash, model-input kind, explicit approval/metadata/
+compatibility flags, an export kind, eligibility state/reason, and each
+feature's schema order, stable ID, name, unit, transform ID/version,
+validity, quality, and value. The bounded host-only exporter uses
+`CsvArtifactWriter` and `CsvRowWriter`; its completion report covers the exact
+header and row bytes.
+
+The caller supplies the ordered descriptors from its registered feature
+schema and the approval/verification results. The exporter checks descriptor
+order, vector dimension, schema ID/version/hash, validity-mask bounds, quality
+state, and finite values. An invalid feature is represented by an empty value
+and its explicit validity/quality fields, never by zero. A missing/unapproved
+feature contract, unverified model metadata, incompatible schema, incomplete
+feature metadata, ineligible window, or invalid feature set yields
+`CANDIDATE_ONLY` with a reason; only when all gates pass is the row marked
+`PRODUCTION_MODEL_INPUT`. These caller-provided gates do not establish that a
+real FSS or Edge Impulse export has been approved. The actual Edge Impulse
+export determines whether model input is raw time-series or engineered
+features; this exporter infers neither feature semantics nor physical
+conversions. Schema v1 is project-local and distinct from DSD and raw artifact
+versions.
 
 ### annotations.csv
 One row per label/annotation interval. Keep independent from raw sensor measurements. Include annotation ID, dataset/site/session/boot, interval, target name/value/unit, label status, evidence class GT1-GT5, evidence reference, annotator/reviewer, confidence/uncertainty and label method version. Do not fabricate target values.
+
+### calibrated_samples.csv
+Schema v1 writes one row per supplied sensor/channel sample. Raw value/quality
+and calibrated value/quality have separate columns. The row carries sample
+identity, calibration ID/version/SHA-256, calibration sensor/channel, unit,
+declared valid range, approval/evidence fields, transform ID/version/status,
+test-only marker, and rejection reason. CSV output uses the shared bounded
+`CsvArtifactWriter` and `CsvRowWriter`.
+
+In `RAW_ONLY`, the raw value is emitted only when its quality is `VALID`;
+calibrated value and unit are empty, calibration identity/hash are `UNKNOWN`,
+version is zero, and status/reason explicitly say calibration is not
+configured. No identity calibration or conversion is inferred.
+
+The configured-artifact path accepts a caller-supplied result only when the
+descriptor has non-empty identity, version, lowercase SHA-256, sensor/channel,
+unit, finite ordered range, transform identity/version, accepted approval and
+evidence. Each row must match calibration ID/version/hash and sensor/channel.
+Only finite `VALID` calibrated values within the declared range are written;
+non-finite and out-of-range values are blanked with corresponding quality and
+rejection state. The exporter does not apply or verify a conversion itself;
+the caller must supply a value produced by the matching approved transform.
+GT5 can be used only with an explicit test-only calibration fixture and is
+never accepted as non-test calibration evidence. A `test_only` fixture is
+marked `TEST_ONLY_CALIBRATION` / `APPLIED_TEST_ONLY`; it is not production or
+field calibration evidence. Schema v1 is project-local; no controlled DSD
+schema or physical conversion is approved by this exporter.
 
 ### evaluation.csv
 Reserved for one row per prediction-window comparison, including prediction/
@@ -185,16 +310,34 @@ escaping/number formatting to the shared writer. The host-only
 `DsdRawSampleCsvParser` and `DatasetValidator` own strict parsing and raw
 dataset checks; neither changes the operational replay format.
 
+`CsvArtifactWriter` is the host-only bounded artifact lifecycle coordinator.
+Its schema descriptor supplies the artifact name, artifact schema version,
+and ordered column names; the schema version is independent of any source
+document version. It writes the header and stages each complete row with
+`CsvRowWriter`, then commits complete row bytes to a caller-owned output
+buffer while calculating byte count, data-row count, and SHA-256. The caller
+supplies a separate bounded row buffer; it must not overlap the output buffer.
+The schema column array and strings must remain valid through `begin()`, and
+the artifact-name storage must remain valid while its report is used.
+A failed row or capacity/hash error is terminal, does not commit a partial
+row, and cannot produce a complete report. Consumers must publish/use an
+artifact only after `finish()` succeeds and returns a report marked complete.
+
 Implemented API:
 - `CsvRowWriter`: caller-owned bounded buffer; append UTF-8 fields, booleans,
   integers, finite numbers, or empty invalid numeric; enforce exact field
   count and append one LF terminator.
+- `CsvArtifactWriter`: caller-owned output and row buffers; emits a schema
+  header, atomically appends complete rows, and returns schema version,
+  counts, and digest only after successful finalization. The raw-core exporter
+  uses this coordinator without changing its public API or schema.
 - `CsvSchemas.h`: exact DSD v1.2 raw-core field order/header only. It does not
   assign an artifact schema version/hash or approve the DSD.
 - `DataProvenance`: origin/evidence pair with `SYNTHETIC` restricted to `GT5`.
 - Raw artifact schema version `1` is project-local and is not the DSD document
-  version `v1.2`. The current validator accepts a typed `RawDatasetManifest`;
-  it does not parse a JSON manifest or write a quality-report file.
+  version `v1.2`. `DatasetManifestDocument` has a separate versioned JSON
+  representation for raw artifact identity and provenance; it does not write
+  a quality-report file.
 - The parser bounds each raw record at 4096 bytes. Validation uses caller-owned
   fixed-capacity identity and quarantine workspaces; capacity exhaustion is an
   explicit status, not a dropped row.
@@ -206,10 +349,9 @@ the duration of the call. A row is consumable only after `finish()` returns
 `Ok`; after any error `data()` returns null and no truncated row is exposed.
 
 Not implemented here: `DatasetExporter`, calibrated/window/feature/annotation/
-evaluation serializers, JSON manifest parsing, or end-to-end replay through
-quality/window/inference stages. The parser hashes exact input bytes and the
-validator checks that hash against the caller-provided typed manifest; this is
-not a complete manifest-file workflow.
+evaluation serializers, quality-report file output, or end-to-end replay
+through quality/window/inference stages. The JSON manifest workflow applies to
+the current raw-sample artifact only.
 
 No component should independently reimplement quoting or decimal formatting.
 
@@ -230,3 +372,10 @@ transitions, channel presence, manifest hashes/counts, workspace failures,
 record-size boundaries, and deterministic repeated validation. A05/A08/A09
 own downstream quality eligibility, annotation provenance and leakage tests;
 none is claimed by this writer.
+
+T02 manifest tests cover deterministic JSON output, round-trip parsing,
+required-field/version/JSON rejection, bounded-storage failures, provenance
+and schema-hash validation, and exact artifact hash/byte/row/rejection-count
+comparison against the validator report. Executed validation: `pio test -e
+native-unit-tests` — exit 0, 104/104 test cases passed; `pio test -e
+native-integration-tests` — exit 0, 7/7 test cases passed.

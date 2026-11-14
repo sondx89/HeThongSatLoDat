@@ -27,9 +27,16 @@ struct SensorReadPolicy {
     std::uint32_t retryBackoffMicros{0};
 };
 
+struct SensorAvailability {
+    bool present{true};
+    bool required{true};
+};
+
 struct SensorManagerConfig {
     std::uint64_t bootId{0};
     std::uint32_t samplePeriodMicros{0};
+    std::array<SensorAvailability,
+               static_cast<std::size_t>(SensorSlot::Count)> availability{};
     std::array<SensorReadPolicy,
                static_cast<std::size_t>(SensorSlot::Count)> readPolicies{};
 };
@@ -66,6 +73,12 @@ public:
                   project::drivers::ISensor& hx710b,
                   const SensorManagerConfig& config,
                   ISensorManagerClock& clock) noexcept;
+    SensorManager(project::drivers::ISensor* imu,
+                  project::drivers::ISensor* soil,
+                  project::drivers::ISensor* rain,
+                  project::drivers::ISensor* hx710b,
+                  const SensorManagerConfig& config,
+                  ISensorManagerClock& clock) noexcept;
 
     bool beginAll() noexcept;
     bool pollDue(std::uint64_t nowMicros) noexcept;
@@ -74,19 +87,20 @@ public:
 
 private:
     bool validateConfig() const noexcept;
+    project::drivers::ISensor* sensorFor(SensorSlot slot) const noexcept;
     project::models::SensorStatus beginSensor(
         project::drivers::ISensor& sensor,
         SensorSlot slot) noexcept;
     project::models::SensorStatus readSensor(
-        project::drivers::ISensor& sensor,
+        project::drivers::ISensor* sensor,
         SensorSlot slot,
         project::models::SensorFrame& sensorFrame) noexcept;
     SensorManagerDiagnostics& mutableDiagnostics(SensorSlot sensor) noexcept;
 
-    project::drivers::ISensor& imu_;
-    project::drivers::ISensor& soil_;
-    project::drivers::ISensor& rain_;
-    project::drivers::ISensor& hx710b_;
+    project::drivers::ISensor* imu_;
+    project::drivers::ISensor* soil_;
+    project::drivers::ISensor* rain_;
+    project::drivers::ISensor* hx710b_;
     const SensorManagerConfig config_;
     ISensorManagerClock& clock_;
     std::array<SensorManagerDiagnostics,

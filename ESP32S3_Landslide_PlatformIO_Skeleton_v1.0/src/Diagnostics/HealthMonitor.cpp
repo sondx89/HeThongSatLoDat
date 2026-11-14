@@ -107,11 +107,11 @@ HealthMonitorStatus HealthMonitor::collectSystemMetricsStatus(
 HealthMonitorStatus HealthMonitor::captureSnapshot(
     std::uint64_t sequenceNo,
     project::models::HealthSnapshot& output) noexcept {
-    output = {};
+    output = project::models::HealthSnapshot{};
     const HealthMonitorStatus systemStatus =
         collectSystemMetricsStatus(output);
     if (systemStatus != HealthMonitorStatus::Ok) {
-        output = {};
+        output = project::models::HealthSnapshot{};
         return systemStatus;
     }
     output.sequenceNo = sequenceNo;
@@ -126,7 +126,7 @@ HealthMonitorStatus HealthMonitor::captureSnapshot(
         }
         if (output.taskStackMetricCount >=
             project::models::HealthSnapshot::kMaxTaskMetrics) {
-            output = {};
+            output = project::models::HealthSnapshot{};
             return HealthMonitorStatus::MetricCapacityExceeded;
         }
 
@@ -153,14 +153,14 @@ HealthMonitorStatus HealthMonitor::captureSnapshot(
     for (const project::queues::QueueId queueId : kQueueIds) {
         if (output.queueMetricCount >=
             project::models::HealthSnapshot::kMaxQueueMetrics) {
-            output = {};
+            output = project::models::HealthSnapshot{};
             return HealthMonitorStatus::MetricCapacityExceeded;
         }
         project::queues::QueueStats stats{};
         const project::queues::QueueRegistryStatus queueStatus =
             queues_.getStats(queueId, stats);
         if (queueStatus != project::queues::QueueRegistryStatus::Ok) {
-            output = {};
+            output = project::models::HealthSnapshot{};
             return mapQueueStatus(queueStatus);
         }
 

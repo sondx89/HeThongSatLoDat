@@ -285,7 +285,7 @@ SerialDiagnosticsStatus SerialDiagnostics::sendError(
     return SerialDiagnosticsStatus::Ok;
 }
 
-SerialDiagnosticsStatus SerialDiagnostics::buildPayload(
+bool SerialDiagnostics::buildPayload(
     DiagnosticsCommand command, const DiagnosticsSnapshot& snapshot,
     char* output, std::size_t capacity, std::size_t& length) const noexcept {
     BoundedWriter writer(output, capacity);
@@ -541,10 +541,10 @@ SerialDiagnosticsStatus SerialDiagnostics::buildPayload(
     }
 
     if (!writer.good()) {
-        return SerialDiagnosticsStatus::OutputTooLarge;
+        return false;
     }
     length = writer.length();
-    return SerialDiagnosticsStatus::Ok;
+    return true;
 }
 
 SerialDiagnosticsStatus SerialDiagnostics::processLine() noexcept {
@@ -595,9 +595,8 @@ SerialDiagnosticsStatus SerialDiagnostics::processLine() noexcept {
     }
 
     std::size_t payloadLength = 0U;
-    const SerialDiagnosticsStatus payloadStatus = buildPayload(
-        command, snapshot_, payload_, sizeof(payload_), payloadLength);
-    if (payloadStatus != SerialDiagnosticsStatus::Ok) {
+    if (!buildPayload(command, snapshot_, payload_, sizeof(payload_),
+                      payloadLength)) {
         return sendError(ErrorCode::OutputTooLarge, "error");
     }
 

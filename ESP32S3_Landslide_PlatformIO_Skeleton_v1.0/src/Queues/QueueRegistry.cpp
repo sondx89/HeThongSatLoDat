@@ -16,6 +16,19 @@ static_assert(std::is_trivially_copyable<project::models::RiskAssessment>::value
 static_assert(std::is_trivially_copyable<project::models::EventRecord>::value,
               "Q_EVENT payload must be trivially copyable");
 
+namespace {
+
+void incrementSaturated(std::atomic<std::uint32_t>& value) noexcept {
+    std::uint32_t current = value.load(std::memory_order_relaxed);
+    while (current != std::numeric_limits<std::uint32_t>::max() &&
+           !value.compare_exchange_weak(current, current + 1U,
+                                        std::memory_order_relaxed,
+                                        std::memory_order_relaxed)) {
+    }
+}
+
+}  // namespace
+
 QueueRegistry& QueueRegistry::instance() noexcept {
     static QueueRegistry registry;
     return registry;
@@ -154,7 +167,7 @@ QueueRegistryStatus QueueRegistry::send(QueueSlot<T>& slot, const T& item,
         return QueueRegistryStatus::Ok;
     }
 
-    slot.droppedCount.fetch_add(1, std::memory_order_relaxed);
+    incrementSaturated(slot.droppedCount);
     return waitTicks == 0 ? QueueRegistryStatus::QueueFull
                           : QueueRegistryStatus::Timeout;
 }

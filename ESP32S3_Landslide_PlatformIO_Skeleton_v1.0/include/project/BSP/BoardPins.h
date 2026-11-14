@@ -1,8 +1,12 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace project::bsp {
+
+inline constexpr std::size_t kSoilMoistureChannelCount = 3;
 
 struct GpioPin {
     static constexpr std::int16_t kUnconfigured = -1;
@@ -28,7 +32,7 @@ struct I2cPins {
 };
 
 struct AdcPins {
-    GpioPin soilMoisture{};
+    std::array<GpioPin, kSoilMoistureChannelCount> soilMoisture{};
     GpioPin rainSensor{};
 };
 
@@ -92,7 +96,9 @@ constexpr bool pinsDoNotConflict(const BoardPins& pins) noexcept {
     const GpioPin allPins[] = {
         pins.imuI2c.sda,
         pins.imuI2c.scl,
-        pins.adc.soilMoisture,
+        pins.adc.soilMoisture[0],
+        pins.adc.soilMoisture[1],
+        pins.adc.soilMoisture[2],
         pins.adc.rainSensor,
         pins.digitalSensors.soilMoisture,
         pins.digitalSensors.rainSensor,

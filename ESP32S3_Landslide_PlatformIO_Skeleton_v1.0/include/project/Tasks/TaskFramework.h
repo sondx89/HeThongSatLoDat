@@ -28,7 +28,9 @@ enum class TaskStatus : std::uint8_t {
     InvalidConfiguration,
     AlreadyStarted,
     CreateFailed,
-    StartFailed
+    StartFailed,
+    NotStarted,
+    StopTimeout
 };
 
 enum class TaskSchedule : std::uint8_t {
@@ -87,14 +89,14 @@ private:
         std::atomic<TaskHandle_t> handle{nullptr};
         std::atomic<std::uint32_t> progressCount{0};
         std::atomic<std::uint32_t> failureCount{0};
-        std::atomic<std::uint32_t> deadlineMissCount{0};
+        mutable std::atomic<std::uint32_t> deadlineMissCount{0};
         std::atomic<TickType_t> lastProgressTick{0};
         std::atomic<TickType_t> createdTick{0};
         std::atomic<TickType_t> heartbeatTimeoutTicks{0};
         std::atomic<bool> hasProgress{false};
         std::atomic<bool> registered{false};
         std::atomic<bool> exited{false};
-        std::atomic<bool> stale{false};
+        mutable std::atomic<bool> stale{false};
         std::atomic<UBaseType_t> lastStackHighWaterWords{0};
     };
 
@@ -150,6 +152,8 @@ class TaskFramework final {
 public:
     explicit TaskFramework(const std::array<TaskBase*, kTaskCount>& tasks) noexcept;
     TaskStatus startAll() noexcept;
+    // Cooperative stop; timeout must cover each task's bounded blocking work.
+    TaskStatus stopAll(TickType_t timeoutTicks) noexcept;
     bool isRunning(TaskId id) const noexcept;
 
     TaskFramework(const TaskFramework&) = delete;

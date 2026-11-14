@@ -213,7 +213,7 @@ void TaskBase::execute() noexcept {
     }
 
     TickType_t lastWake = xTaskGetTickCount();
-    for (;;) {
+    while (runEnabled_.load(std::memory_order_acquire)) {
         const TaskStepResult result = runOne();
         if (result == TaskStepResult::Progress) {
             TaskHeartbeatRegistry::instance().reportProgress(id_);
@@ -221,6 +221,9 @@ void TaskBase::execute() noexcept {
             TaskHeartbeatRegistry::instance().reportFailure(id_);
         }
 
+        if (!runEnabled_.load(std::memory_order_acquire)) {
+            break;
+        }
         if (schedule_ == TaskSchedule::Periodic) {
             vTaskDelayUntil(&lastWake, config_.cycleTicks);
         } else if (result != TaskStepResult::Progress &&
@@ -299,6 +302,35 @@ TaskStatus TaskFramework::startAll() noexcept {
     started_ = true;
     (void)xTaskResumeAll();
     return TaskStatus::Ok;
+}
+
+TaskStatus TaskFramework::stopAll(TickType_t timeoutTicks) noexcept {
+    if (!started_) {
+        return TaskStatus::NotStarted;
+    }
+    if (timeoutTicks == 0U || timeoutTicks == portMAX_DELAY) {
+        return TaskStatus::InvalidConfiguration;
+    }
+
+    for (TaskBase* task : tasks_) {
+        task->arm(false);
+    }
+
+    const TickType_t start = xTaskGetTickCount();
+    for (;;) {
+        bool allStopped = true;
+        for (const TaskBase* task : tasks_) {
+            allStopped = allStopped && !task->isRunning();
+        }
+        if (allStopped) {
+            return TaskStatus::Ok;
+        }
+        if (static_cast<TickType_t>(xTaskGetTickCount() - start) >=
+            timeoutTicks) {
+            return TaskStatus::StopTimeout;
+        }
+        vTaskDelay(1U);
+    }
 }
 
 bool TaskFramework::isRunning(TaskId id) const noexcept {

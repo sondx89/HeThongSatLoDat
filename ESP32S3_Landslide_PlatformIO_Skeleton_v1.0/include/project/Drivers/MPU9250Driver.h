@@ -20,14 +20,16 @@ struct Mpu9250DriverConfig {
     std::uint8_t gyroConfiguration{0};
     std::uint8_t accelConfiguration{0};
     std::uint8_t accelConfiguration2{0};
-    std::uint8_t calibrationSampleCount{0};
+    std::uint16_t calibrationSampleCount{0};
     std::uint16_t calibrationIntervalMs{0};
 
     bool verifyIdentity{true};
     std::uint8_t expectedWhoAmI{0};
+    bool datasheetAssumptionsApproved{false};
+    bool tiltDefinitionApproved{false};
     float accelGPerLsb{0.0F};
     float gyroDpsPerLsb{0.0F};
-    std::array<float, 3> referenceAccelG{};
+    std::uint32_t maximumFilterGapMs{0};
 };
 
 enum class Mpu9250Status : std::uint8_t {
@@ -41,11 +43,11 @@ enum class Mpu9250Status : std::uint8_t {
     IdentityMismatch,
     CalibrationFailed,
     InvalidSample,
+    TiltDefinitionNotApproved,
     TiltCalculationPending
 };
 
 struct Mpu9250Offsets {
-    std::array<float, 3> accelRaw{};
     std::array<float, 3> gyroRaw{};
     bool valid{false};
 };
@@ -55,9 +57,13 @@ struct Mpu9250Sample {
     std::uint64_t timestampMs{0};
     project::models::ImuRawSample raw{};
     project::models::ImuPhysicalSample physical{};
+    float temperatureC{0.0F};
     float tiltAngleDeg{0.0F};
+    bool temperatureValid{false};
     bool accelValid{false};
     bool gyroValid{false};
+    bool rollValid{false};
+    bool pitchValid{false};
     bool tiltValid{false};
     Mpu9250Status tiltStatus{Mpu9250Status::TiltCalculationPending};
 };
@@ -91,7 +97,11 @@ private:
     Mpu9250Status readRaw(project::models::ImuRawSample& output) noexcept;
     Mpu9250Status calculateTiltAngle(
         const project::models::ImuPhysicalSample& physical,
-        float& tiltAngleDeg) const noexcept;
+        std::uint64_t timestampUs,
+        float& rollDeg,
+        float& pitchDeg,
+        float& tiltMaxDeg) noexcept;
+    void resetFilter() noexcept;
     project::models::SensorStatus sensorStatus(bool valid) const noexcept;
 
     TwoWire& bus_;
@@ -99,6 +109,10 @@ private:
     Mpu9250Offsets offsets_{};
     Mpu9250Status lastStatus_{Mpu9250Status::NotInitialized};
     std::uint64_t sequence_{0};
+    std::uint64_t lastFilterTimestampUs_{0};
+    float filteredRollDeg_{0.0F};
+    float filteredPitchDeg_{0.0F};
+    bool filterInitialized_{false};
     bool initialized_{false};
 };
 

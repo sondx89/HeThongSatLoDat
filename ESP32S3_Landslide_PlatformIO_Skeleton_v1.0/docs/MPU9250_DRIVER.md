@@ -1,100 +1,88 @@
 # MPU9250 driver
 
-## Class diagram
+## Datasheet assumptions and hardware gate
 
-```mermaid
-classDiagram
-    class ISensor {
-        <<interface>>
-        +begin() SensorStatus
-        +read(SensorFrame&) SensorStatus
-        +selfTest() SensorStatus
-    }
-    class MPU9250Driver {
-        -TwoWire& bus
-        -Mpu9250DriverConfig config
-        -Mpu9250Offsets offsets
-        -uint64 sequence
-        +initialize() Mpu9250Status
-        +calibrateOffsets() Mpu9250Status
-        +readSample(Mpu9250Sample&) Mpu9250Status
-        +begin() SensorStatus
-        +read(SensorFrame&) SensorStatus
-        +selfTest() SensorStatus
-    }
-    class Mpu9250DriverConfig {
-        +uint8 i2cAddress
-        +uint16 transactionTimeoutMs
-        +bool registerSetupConfigured
-        +uint8 register setup values
-        +float accelGPerLsb
-        +float gyroDpsPerLsb
-        +float referenceAccelG[3]
-        +uint8 calibrationSampleCount
-        +uint16 calibrationIntervalMs
-    }
-    class Mpu9250Sample {
-        +uint64 sequence
-        +uint64 timestampMs
-        +ImuRawSample raw
-        +ImuPhysicalSample physical
-        +float tiltAngleDeg
-        +bool accelValid
-        +bool gyroValid
-        +bool tiltValid
-        +Mpu9250Status tiltStatus
-    }
-    class SensorManager
-    class TwoWire
+The implementation targets the TDK/InvenSense MPU-9250 product specification
+(revision 1.1):
 
-    ISensor <|.. MPU9250Driver
-    MPU9250Driver --> TwoWire : injected I2C bus
-    MPU9250Driver --> Mpu9250DriverConfig : owns copy
-    MPU9250Driver --> Mpu9250Sample : fills
-    SensorManager --> ISensor : owns acquisition sequence
+- [MPU-9250 Product Specification](https://product.tdk.com/en/system/files/dam/doc/product/sensor/mortion-inertial/imu/data_sheet/ps-mpu-9250a-01-v1.1.pdf)
+- `WHO_AM_I` at `0x75` must return `0x71`.
+- `PWR_MGMT_1=0x00` wakes the device. `GYRO_CONFIG=0x00` selects ±250 dps
+  (131 LSB/(degree/s)); `ACCEL_CONFIG=0x00` selects ±2 g (16384 LSB/g).
+- `TEMP_OUT` is signed and converted as `raw / 333.87 + 21.0` degrees C.
+
+The driver fails configuration validation unless identity verification and
+`datasheetAssumptionsApproved` are enabled, the expected identity is `0x71`,
+the required register values and scale factors match those ranges, and the
+filter-gap bound is nonzero. These checks do not prove that a breakout board is
+genuine, correctly powered, or mounted as expected. Hardware identity,
+electrical compatibility, axis orientation and mounting remain subject to
+physical review. The DOCX wiring and scale assumptions are not production
+board approval.
+
+## Acquisition and calibration
+
+- The integrator supplies the I2C address, nonzero transaction timeout, full
+  register setup, approved datasheet assumptions and maximum filter gap.
+  Configuration defaults remain unset.
+- `initialize()` applies the I2C timeout, reads and checks `WHO_AM_I`, and
+  checks every register-write byte count and `endTransmission()` result.
+- Every register read checks pointer-write status, exact `requestFrom()` count,
+  exact available bytes and successful consumption of the complete transfer.
+  Partial reads are drained and rejected; raw output is decoded only after a
+  complete read.
+- `begin()` calibrates gyro offsets from 200 samples with 5 ms task delays
+  between samples. The sensor must be stationary during this interval.
+  Calibration is RAM-only. Accelerometer offsets are not inferred because
+  the mounting/reference pose has not been measured.
+- `readSample()` preserves signed raw accelerometer, temperature and gyro
+  counts. Physical scales and temperature are populated only after the
+  datasheet-assumption gate and identity check pass.
+- Reads use fixed-size buffers and do not allocate dynamically. The intended
+  owner is a sensor task; the driver has no internal lock. Do not call
+  initialization or calibration from an ISR.
+
+## Tilt calculation and validity
+
+For the sensor's own axes, the accelerometer angles are:
+
+```text
+rollAccel  = atan2(ay, az)
+pitchAccel = atan2(-ax, sqrt(ay*ay + az*az))
 ```
 
-## Contract and lifecycle
+The complementary filter uses alpha `0.98`, gyroscope x/y rates, and elapsed
+microseconds from the monotonic ESP timer (`dt` in seconds). The first valid
+sample initializes the filter from the accelerometer. Nonfinite values,
+non-increasing timestamps, or gaps exceeding the explicitly configured
+`maximumFilterGapMs` invalidate/reset the filter; a subsequent valid sample
+reinitializes it. `tiltAngleDeg` is `max(abs(roll), abs(pitch))`.
 
-- Construct the driver with the already selected Arduino `TwoWire` instance and
-  an explicitly populated `Mpu9250DriverConfig`. The driver does not initialize
-  GPIOs or select SDA/SCL pins. Those belong to BSP/board integration.
-- `initialize()` validates the configuration, applies the requested transaction
-  timeout, optionally checks the configured `WHO_AM_I` value, and writes the
-  explicitly supplied power, filter, sample divider, and full-scale register
-  values. `registerSetupConfigured` must be set after the integrator has
-  reviewed the complete register set. Identity checking is enabled by default;
-  the expected identity remains caller-supplied. It does not choose unresolved
-  hardware settings.
-- `calibrateOffsets()` samples a stationary sensor. It computes gyro zero-rate
-  offsets as the per-axis means and accelerometer offsets as the measured means
-  minus the configured reference gravity vector converted to raw counts. The
-  caller must position the unit in the documented reference pose and provide
-  calibration settings after those are approved. Offsets are RAM-only.
-- `begin()` runs initialization and calibration. Consequently it can block for
-  the configured calibration duration and must be called during controlled
-  sensor-task startup, not from an interrupt.
-- `readSample()` returns raw counts, calibrated acceleration in g, calibrated
-  angular rate in degrees/s, sequence and monotonic timestamp. Fixed-size
-  buffers are used; there is no dynamic allocation.
-- `read(SensorFrame&)` adapts the sample for the existing `ISensor`/
-  `SensorManager` path. The driver is intended to have one owner (`TaskSensor`);
-  it has no internal lock. I2C errors are exposed through `lastStatus()`, while
-  `SensorStatus` indicates whether the acquisition itself was valid.
+These are sensor-axis values, not an installed-board coordinate transform.
+Axis orientation, mounting, reference pose and physical tilt interpretation
+remain TBD until measured. `Mpu9250DriverConfig::tiltDefinitionApproved`
+defaults to false and must be explicitly enabled only after approving this
+formula/filter together with the installed sensor frame and mounting. Without
+that approval, the driver continues to return the complete raw sample and
+datasheet-scaled accel/gyro/temperature values, but reports
+`TiltDefinitionNotApproved`; Roll, Pitch and combined tilt remain invalid and
+are not calculated. An invalid tilt does not invalidate a complete raw IMU
+acquisition; its validity remains separate from `imuStatus`.
 
-## Explicitly unresolved tilt behavior
+## Adapter and host tests
 
-The documents list `tilt_roll_deg` and `tilt_pitch_deg`, but leave the feature
-formula, reference pose, axis/mounting transform and filtering method open. The
-requested scalar `tiltAngleDeg` is therefore only a placeholder: it remains
-invalid, and `Mpu9250Sample::tiltStatus` is `TiltCalculationPending`. The
-implementation must not invent a scalar definition or treat its initialized
-zero as a reading. Once the contract is approved, implement
-`calculateTiltAngle()` and update the sensor feature/validity mapping together.
+`ImuAdapter` is a thin `ISensor` forwarding adapter around an injected driver.
+Fake-`TwoWire` host tests cover identity/write failures, exact/short reads,
+signed raw decoding, temperature, calibration cadence, golden poses,
+real-`dt` filtering and invalid/gapped timestamps. Run the standalone host
+test with a C++17 compiler:
 
-The I2C address, bus speed and electrical/pull-up review, scale factors, register
-settings, sample rate, calibration pose/coefficients, and final MPU module
-identity are also hardware/documentation inputs—not defaults in this driver.
-Configuration currently must be supplied by the integration layer; all zero or
-otherwise invalid required values fail validation instead of silently choosing
-a value.
+```powershell
+g++ -std=c++17 -I test\test_mpu9250_host\fakes -I include -I include\project `
+  test\test_mpu9250_host\test_mpu9250_host.cpp src\Drivers\MPU9250Driver.cpp `
+  -o mpu9250_host_tests.exe
+.\mpu9250_host_tests.exe
+```
+
+The host fakes do not replace target build, wiring review, or physical
+validation.
